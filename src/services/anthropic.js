@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { getAnthropicFixture } from "../fixtures/anthropic.js";
 
 let client = null;
 
@@ -32,6 +33,25 @@ export async function createMessage({
   temperature = 0.2,
   tools
 }) {
+  const fixture = getAnthropicFixture({
+    system,
+    messages,
+    model,
+    maxTokens,
+    temperature,
+    tools
+  });
+
+  if (fixture) {
+    return fixture;
+  }
+
+  if (process.env.NO_API === "1") {
+    throw new Error(
+      "NO_API=1 — appel Anthropic interdit par le coupe-circuit local."
+    );
+  }
+
   if (!Array.isArray(messages) || messages.length === 0) {
     throw new Error("createMessage exige au moins un message.");
   }
