@@ -24,6 +24,7 @@ import {
 } from "../utils/validate-script-claims.js";
 
 import {
+  validateScriptClaimCoverage,
   validateVoiceoverClaimCoverage
 } from "../utils/validate-script-claim-coverage.js";
 
@@ -316,8 +317,18 @@ async function validateGeneratedScript(data, research, options = {}) {
   const claimCoverageValidation = {
     valid: true,
     errors: [],
-    segments: []
+    segments: [],
+    estimate: null
   };
+
+  // Le premier contrôle couvre tous les segments par batches déterministes.
+  // Les seules requêtes unitaires restantes sont les réparations et leur
+  // recontrôle, déjà incluses dans le budget maximal estimé par le batcher.
+  const initialBatchCoverage = await validateScriptClaimCoverage(data);
+  claimCoverageValidation.estimate = initialBatchCoverage.estimate;
+  const initialByLabel = new Map(
+    initialBatchCoverage.segments.map(item => [item.label, item])
+  );
 
   for (
     let sectionIndex = 0;
@@ -336,11 +347,13 @@ async function validateGeneratedScript(data, research, options = {}) {
       const label =
         `sections[${sectionIndex}].segments[${segmentIndex}]`;
 
-      const initialCoverage =
-        await validateVoiceoverClaimCoverage({
-          voiceover: segment.voiceover,
-          claims: segment.claims
-        });
+      const initialCoverage = initialByLabel.get(label);
+
+      if (!initialCoverage) {
+        throw new Error(
+          `Script Agent : résultat batch absent pour ${label}.`
+        );
+      }
 
       let finalCoverage = initialCoverage;
       let repair = null;

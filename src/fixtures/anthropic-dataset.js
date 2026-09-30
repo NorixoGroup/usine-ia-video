@@ -847,6 +847,40 @@ function resolveCoverageJudge(fixtureId, scenario, userMessage) {
   });
 }
 
+function resolveCoverageBatchJudge(fixtureId, scenario, userMessage) {
+  const [, itemsText] = matchOrFail(
+    fixtureId,
+    userMessage,
+    /^ELEMENTS A CONTROLER :\n\n([\s\S]+)$/
+  );
+  const items = parseJsonOrFail(fixtureId, itemsText, "éléments");
+
+  if (!Array.isArray(items)) {
+    fail(fixtureId, "éléments doit être un tableau.");
+  }
+
+  return json({
+    results: items.map(item => {
+      if (!item || typeof item.id !== "string" || !Array.isArray(item.claims)) {
+        fail(fixtureId, "élément batch invalide.");
+      }
+      const texts = item.claims.map(claim => claim?.text);
+      // Jeu local extensible pour le smoke de charge R15 : une phrase
+      // identique au seul claim est trivialement couverte, sans réseau.
+      const syntheticCovered =
+        texts.length === 1 && texts[0] === item.voiceover;
+      const entry = syntheticCovered
+        ? { undeclared: [] }
+        : findCoverageEntry(fixtureId, item.voiceover, texts);
+      return {
+        id: item.id,
+        covered: entry.undeclared.length === 0,
+        undeclared_claims: entry.undeclared
+      };
+    })
+  });
+}
+
 function resolveCoverageRepair(fixtureId, scenario, userMessage) {
   const [, voiceover, claimsText, rejectedText] = matchOrFail(
     fixtureId,
@@ -967,6 +1001,7 @@ const RESOLVERS = {
   "script": resolveScript,
   "visual-director": resolveVisualDirector,
   "validate-script-claim-coverage": resolveCoverageJudge,
+  "validate-script-claim-coverage-batch": resolveCoverageBatchJudge,
   "validate-visual-factual-grounding": resolveGroundingJudge,
   "repair-script-claim-coverage": resolveCoverageRepair,
   "repair-visual-factual-grounding": resolveGroundingRepair

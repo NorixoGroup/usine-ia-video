@@ -331,6 +331,40 @@ export function getCallGuardStatus() {
     : { configured: false, cap: null, used: 0, cache_hits: 0 };
 }
 
+// Vérification non mutante d'un budget connu avant de commencer une
+// séquence d'appels. Elle ne réserve ni ne consomme d'appel : les appels
+// restent journalisés individuellement par beginRealCall(). Le pipeline
+// est séquentiel, ce qui permet aux validateurs batchés de refuser avant
+// leur premier appel si leur pire cas ne tient pas dans le plafond restant.
+export function assertRealCallBudget({ calls, label = "opération" }) {
+  if (!state) {
+    throw new Error(
+      "Budget d'appels réels non autorisé : aucune autorisation configurée."
+    );
+  }
+
+  if (!Number.isSafeInteger(calls) || calls < 0) {
+    throw new Error(
+      `Budget d'appels réels invalide pour ${label} : entier positif attendu.`
+    );
+  }
+
+  if (state.used + calls > state.cap) {
+    throw new Error(
+      `Budget d'appels réels insuffisant pour ${label} : ` +
+      `${calls} appel(s) maximum requis, ${state.cap - state.used} restant(s) ` +
+      `(plafond ${state.cap}, déjà utilisés ${state.used}).`
+    );
+  }
+
+  return {
+    label,
+    required: calls,
+    remaining: state.cap - state.used,
+    authorized: true
+  };
+}
+
 function cacheFile(hash) {
   return path.join(state.productionDir, CACHE_DIR, `${hash}.json`);
 }

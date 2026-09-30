@@ -153,6 +153,56 @@ export const QUALITY_FINAL_VIDEO = "not_rendered";
 export const QUALITY_SCOPE_RENDERED = "rendered_video";
 export const QUALITY_FINAL_VIDEO_RENDERED = "rendered";
 
+// FFprobe est la vérité du fichier. 0,25 s couvre les arrondis de frame
+// (30 fps) et de muxage AAC sans masquer un écart éditorial significatif.
+export const ACTUAL_RENDERED_DURATION_TOLERANCE_SECONDS = 0.25;
+
+export function validateActualRenderedDuration({
+  actualDurationSeconds,
+  declaredDurationSeconds,
+  targetDurationMinutes
+}) {
+  const errors = [];
+
+  if (!Number.isFinite(actualDurationSeconds) || actualDurationSeconds <= 0) {
+    return ["durée réellement rendue absente ou non mesurable"];
+  }
+
+  if (
+    !Number.isFinite(declaredDurationSeconds) ||
+    Math.abs(declaredDurationSeconds - actualDurationSeconds) >
+      ACTUAL_RENDERED_DURATION_TOLERANCE_SECONDS
+  ) {
+    errors.push(
+      `durée déclarée ${declaredDurationSeconds}s différente de la durée réellement rendue ${actualDurationSeconds}s`
+    );
+  }
+
+  const range = targetDurationMinutes;
+  if (
+    !isPlainObject(range) ||
+    !Number.isFinite(range.min) ||
+    !Number.isFinite(range.max) ||
+    range.min > range.max
+  ) {
+    errors.push("durée cible de production absente ou invalide");
+    return errors;
+  }
+
+  const min = range.min * 60;
+  const max = range.max * 60;
+  if (
+    actualDurationSeconds < min - ACTUAL_RENDERED_DURATION_TOLERANCE_SECONDS ||
+    actualDurationSeconds > max + ACTUAL_RENDERED_DURATION_TOLERANCE_SECONDS
+  ) {
+    errors.push(
+      `durée réellement rendue ${actualDurationSeconds}s hors de la cible ${min}s–${max}s (tolérance ${ACTUAL_RENDERED_DURATION_TOLERANCE_SECONDS}s)`
+    );
+  }
+
+  return errors;
+}
+
 // Contrôles ajoutés lorsque des médias locaux sont rattachés.
 export const QUALITY_MEDIA_CHECK_IDS = [
   "media_files"
@@ -869,6 +919,25 @@ function auditFinalVideo(
     errors.push(
       "vidéo contrôlée sur disque différente de celle décrite par render.json"
     );
+  }
+
+  // La durée du MP4 re-sondé prévaut sur la timeline et sur render.json.
+  // Ce contrôle reste un échec même si les deux JSON sont cohérents entre eux.
+  const actualDurationErrors = validateActualRenderedDuration({
+    actualDurationSeconds: renderVerification?.output?.duration_seconds,
+    declaredDurationSeconds: data.output?.duration_seconds,
+    targetDurationMinutes: target?.duration_minutes
+  });
+
+  // Les fixtures de rendu restent volontairement courtes en mode test.
+  // Une contradiction fichier/artefact demeure toujours bloquante ; seule
+  // la plage éditoriale devient un avertissement, comme auditDurations().
+  for (const error of actualDurationErrors) {
+    if (mode === "test" && error.includes("hors de la cible")) {
+      warnings.push(`${error} — non bloquant en mode test`);
+    } else {
+      errors.push(error);
+    }
   }
 
   // Cohérence avec les artefacts audités.

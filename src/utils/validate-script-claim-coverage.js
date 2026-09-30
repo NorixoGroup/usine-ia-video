@@ -3,6 +3,16 @@ import {
   extractText
 } from "../services/anthropic.js";
 
+import {
+  assertRealCallBudget,
+  getCallGuardStatus
+} from "../services/call-guard.js";
+
+// Un batch est borné par le nombre de claims déclarés, pas par une taille
+// de texte implicite. Une unité (un segment et ses claims) ne peut pas être
+// découpée : le juge doit voir son voiceover et tous ses claims ensemble.
+export const MAX_CLAIMS_PER_BATCH = 24;
+
 const SYSTEM_PROMPT = `
 Tu es un auditeur de couverture factuelle.
 
@@ -98,6 +108,171 @@ RÈGLES DE SORTIE :
 - Ne retourne aucun Markdown.
 - Aucun texte avant ou après le JSON.
 `.trim();
+
+const BATCH_SYSTEM_PROMPT = `
+Tu es un auditeur de couverture factuelle batché.
+
+Chaque élément reçu contient un id stable, un voiceover et ses claims
+factuels déclarés. Contrôle chaque élément indépendamment, sans inventer,
+supprimer, fusionner ni réordonner les éléments ou les claims.
+
+Réponds uniquement avec un JSON valide :
+{
+  "results": [
+    {
+      "id": "",
+      "covered": true,
+      "undeclared_claims": []
+    }
+  ]
+}
+
+Chaque id reçu doit apparaître exactement une fois dans results. Aucun id
+inconnu ou dupliqué n'est admis. covered=true exige undeclared_claims=[] ;
+covered=false exige au moins une affirmation non déclarée avec text et reason.
+`.trim();
+
+function fail(message) {
+  throw new Error(`Voiceover Claim Coverage : ${message}`);
+}
+
+function assertPositiveInteger(value, label) {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    fail(`${label} doit être un entier positif.`);
+  }
+}
+
+// Estimation pure et sérialisable : elle ne touche ni au garde ni au réseau.
+export function estimateClaimValidationCalls({ claimCount, batchSize = MAX_CLAIMS_PER_BATCH }) {
+  assertPositiveInteger(batchSize, "batchSize");
+
+  if (!Number.isSafeInteger(claimCount) || claimCount < 0) {
+    fail("claimCount doit être un entier positif ou nul.");
+  }
+
+  return {
+    claim_count: claimCount,
+    batch_size: batchSize,
+    batch_count: Math.ceil(claimCount / batchSize),
+    // Une validation batchée par batch ; les réparations éventuelles sont
+    // comptées ailleurs, par unité, car elles ne sont pas batchables.
+    validation_calls_max: Math.ceil(claimCount / batchSize)
+  };
+}
+
+function normalizeItems(script) {
+  if (!script || !Array.isArray(script.sections)) {
+    fail("Script sections absent ou invalide.");
+  }
+
+  const items = [];
+
+  script.sections.forEach((section, sectionIndex) => {
+    if (!Array.isArray(section?.segments)) {
+      fail(`sections[${sectionIndex}].segments invalide.`);
+    }
+
+    section.segments.forEach((segment, segmentIndex) => {
+      if (typeof segment?.voiceover !== "string" || !segment.voiceover.trim()) {
+        fail(`sections[${sectionIndex}].segments[${segmentIndex}].voiceover invalide.`);
+      }
+      if (!Array.isArray(segment.claims)) {
+        fail(`sections[${sectionIndex}].segments[${segmentIndex}].claims invalide.`);
+      }
+
+      const id = `s${sectionIndex + 1}-g${segmentIndex + 1}`;
+      const claims = segment.claims.map((claim, claimIndex) => {
+        if (typeof claim?.text !== "string" || !claim.text.trim()) {
+          fail(`${id}.claims[${claimIndex}].text invalide.`);
+        }
+        return { claim_id: `${id}-c${claimIndex + 1}`, text: claim.text.trim() };
+      });
+
+      if (claims.length > MAX_CLAIMS_PER_BATCH) {
+        fail(`${id}: ${claims.length} claims dépasse MAX_CLAIMS_PER_BATCH=${MAX_CLAIMS_PER_BATCH}.`);
+      }
+
+      items.push({
+        id,
+        label: `sections[${sectionIndex}].segments[${segmentIndex}]`,
+        voiceover: segment.voiceover,
+        claims
+      });
+    });
+  });
+
+  return items;
+}
+
+function batchItems(items) {
+  const batches = [];
+  let batch = [];
+  let count = 0;
+
+  for (const item of items) {
+    if (batch.length > 0 && count + item.claims.length > MAX_CLAIMS_PER_BATCH) {
+      batches.push(batch);
+      batch = [];
+      count = 0;
+    }
+    batch.push(item);
+    count += item.claims.length;
+  }
+
+  if (batch.length > 0) batches.push(batch);
+  return batches;
+}
+
+export function validateClaimBatchResponse(data, expected) {
+  if (!data || typeof data !== "object" || !Array.isArray(data.results)) {
+    fail("réponse batch invalide : results absent.");
+  }
+  if (data.results.length !== expected.length) {
+    fail("réponse batch incomplète ou avec résultats en trop.");
+  }
+
+  const expectedIds = new Set(expected.map(item => item.id));
+  const seen = new Set();
+
+  return data.results.map((result, index) => {
+    if (!result || typeof result.id !== "string") {
+      fail(`résultat batch[${index}].id invalide.`);
+    }
+    if (!expectedIds.has(result.id)) fail(`résultat batch inconnu (${result.id}).`);
+    if (seen.has(result.id)) fail(`résultat batch dupliqué (${result.id}).`);
+    seen.add(result.id);
+    return { id: result.id, ...validateJudgeResponse(result) };
+  });
+}
+
+async function validateBatch(batch) {
+  const { response, meta } = await createMessage({
+    system: BATCH_SYSTEM_PROMPT,
+    messages: [{
+      role: "user",
+      content: `ELEMENTS A CONTROLER :\n\n${JSON.stringify(batch.map(({ id, voiceover, claims }) => ({ id, voiceover, claims })), null, 2)}`
+    }],
+    maxTokens: 2000,
+    temperature: 0
+  });
+
+  if (meta.stop_reason === "max_tokens") fail("réponse batch tronquée — stop_reason=max_tokens.");
+
+  let data;
+  try {
+    data = parseJson(extractText(response));
+  } catch (error) {
+    fail(`JSON batch invalide. ${error.message}`);
+  }
+
+  return {
+    results: validateClaimBatchResponse(data, batch).map(result => ({
+      ...result,
+      usage: meta
+    })),
+    usage: meta
+  };
+}
 
 function parseJson(text) {
   if (!text?.trim()) {
@@ -308,64 +483,50 @@ une propriété ou une causalité supplémentaire ne l'est pas.
 }
 
 export async function validateScriptClaimCoverage(script) {
-  if (!script || !Array.isArray(script.sections)) {
-    throw new Error(
-      "Voiceover Claim Coverage : Script sections absent ou invalide."
-    );
+  const items = normalizeItems(script);
+  const batches = batchItems(items);
+  const claimCount = items.reduce((total, item) => total + item.claims.length, 0);
+  const estimate = {
+    ...estimateClaimValidationCalls({ claimCount }),
+    item_count: items.length,
+    batch_count: batches.length,
+    // Chaque item peut, au pire, demander une réparation puis un contrôle
+    // final. L'appelant qui active ces réparations peut réserver ce total.
+    repair_and_recheck_calls_max: items.length * 2,
+    total_calls_max: batches.length + items.length * 2
+  };
+
+  // En mode complet, le garde est déjà configuré avant l'agent Script.
+  // En mode fixture/local il est absent : l'estimation reste observable mais
+  // ne consomme rien et ne requiert aucune autorisation.
+  if (getCallGuardStatus().configured) {
+    assertRealCallBudget({
+      calls: estimate.total_calls_max,
+      label: "validation batchée des claims"
+    });
   }
 
   const errors = [];
   const segments = [];
   const usage = [];
 
-  for (
-    let sectionIndex = 0;
-    sectionIndex < script.sections.length;
-    sectionIndex += 1
-  ) {
-    const section = script.sections[sectionIndex];
+  for (const batch of batches) {
+    const judged = await validateBatch(batch);
+    const byId = new Map(judged.results.map(result => [result.id, result]));
 
-    if (!Array.isArray(section?.segments)) {
-      throw new Error(
-        `Voiceover Claim Coverage : sections[${sectionIndex}].segments invalide.`
-      );
-    }
-
-    for (
-      let segmentIndex = 0;
-      segmentIndex < section.segments.length;
-      segmentIndex += 1
-    ) {
-      const segment = section.segments[segmentIndex];
-
-      const label =
-        `sections[${sectionIndex}].segments[${segmentIndex}]`;
-
-      const result =
-        await validateVoiceoverClaimCoverage({
-          voiceover: segment?.voiceover,
-          claims: Array.isArray(segment?.claims)
-            ? segment.claims
-            : []
-        });
-
+    // Remappage dans l'ordre source, jamais dans l'ordre renvoyé par le juge.
+    for (const item of batch) {
+      const result = byId.get(item.id);
       segments.push({
-        label,
+        label: item.label,
         covered: result.covered,
-        undeclared_claims:
-          result.undeclared_claims
+        undeclared_claims: result.undeclared_claims,
+        usage: result.usage
       });
-
-      usage.push({
-        label,
-        ...result.usage
-      });
-
+      usage.push({ label: item.label, ...judged.usage });
       if (!result.covered) {
         for (const claim of result.undeclared_claims) {
-          errors.push(
-            `${label}: affirmation factuelle non déclarée — ${claim.text}`
-          );
+          errors.push(`${item.label}: affirmation factuelle non déclarée — ${claim.text}`);
         }
       }
     }
@@ -376,6 +537,7 @@ export async function validateScriptClaimCoverage(script) {
     errors,
     warnings: [],
     segments,
-    usage
+    usage,
+    estimate
   };
 }

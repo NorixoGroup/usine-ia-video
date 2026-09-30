@@ -79,6 +79,8 @@ const PROMPT_FILES = {
   "visual-director": "src/agents/visual-director.js",
   "validate-script-claim-coverage":
     "src/utils/validate-script-claim-coverage.js",
+  "validate-script-claim-coverage-batch":
+    "src/utils/validate-script-claim-coverage.js",
   "validate-visual-factual-grounding":
     "src/utils/validate-visual-factual-grounding.js",
   "repair-script-claim-coverage":
@@ -172,14 +174,17 @@ function fixtures(scenario, fn) {
   );
 }
 
-function readSystemPrompt(file) {
+function readSystemPrompt(file, id) {
   const source = fs.readFileSync(
     new URL(`../${file}`, import.meta.url),
     "utf8"
   );
 
+  const constant = id === "validate-script-claim-coverage-batch"
+    ? "BATCH_SYSTEM_PROMPT"
+    : "SYSTEM_PROMPT";
   const match = source.match(
-    /const SYSTEM_PROMPT = `([\s\S]*?)`\.trim\(\);/
+    new RegExp("const " + constant + " = `([\\s\\S]*?)`\\.trim\\(\\);")
   );
 
   assert(match, `SYSTEM_PROMPT introuvable dans ${file}`);
@@ -224,7 +229,7 @@ const USER = text => [{ role: "user", content: text }];
 
 const SYSTEM_PROMPTS = Object.fromEntries(
   Object.entries(PROMPT_FILES).map(
-    ([id, file]) => [id, readSystemPrompt(file)]
+    ([id, file]) => [id, readSystemPrompt(file, id)]
   )
 );
 
@@ -278,9 +283,9 @@ await test("garde réseau : chaque sortie réseau est bloquée et comptée", asy
 
 // ------------------------------------------------------------------
 console.log("");
-console.log("--- 2. Détection des 7 SYSTEM_PROMPT ---");
+console.log("--- 2. Détection des 8 SYSTEM_PROMPT ---");
 
-await test("les 7 fixture_id attendus sont déclarés", () => {
+await test("les 8 fixture_id attendus sont déclarés", () => {
   assert(
     isDeepStrictEqual(
       [...FIXTURE_IDS].sort(),
@@ -464,7 +469,7 @@ await test("chaîne Research → Script → Visual Director (happy)", async () =
     for (const segment of scriptResult.claim_coverage_validation.segments) {
       assertFixtureUsage(
         segment.usage,
-        "validate-script-claim-coverage",
+        "validate-script-claim-coverage-batch",
         segment.label
       );
     }
@@ -509,7 +514,7 @@ await test("chaîne Research → Script → Visual Director (happy)", async () =
       isDeepStrictEqual(counts, {
         "research": 1,
         "script": 1,
-        "validate-script-claim-coverage": 2,
+        "validate-script-claim-coverage-batch": 1,
         "visual-director": 1,
         "validate-visual-factual-grounding": 5
       }),
@@ -624,7 +629,8 @@ await test("script-coverage-repair : FAIL → repair → revalidation PASS", asy
     assert(
       isDeepStrictEqual(logSince(start), {
         "script": 1,
-        "validate-script-claim-coverage": 3,
+        "validate-script-claim-coverage-batch": 1,
+        "validate-script-claim-coverage": 1,
         "repair-script-claim-coverage": 1
       }),
       `journal d'appels inattendu : ${JSON.stringify(logSince(start))}`
@@ -648,7 +654,8 @@ await test("script-coverage-unrepairable : le gate bloque après repair", async 
     assert(
       isDeepStrictEqual(logSince(start), {
         "script": 1,
-        "validate-script-claim-coverage": 3,
+        "validate-script-claim-coverage-batch": 1,
+        "validate-script-claim-coverage": 1,
         "repair-script-claim-coverage": 1
       }),
       `journal d'appels inattendu : ${JSON.stringify(logSince(start))}`
