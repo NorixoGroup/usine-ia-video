@@ -10,6 +10,45 @@ export const ASSET_TYPES = [
 
 export const ASSET_STATUS = "unresolved";
 
+// Asset rattaché à un fichier local inspecté par la couche média.
+export const ASSET_STATUS_RESOLVED_LOCAL = "resolved_local";
+
+const MEDIA_KEYS = [
+  "path",
+  "kind",
+  "container",
+  "duration_seconds",
+  "width",
+  "height",
+  "fps",
+  "video_codec",
+  "size_bytes",
+  "sha256"
+];
+
+const MEDIA_DIRECTORY = "assets";
+
+// Extension de fichier → type de contenu.
+const MEDIA_EXTENSIONS = {
+  ".mp4": "video",
+  ".mov": "video",
+  ".mkv": "video",
+  ".webm": "video",
+  ".png": "image",
+  ".jpg": "image",
+  ".jpeg": "image"
+};
+
+// Types de contenu acceptés par type d'asset. Un fichier audio ne
+// satisfait jamais un asset visuel.
+const MEDIA_KINDS_BY_ASSET_TYPE = {
+  stock_video: ["video"],
+  archive: ["video"],
+  generated: ["video"],
+  map: ["image", "video"],
+  graphic: ["image", "video"]
+};
+
 const MANIFEST_KEYS = [
   "title",
   "assets",
@@ -109,13 +148,173 @@ function checkExactKeys(value, allowedKeys, label, errors) {
   }
 }
 
+// Référence locale relative à la racine média : ni URL, ni file://, ni
+// chemin absolu, ni remontée de dossier.
+function mediaPathError(reference, assetId) {
+  if (!isNonEmptyString(reference)) {
+    return "path manquant";
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(reference)) {
+    return "path ne doit pas être une URL ni une référence distante";
+  }
+
+  if (reference.startsWith("/") || reference.includes("\\")) {
+    return "path ne doit pas être un chemin absolu";
+  }
+
+  const segments = reference.split("/");
+
+  if (
+    segments.some(
+      segment =>
+        segment === "" ||
+        segment === "." ||
+        segment === ".."
+    )
+  ) {
+    return "path ne doit contenir ni remontée ni segment vide";
+  }
+
+  const extension =
+    Object.keys(MEDIA_EXTENSIONS).find(
+      candidate => reference.toLowerCase().endsWith(candidate)
+    );
+
+  if (!extension) {
+    return "path : extension non autorisée";
+  }
+
+  if (
+    reference.slice(0, -extension.length) !==
+    `${MEDIA_DIRECTORY}/${assetId}`
+  ) {
+    return `path doit être ${MEDIA_DIRECTORY}/<asset_id>.<extension>`;
+  }
+
+  return null;
+}
+
+function validateMedia(asset, label, errors) {
+  const media = asset.media;
+
+  if (!isPlainObject(media)) {
+    errors.push(
+      `${label}: status "${ASSET_STATUS_RESOLVED_LOCAL}" sans média local inspecté`
+    );
+    return;
+  }
+
+  const mediaLabel = `${label}.media`;
+
+  checkExactKeys(media, MEDIA_KEYS, mediaLabel, errors);
+
+  const pathError = mediaPathError(media.path, asset.asset_id);
+
+  if (pathError) {
+    errors.push(`${mediaLabel}: ${pathError}`);
+  }
+
+  if (!["video", "image"].includes(media.kind)) {
+    errors.push(`${mediaLabel}: kind invalide`);
+  } else {
+    const allowedKinds =
+      MEDIA_KINDS_BY_ASSET_TYPE[asset.asset_type] ?? [];
+
+    if (!allowedKinds.includes(media.kind)) {
+      errors.push(
+        `${mediaLabel}: mauvais type de média — ${media.kind} fourni ` +
+        `pour un asset ${asset.asset_type}`
+      );
+    }
+
+    if (
+      !pathError &&
+      MEDIA_EXTENSIONS[
+        Object.keys(MEDIA_EXTENSIONS).find(
+          candidate =>
+            media.path.toLowerCase().endsWith(candidate)
+        )
+      ] !== media.kind
+    ) {
+      errors.push(
+        `${mediaLabel}: extension incohérente avec kind ${media.kind}`
+      );
+    }
+  }
+
+  if (!isNonEmptyString(media.container)) {
+    errors.push(`${mediaLabel}: container manquant`);
+  }
+
+  if (!Number.isInteger(media.width) || media.width <= 0) {
+    errors.push(`${mediaLabel}: width invalide`);
+  }
+
+  if (!Number.isInteger(media.height) || media.height <= 0) {
+    errors.push(`${mediaLabel}: height invalide`);
+  }
+
+  if (!isNonEmptyString(media.video_codec)) {
+    errors.push(`${mediaLabel}: video_codec manquant`);
+  }
+
+  if (
+    !Number.isInteger(media.size_bytes) ||
+    media.size_bytes <= 0
+  ) {
+    errors.push(`${mediaLabel}: size_bytes invalide`);
+  }
+
+  if (
+    typeof media.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(media.sha256)
+  ) {
+    errors.push(`${mediaLabel}: sha256 invalide`);
+  }
+
+  if (media.kind === "image") {
+    if (media.duration_seconds !== null || media.fps !== null) {
+      errors.push(
+        `${mediaLabel}: duration_seconds et fps doivent être null pour une image`
+      );
+    }
+
+    return;
+  }
+
+  if (!isFinitePositiveNumber(media.duration_seconds)) {
+    errors.push(`${mediaLabel}: duration_seconds invalide`);
+  } else if (
+    isFinitePositiveNumber(asset.duration_seconds) &&
+    media.duration_seconds < asset.duration_seconds
+  ) {
+    errors.push(
+      `${mediaLabel}: média plus court (${media.duration_seconds}s) ` +
+      `que la durée nécessaire (${asset.duration_seconds}s)`
+    );
+  }
+
+  if (!isFinitePositiveNumber(media.fps)) {
+    errors.push(`${mediaLabel}: fps invalide`);
+  }
+}
+
 function validateAsset(asset, label, errors) {
   if (!isPlainObject(asset)) {
     errors.push(`${label}: asset absent ou invalide`);
     return;
   }
 
-  checkExactKeys(asset, ASSET_KEYS, label, errors);
+  // Le bloc media n'existe que dans l'état resolved_local.
+  const resolved = asset.status === ASSET_STATUS_RESOLVED_LOCAL;
+
+  checkExactKeys(
+    asset,
+    resolved ? [...ASSET_KEYS, "media"] : ASSET_KEYS,
+    label,
+    errors
+  );
 
   if (!isIndex(asset.section_index)) {
     errors.push(`${label}: section_index invalide`);
@@ -185,9 +384,11 @@ function validateAsset(asset, label, errors) {
     errors.push(`${label}: research_fact_refs invalide`);
   }
 
-  if (asset.status !== ASSET_STATUS) {
+  if (resolved) {
+    validateMedia(asset, label, errors);
+  } else if (asset.status !== ASSET_STATUS) {
     errors.push(
-      `${label}: status doit être "${ASSET_STATUS}"`
+      `${label}: status doit être "${ASSET_STATUS}" ou "${ASSET_STATUS_RESOLVED_LOCAL}"`
     );
   }
 }
@@ -253,6 +454,18 @@ export function validateAssetManifest(data) {
   data.assets.forEach((asset, index) => {
     validateAsset(asset, `assets[${index}]`, errors);
   });
+
+  // Tout ou rien : un manifeste est entièrement à résoudre ou
+  // entièrement résolu localement.
+  const resolvedCount = data.assets.filter(
+    asset => asset?.status === ASSET_STATUS_RESOLVED_LOCAL
+  ).length;
+
+  if (resolvedCount > 0 && resolvedCount < data.assets.length) {
+    errors.push(
+      `résolution partielle interdite : ${resolvedCount} asset(s) résolu(s) sur ${data.assets.length}`
+    );
+  }
 
   const seenIds = new Set();
 

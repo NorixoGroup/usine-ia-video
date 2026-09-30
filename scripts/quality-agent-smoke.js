@@ -42,6 +42,7 @@ const REPORT_KEYS = [
   "verdict",
   "checks",
   "metrics",
+  "media",
   "warnings"
 ];
 
@@ -202,6 +203,16 @@ await test("métriques correctes", () => {
       declared_duration_minutes: 27
     }),
     `metrics : ${JSON.stringify(result.data.metrics)}`
+  );
+});
+
+await test("périmètre explicite : contrats seuls, aucune vidéo finale rendue", () => {
+  assert(
+    isDeepStrictEqual(result.data.media, {
+      scope: "contracts_only",
+      final_video: "not_rendered"
+    }),
+    `media : ${JSON.stringify(result.data.media)}`
   );
 });
 

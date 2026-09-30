@@ -31,6 +31,12 @@ import {
 } from "../agents/quality.js";
 
 import {
+  inspectLocalAssets,
+  inspectLocalVoice,
+  verifyLocalMedia
+} from "../media/local-media.js";
+
+import {
   writeJsonArtifact,
   readJsonArtifact
 } from "./artifacts.js";
@@ -69,6 +75,20 @@ const title =
 const prompt =
   getArgument("prompt") ||
   "Documentaire géographique factuel destiné à la chaîne Les Découvertes du Nomade.";
+
+// Dossier de médias locaux, optionnel. Absent : le pipeline ne produit
+// que des contrats, comme avant. Présent : chaque asset et chaque unité
+// de narration doit y trouver son fichier (tout ou rien).
+const mediaDir = getArgument("media-dir");
+
+if (
+  args.some((value) => value.startsWith("--media-dir")) &&
+  !mediaDir
+) {
+  throw new Error(
+    "Orchestrateur : --media-dir exige un dossier (--media-dir=<dossier>)."
+  );
+}
 
 const productionId = `prod-${new Date()
   .toISOString()
@@ -115,6 +135,10 @@ const production = {
   }))
 };
 
+if (mediaDir) {
+  production.input.media_dir = mediaDir;
+}
+
 function saveProduction() {
   fs.writeFileSync(
     path.join(productionDir, "production.json"),
@@ -147,6 +171,12 @@ console.log(
     : researchScriptMode
       ? "RESEARCH-SCRIPT"
       : "LIVE"
+);
+console.log(
+  "Médias     :",
+  mediaDir
+    ? `locaux — ${mediaDir}`
+    : "aucun (contrats seuls)"
 );
 console.log("");
 
@@ -363,7 +393,10 @@ if (dryRun) {
 
     const assetResult = await runAssetAgent({
       visual: persistedVisual.data,
-      testMode: true
+      testMode: true,
+      localMedia: mediaDir
+        ? await inspectLocalAssets({ mediaDir })
+        : undefined
     });
 
     writeJsonArtifact(
@@ -404,7 +437,10 @@ if (dryRun) {
 
     const voiceResult = await runVoiceAgent({
       script: voiceSourceScript.data,
-      testMode: true
+      testMode: true,
+      localAudio: mediaDir
+        ? await inspectLocalVoice({ mediaDir })
+        : undefined
     });
 
     writeJsonArtifact(
@@ -457,11 +493,20 @@ if (dryRun) {
     assemblyState.started_at = new Date().toISOString();
     saveProduction();
 
+    // Les médias référencés sont recontrôlés sur disque juste avant
+    // l'étape qui les utilise.
     const assemblyResult = await runAssemblyAgent({
       assets: persistedAssets.data,
       voice: persistedVoice.data,
       target: production.target.video,
-      testMode: true
+      testMode: true,
+      mediaVerification: mediaDir
+        ? await verifyLocalMedia({
+            mediaDir,
+            assets: persistedAssets.data,
+            voice: persistedVoice.data
+          })
+        : undefined
     });
 
     writeJsonArtifact(
@@ -499,7 +544,14 @@ if (dryRun) {
     const qualityResult = await runQualityAgent({
       artifacts: qualityArtifacts,
       target: production.target,
-      testMode: true
+      testMode: true,
+      mediaVerification: mediaDir
+        ? await verifyLocalMedia({
+            mediaDir,
+            assets: qualityArtifacts.assets?.data,
+            voice: qualityArtifacts.voice?.data
+          })
+        : undefined
     });
 
     writeJsonArtifact(
@@ -547,6 +599,12 @@ if (dryRun) {
       `             projects/${production.id}/quality.json`
     );
     console.log(" Agents 1-7 : EXECUTES");
+    console.log(
+      mediaDir
+        ? " Médias     : locaux, inspectés et recontrôlés sur disque"
+        : " Médias     : aucun — contrats seuls"
+    );
+    console.log(" Vidéo finale : NON RENDUE (aucun final.mp4)");
     console.log("==============================================");
 
     process.exit(0);

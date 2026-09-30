@@ -1,5 +1,23 @@
 export const VOICE_STATUS = "unsynthesized";
 
+// Unité rattachée à un fichier audio local inspecté par la couche média.
+export const VOICE_STATUS_SYNTHESIZED_LOCAL = "synthesized_local";
+
+const AUDIO_KEYS = [
+  "path",
+  "container",
+  "duration_seconds",
+  "audio_codec",
+  "sample_rate",
+  "channels",
+  "size_bytes",
+  "sha256"
+];
+
+const AUDIO_DIRECTORY = "voice";
+
+const AUDIO_EXTENSIONS = [".wav", ".mp3", ".m4a"];
+
 const MANIFEST_KEYS = [
   "title",
   "narration_units",
@@ -71,13 +89,127 @@ function checkExactKeys(value, allowedKeys, label, errors) {
   }
 }
 
+// Référence locale relative à la racine média : ni URL, ni file://, ni
+// chemin absolu, ni remontée de dossier.
+function audioPathError(reference, unitId) {
+  if (!isNonEmptyString(reference)) {
+    return "path manquant";
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(reference)) {
+    return "path ne doit pas être une URL ni une référence distante";
+  }
+
+  if (reference.startsWith("/") || reference.includes("\\")) {
+    return "path ne doit pas être un chemin absolu";
+  }
+
+  const segments = reference.split("/");
+
+  if (
+    segments.some(
+      segment =>
+        segment === "" ||
+        segment === "." ||
+        segment === ".."
+    )
+  ) {
+    return "path ne doit contenir ni remontée ni segment vide";
+  }
+
+  const extension = AUDIO_EXTENSIONS.find(
+    candidate => reference.toLowerCase().endsWith(candidate)
+  );
+
+  if (!extension) {
+    return "path : extension audio non autorisée";
+  }
+
+  if (
+    reference.slice(0, -extension.length) !==
+    `${AUDIO_DIRECTORY}/${unitId}`
+  ) {
+    return `path doit être ${AUDIO_DIRECTORY}/<unit_id>.<extension>`;
+  }
+
+  return null;
+}
+
+function validateAudio(unit, label, errors) {
+  const audio = unit.audio;
+
+  if (!isPlainObject(audio)) {
+    errors.push(
+      `${label}: status "${VOICE_STATUS_SYNTHESIZED_LOCAL}" sans audio local inspecté`
+    );
+    return;
+  }
+
+  const audioLabel = `${label}.audio`;
+
+  checkExactKeys(audio, AUDIO_KEYS, audioLabel, errors);
+
+  const pathError = audioPathError(audio.path, unit.unit_id);
+
+  if (pathError) {
+    errors.push(`${audioLabel}: ${pathError}`);
+  }
+
+  if (!isNonEmptyString(audio.container)) {
+    errors.push(`${audioLabel}: container manquant`);
+  }
+
+  // Durée MESURÉE du fichier ; estimated_seconds reste l'estimation.
+  if (!isFinitePositiveNumber(audio.duration_seconds)) {
+    errors.push(`${audioLabel}: duration_seconds invalide`);
+  }
+
+  if (!isNonEmptyString(audio.audio_codec)) {
+    errors.push(`${audioLabel}: audio_codec manquant`);
+  }
+
+  if (
+    !Number.isInteger(audio.sample_rate) ||
+    audio.sample_rate <= 0
+  ) {
+    errors.push(`${audioLabel}: sample_rate invalide`);
+  }
+
+  if (!Number.isInteger(audio.channels) || audio.channels <= 0) {
+    errors.push(`${audioLabel}: channels invalide`);
+  }
+
+  if (
+    !Number.isInteger(audio.size_bytes) ||
+    audio.size_bytes <= 0
+  ) {
+    errors.push(`${audioLabel}: size_bytes invalide`);
+  }
+
+  if (
+    typeof audio.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(audio.sha256)
+  ) {
+    errors.push(`${audioLabel}: sha256 invalide`);
+  }
+}
+
 function validateUnit(unit, label, errors) {
   if (!isPlainObject(unit)) {
     errors.push(`${label}: unité absente ou invalide`);
     return;
   }
 
-  checkExactKeys(unit, UNIT_KEYS, label, errors);
+  // Le bloc audio n'existe que dans l'état synthesized_local.
+  const synthesized =
+    unit.status === VOICE_STATUS_SYNTHESIZED_LOCAL;
+
+  checkExactKeys(
+    unit,
+    synthesized ? [...UNIT_KEYS, "audio"] : UNIT_KEYS,
+    label,
+    errors
+  );
 
   if (!isIndex(unit.section_index)) {
     errors.push(`${label}: section_index invalide`);
@@ -110,9 +242,11 @@ function validateUnit(unit, label, errors) {
     errors.push(`${label}: estimated_seconds invalide`);
   }
 
-  if (unit.status !== VOICE_STATUS) {
+  if (synthesized) {
+    validateAudio(unit, label, errors);
+  } else if (unit.status !== VOICE_STATUS) {
     errors.push(
-      `${label}: status doit être "${VOICE_STATUS}"`
+      `${label}: status doit être "${VOICE_STATUS}" ou "${VOICE_STATUS_SYNTHESIZED_LOCAL}"`
     );
   }
 }
@@ -173,6 +307,21 @@ export function validateVoiceManifest(data) {
   data.narration_units.forEach((unit, index) => {
     validateUnit(unit, `narration_units[${index}]`, errors);
   });
+
+  // Tout ou rien : un manifeste est entièrement à synthétiser ou
+  // entièrement rattaché à des fichiers audio locaux.
+  const synthesizedCount = data.narration_units.filter(
+    unit => unit?.status === VOICE_STATUS_SYNTHESIZED_LOCAL
+  ).length;
+
+  if (
+    synthesizedCount > 0 &&
+    synthesizedCount < data.narration_units.length
+  ) {
+    errors.push(
+      `synthèse partielle interdite : ${synthesizedCount} unité(s) sur ${data.narration_units.length}`
+    );
+  }
 
   const seenIds = new Set();
 

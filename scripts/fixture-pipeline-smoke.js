@@ -11,6 +11,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import { isDeepStrictEqual } from "node:util";
 
 import {
   validateAssetManifest,
@@ -31,6 +32,18 @@ import {
   QUALITY_CHECK_IDS,
   validateQualityReport
 } from "../src/utils/validate-quality-report.js";
+
+import {
+  verifyLocalMedia
+} from "../src/media/local-media.js";
+
+import {
+  copyMediaSet,
+  createMediaFixtureRoot,
+  generateCanonicalMediaSet,
+  generateVideo,
+  removeMediaFixtureRoot
+} from "./local-media-fixtures.js";
 
 if (process.env.NO_API !== "1") {
   console.error(
@@ -98,7 +111,53 @@ function readArtifact(productionId, filename) {
     : null;
 }
 
-function runPipeline({ fixtures, scenario, fault, extraArgs = [] }) {
+// Faux médias locaux (tmp/r9-media-*), fabriqués une fois puis copiés
+// pour chaque cas qui en a besoin. Supprimés en fin de smoke.
+let mediaFixtureRoot = null;
+let mediaCaseCounter = 0;
+
+// Copie indépendante du jeu de faux médias ; `prepare` peut l'altérer
+// avant le lancement du pipeline.
+function prepareMediaDir(prepare) {
+  if (mediaFixtureRoot === null) {
+    mediaFixtureRoot = createMediaFixtureRoot();
+
+    generateCanonicalMediaSet(
+      path.join(mediaFixtureRoot, "base")
+    );
+  }
+
+  mediaCaseCounter += 1;
+
+  const directory = copyMediaSet(
+    path.join(mediaFixtureRoot, "base"),
+    path.join(mediaFixtureRoot, `case-${mediaCaseCounter}`)
+  );
+
+  if (typeof prepare === "function") {
+    prepare(directory);
+  }
+
+  return directory;
+}
+
+function runPipeline({
+  fixtures,
+  scenario,
+  fault,
+  media,
+  mediaDirArgument,
+  extraArgs = []
+}) {
+  // media : le pipeline reçoit --media-dir vers un jeu de faux médias.
+  // mediaDirArgument : valeur brute de --media-dir (cas invalides).
+  const mediaDir = media ? prepareMediaDir(media) : null;
+  const mediaArgument = mediaDirArgument ?? mediaDir;
+
+  if (mediaArgument) {
+    extraArgs = [...extraArgs, `--media-dir=${mediaArgument}`];
+  }
+
   // Environnement minimal : aucune clé, aucun secret hérité.
   const env = {
     PATH: process.env.PATH,
@@ -165,6 +224,9 @@ function runPipeline({ fixtures, scenario, fault, extraArgs = [] }) {
     guardActive: guardLine !== null,
     blockedAttempts: guardLine ? Number(guardLine[1]) : null,
     fault,
+    mediaDir,
+    mediaArgument,
+    mediaVerification: undefined,
     injectedFault: injectorLine ? injectorLine[1] : null,
     injections: injectorLine ? Number(injectorLine[2]) : null,
     files: productionId
@@ -252,6 +314,14 @@ function assertCommon(run) {
     `fichiers inattendus dans la production : ${run.files}`
   );
 
+  // Les médias sont référencés en place, jamais copiés ; le dossier
+  // fourni est tracé dans production.json, et seulement s'il est fourni.
+  assert(
+    (run.production.input.media_dir ?? null) ===
+      (run.mediaArgument ?? null),
+    `production.json : media_dir=${run.production.input.media_dir}`
+  );
+
   for (const [name, fixtureId] of Object.entries(FIXTURE_USAGE_IDS)) {
     const artifact = run[name];
 
@@ -302,12 +372,19 @@ function assertAssets(run) {
     `assets.json / visual.json : ${mapping.errors.join(" | ")}`
   );
 
+  // Sans --media-dir : contrat historique. Avec : tout est résolu.
+  const expectedStatus = run.mediaDir
+    ? "resolved_local"
+    : "unresolved";
+
   assert(
     assets.data.assets.length === groundingShots(run).length &&
     assets.data.assets.every(
-      asset => asset.status === "unresolved"
+      asset =>
+        asset.status === expectedStatus &&
+        Object.hasOwn(asset, "media") === Boolean(run.mediaDir)
     ),
-    "assets.json : un asset unresolved par shot attendu"
+    `assets.json : un asset ${expectedStatus} par shot attendu`
   );
 
   assert(
@@ -344,13 +421,19 @@ function assertVoice(run) {
     `voice.json / script.json : ${mapping.errors.join(" | ")}`
   );
 
+  const expectedStatus = run.mediaDir
+    ? "synthesized_local"
+    : "unsynthesized";
+
   assert(
     voice.data.narration_units.length ===
       coverageSegments(run).length &&
     voice.data.narration_units.every(
-      unit => unit.status === "unsynthesized"
+      unit =>
+        unit.status === expectedStatus &&
+        Object.hasOwn(unit, "audio") === Boolean(run.mediaDir)
     ),
-    "voice.json : une unité unsynthesized par segment attendue"
+    `voice.json : une unité ${expectedStatus} par segment attendue`
   );
 }
 
@@ -376,7 +459,8 @@ function assertAssembly(run) {
     assembly.data,
     assets.data,
     voice.data,
-    production.target.video
+    production.target.video,
+    run.mediaVerification
   );
 
   assert(
@@ -391,6 +475,19 @@ function assertAssembly(run) {
     assembly.data.audio_track.length ===
       voice.data.narration_units.length,
     "assembly.json : plan non rendu couvrant chaque asset et chaque unité attendu"
+  );
+
+  // Le plan ne référence des médias que s'ils ont été fournis.
+  assert(
+    assembly.data.video_track.every(
+      clip =>
+        Object.hasOwn(clip, "media") === Boolean(run.mediaDir)
+    ) &&
+    assembly.data.audio_track.every(
+      unit =>
+        Object.hasOwn(unit, "audio") === Boolean(run.mediaDir)
+    ),
+    "assembly.json : références média inattendues"
   );
 }
 
@@ -411,14 +508,26 @@ function assertQuality(run) {
     `quality.json : ${validation.errors.join(" | ")}`
   );
 
+  // Avec des médias locaux, un contrôle média s'ajoute aux 10 contrôles
+  // de contrats.
   assert(
     quality.data.verdict === "pass" &&
     quality.data.title === run.script.data.title &&
-    quality.data.checks.length === QUALITY_CHECK_IDS.length &&
+    quality.data.checks.length ===
+      QUALITY_CHECK_IDS.length + (run.mediaDir ? 1 : 0) &&
     quality.data.checks.every(
       check => check.valid === true && check.errors.length === 0
     ),
     "quality.json : verdict pass sur tous les contrôles attendu"
+  );
+
+  // Le rapport dit toujours ce qu'il a contrôlé, et jamais qu'une
+  // vidéo finale existe.
+  assert(
+    quality.data.media.scope ===
+      (run.mediaDir ? "local_media" : "contracts_only") &&
+    quality.data.media.final_video === "not_rendered",
+    `quality.json : périmètre inattendu ${JSON.stringify(quality.data.media)}`
   );
 
   assert(
@@ -432,9 +541,11 @@ function assertQuality(run) {
   );
 
   // Le jeu de test dure 40 s : hors cible, non bloquant en mode test.
+  // Avec les faux médias s'ajoutent la résolution sous la cible et
+  // l'écart de durée de l'audio de 21,5 s.
   assert(
     quality.mode === "test" &&
-    quality.data.warnings.length === 1 &&
+    quality.data.warnings.length === (run.mediaDir ? 3 : 1) &&
     /hors de la cible .* non bloquant en mode test/.test(
       quality.data.warnings[0]
     ),
@@ -490,7 +601,8 @@ function assertPass(run) {
     run.stdout.includes(
       "RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET -> VOICE -> ASSEMBLY -> QUALITY"
     ) &&
-    run.stdout.includes("Agents 1-7 : EXECUTES"),
+    run.stdout.includes("Agents 1-7 : EXECUTES") &&
+    run.stdout.includes("Vidéo finale : NON RENDUE"),
     "bandeau final inattendu"
   );
 }
@@ -879,6 +991,340 @@ const cases = [
           /^Quality Agent : audit rejeté\..*\[structure\] assembly\.json: video_track\[1\]: trou entre 8s et 9s/
       });
     }
+  },
+
+  // ----------------------------------------------------------------
+  // Couche média locale : le pipeline reçoit --media-dir vers de faux
+  // médias fabriqués par le test (tmp/r9-media-*).
+  // ----------------------------------------------------------------
+  {
+    name: "médias locaux : pipeline 1→7, assets et voix rattachés et inspectés",
+    fixtures: true,
+    media: true,
+    check(run) {
+      assertPass(run);
+
+      const asset = run.assets.data.assets[0];
+
+      assert(
+        asset.media.path === "assets/s01-g01-sh01.mp4" &&
+        asset.media.kind === "video" &&
+        asset.media.duration_seconds === 8 &&
+        /^[0-9a-f]{64}$/.test(asset.media.sha256) &&
+        run.assets.data.assets[1].media.kind === "image",
+        `asset résolu inattendu : ${JSON.stringify(asset.media)}`
+      );
+
+      const unit = run.voice.data.narration_units[1];
+
+      // Estimation du script et durée mesurée restent distinctes.
+      assert(
+        unit.estimated_seconds === 20 &&
+        unit.audio.path === "voice/s02-g01.mp3" &&
+        unit.audio.duration_seconds === 21.5,
+        `unité synthétisée inattendue : ${JSON.stringify(unit)}`
+      );
+
+      assert(
+        run.assembly.data.audio_track[1].duration_seconds === 20 &&
+        run.assembly.data.audio_track[1].audio.duration_seconds ===
+          21.5 &&
+        run.assembly.data.video_track[0].media.path ===
+          asset.media.path,
+        "assembly.json : références média inattendues"
+      );
+
+      assert(
+        isDeepStrictEqual(run.quality.data.media, {
+          scope: "local_media",
+          final_video: "not_rendered",
+          assets_inspected: 5,
+          narration_units_inspected: 2,
+          estimated_narration_seconds: 40,
+          measured_narration_seconds: 41.5
+        }),
+        `quality.json : media ${JSON.stringify(run.quality.data.media)}`
+      );
+
+      assert(
+        run.quality.data.warnings.includes(
+          "5 média(s) sous la résolution cible 3840x2160"
+        ) &&
+        run.quality.data.warnings.includes(
+          "s02-g01: durée audio mesurée 21.5s, estimée 20s (écart +1.5s)"
+        ),
+        `quality.json : warnings ${JSON.stringify(run.quality.data.warnings)}`
+      );
+
+      // Aucun chemin absolu ni dossier de la machine dans les artefacts.
+      for (const [, artifact] of PIPELINE) {
+        assert(
+          !JSON.stringify(run[artifact]).includes(run.mediaDir),
+          `${artifact}.json contient le chemin absolu du dossier média`
+        );
+      }
+    }
+  },
+  {
+    name: "médias locaux + visual-grounding-repair : le plan réparé est rattaché",
+    fixtures: true,
+    scenario: "visual-grounding-repair",
+    media: true,
+    check: assertPass
+  },
+  {
+    name: "médias locaux : fichier d'asset absent → Asset échoue (tout ou rien)",
+    fixtures: true,
+    media(directory) {
+      fs.rmSync(
+        path.join(directory, "assets", "s01-g01-sh02.png")
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Asset Agent : média local manquant pour s01-g01-sh02\./
+      });
+    }
+  },
+  {
+    name: "médias locaux : fichier d'asset corrompu → Asset échoue",
+    fixtures: true,
+    media(directory) {
+      fs.truncateSync(
+        path.join(directory, "assets", "s02-g01-sh01.mp4"),
+        600
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Local Media : assets\/s02-g01-sh01\.mp4 — Media Inspector : fichier illisible par ffprobe/
+      });
+    }
+  },
+  {
+    name: "médias locaux : fichier d'asset vide → Asset échoue",
+    fixtures: true,
+    media(directory) {
+      fs.writeFileSync(
+        path.join(directory, "assets", "s01-g01-sh01.mp4"),
+        ""
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Local Media : fichier média vide \(assets\/s01-g01-sh01\.mp4\)/
+      });
+    }
+  },
+  {
+    name: "médias locaux : audio fourni pour un asset visuel → Asset échoue",
+    fixtures: true,
+    media(directory) {
+      fs.copyFileSync(
+        path.join(directory, "voice", "s01-g01.wav"),
+        path.join(directory, "assets", "s01-g01-sh01.mp4")
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Local Media : mauvais type de média \(assets\/s01-g01-sh01\.mp4\) : contenu audio, video attendu/
+      });
+    }
+  },
+  {
+    name: "médias locaux : image fournie pour un asset stock_video → Asset échoue",
+    fixtures: true,
+    media(directory) {
+      fs.rmSync(
+        path.join(directory, "assets", "s01-g01-sh01.mp4")
+      );
+      fs.copyFileSync(
+        path.join(directory, "assets", "s01-g01-sh02.png"),
+        path.join(directory, "assets", "s01-g01-sh01.png")
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Asset Agent : manifeste rejeté par le Asset Gate\..*mauvais type de média — image fourni pour un asset stock_video/
+      });
+    }
+  },
+  {
+    name: "médias locaux : vidéo plus courte que le besoin → Asset échoue",
+    fixtures: true,
+    media(directory) {
+      generateVideo(
+        path.join(directory, "assets", "s02-g01-sh01.mp4"),
+        { seconds: 9 }
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Asset Agent : manifeste rejeté par le Asset Gate\..*média plus court \(9s\) que la durée nécessaire \(12s\)/
+      });
+    }
+  },
+  {
+    name: "médias locaux : fichier sans asset correspondant → Asset échoue",
+    fixtures: true,
+    media(directory) {
+      fs.copyFileSync(
+        path.join(directory, "assets", "s01-g01-sh01.mp4"),
+        path.join(directory, "assets", "s09-g01-sh01.mp4")
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Asset Agent : fichier média sans asset correspondant — s09-g01-sh01\./
+      });
+    }
+  },
+  {
+    name: "médias locaux : fichier audio absent → Voice échoue, Assembly ne démarre pas",
+    fixtures: true,
+    media(directory) {
+      fs.rmSync(path.join(directory, "voice", "s02-g01.mp3"));
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "voice",
+        error: /^Voice Agent : audio local manquant pour s02-g01\./
+      });
+    }
+  },
+  {
+    name: "médias locaux : vidéo fournie comme voix → Voice échoue",
+    fixtures: true,
+    media(directory) {
+      fs.copyFileSync(
+        path.join(directory, "assets", "s01-g01-sh01.mp4"),
+        path.join(directory, "voice", "s01-g01.wav")
+      );
+    },
+    check(run) {
+      assertFail(run, {
+        failedAgent: "voice",
+        error:
+          /^Local Media : mauvais type de média \(voice\/s01-g01\.wav\) : contenu video, audio attendu/
+      });
+    }
+  },
+  {
+    name: "médias locaux : dossier média inexistant → Asset échoue",
+    fixtures: true,
+    mediaDirArgument: path.join(ROOT, "tmp", "r9-media-absent"),
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error: /^Local Media : dossier média introuvable/
+      });
+    }
+  },
+  {
+    name: "médias locaux : URL à la place d'un dossier → Asset échoue",
+    fixtures: true,
+    mediaDirArgument: "https://exemple.invalid/medias",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Local Media : le dossier média doit être un chemin local, pas une URL/
+      });
+    }
+  },
+
+  // Média altéré APRÈS son inspection : détecté avant l'étape aval.
+  {
+    name: "faute média : asset modifié après inspection → Assembly échoue, Quality ne démarre pas",
+    fixtures: true,
+    media: true,
+    fault: "media-asset-modified-before-assembly",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "assembly",
+        error:
+          /^Assembly Agent : plan rejeté par le Source Mapping Gate\..*vérification disque des médias en échec — assets\[0\]: média modifié depuis l'inspection \(assets\/s01-g01-sh01\.mp4/
+      });
+    }
+  },
+  {
+    name: "faute média : audio supprimé après inspection → Assembly échoue, Quality ne démarre pas",
+    fixtures: true,
+    media: true,
+    fault: "media-voice-deleted-before-assembly",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "assembly",
+        error:
+          /^Assembly Agent : plan rejeté par le Source Mapping Gate\..*narration_units\[0\]: Local Media : fichier média absent \(voice\/s01-g01\.wav\)/
+      });
+    }
+  },
+  {
+    name: "faute média : asset supprimé après le montage → Quality échoue",
+    fixtures: true,
+    media: true,
+    fault: "media-asset-deleted-before-quality",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "quality",
+        error:
+          /^Quality Agent : audit rejeté\..*\[media_files\] assets\[4\]: Local Media : fichier média absent \(assets\/s02-g01-sh02\.mp4\)/
+      });
+    }
+  },
+  {
+    name: "faute média : audio modifié après le montage → Quality échoue",
+    fixtures: true,
+    media: true,
+    fault: "media-voice-modified-before-quality",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "quality",
+        error:
+          /^Quality Agent : audit rejeté\..*\[media_files\] narration_units\[1\]: média modifié depuis l'inspection \(voice\/s02-g01\.mp3/
+      });
+    }
+  },
+  {
+    name: "faute média : empreinte falsifiée dans assets.json → Assembly échoue",
+    fixtures: true,
+    media: true,
+    fault: "media-manifest-sha-tampered",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "assembly",
+        error:
+          /^Assembly Agent : plan rejeté par le Source Mapping Gate\..*assets\[0\]: média modifié depuis l'inspection \(assets\/s01-g01-sh01\.mp4 — sha256\)/
+      });
+    }
+  },
+  {
+    name: "faute média : référence en traversal dans assets.json → Assembly échoue",
+    fixtures: true,
+    media: true,
+    fault: "media-manifest-path-traversal",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "assembly",
+        error:
+          /^Assembly Agent : manifeste d'assets source invalide\..*path ne doit contenir ni remontée ni segment vide/
+      });
+    }
   }
 ];
 
@@ -886,30 +1332,48 @@ console.log("========================================");
 console.log(" PIPELINE LOCAL FIXTURES — SMOKE (ZERO API)");
 console.log("========================================");
 
-for (const testCase of cases) {
-  let run = null;
+try {
+  for (const testCase of cases) {
+    let run = null;
 
-  try {
-    run = runPipeline(testCase);
-    testCase.check(run);
+    try {
+      run = runPipeline(testCase);
 
-    passed += 1;
+      // Recontrôle indépendant des médias référencés, pour les
+      // assertions sur les productions réussies.
+      if (run.mediaDir && run.status === 0) {
+        run.mediaVerification = await verifyLocalMedia({
+          mediaDir: run.mediaDir,
+          assets: run.assets?.data,
+          voice: run.voice?.data
+        });
+      }
 
-    console.log(`PASS — ${testCase.name}`);
-  } catch (error) {
-    failed += 1;
+      testCase.check(run);
 
-    console.error(`FAIL — ${testCase.name}`);
-    console.error(`       ${error?.message ?? error}`);
+      passed += 1;
+
+      console.log(`PASS — ${testCase.name}`);
+    } catch (error) {
+      failed += 1;
+
+      console.error(`FAIL — ${testCase.name}`);
+      console.error(`       ${error?.message ?? error}`);
+    }
+
+    if (run) {
+      console.log(
+        `       projects/${run.productionId} — ` +
+        `exit=${run.status} — ` +
+        `status=${run.production?.status} — ` +
+        `garde réseau : ${run.blockedAttempts} tentative(s) bloquée(s)`
+      );
+    }
   }
-
-  if (run) {
-    console.log(
-      `       projects/${run.productionId} — ` +
-      `exit=${run.status} — ` +
-      `status=${run.production?.status} — ` +
-      `garde réseau : ${run.blockedAttempts} tentative(s) bloquée(s)`
-    );
+} finally {
+  // Le smoke ne supprime que le dossier de faux médias qu'il a créé.
+  if (mediaFixtureRoot !== null) {
+    removeMediaFixtureRoot(mediaFixtureRoot);
   }
 }
 

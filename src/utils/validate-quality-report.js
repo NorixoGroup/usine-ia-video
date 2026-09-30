@@ -137,8 +137,36 @@ const REPORT_KEYS = [
   "verdict",
   "checks",
   "metrics",
+  "media",
   "warnings"
 ];
+
+// Périmètre réellement contrôlé par l'audit. Le rapport l'indique
+// toujours : un PASS ne doit jamais laisser croire qu'une vidéo finale
+// a été produite ou inspectée.
+export const QUALITY_SCOPE_CONTRACTS = "contracts_only";
+export const QUALITY_SCOPE_LOCAL_MEDIA = "local_media";
+export const QUALITY_FINAL_VIDEO = "not_rendered";
+
+// Contrôles ajoutés lorsque des médias locaux sont rattachés.
+export const QUALITY_MEDIA_CHECK_IDS = [
+  "media_files"
+];
+
+const MEDIA_KEYS_BY_SCOPE = {
+  [QUALITY_SCOPE_CONTRACTS]: [
+    "scope",
+    "final_video"
+  ],
+  [QUALITY_SCOPE_LOCAL_MEDIA]: [
+    "scope",
+    "final_video",
+    "assets_inspected",
+    "narration_units_inspected",
+    "estimated_narration_seconds",
+    "measured_narration_seconds"
+  ]
+};
 
 const CHECK_KEYS = ["id", "valid", "errors"];
 
@@ -466,13 +494,157 @@ function auditScriptVoiceMapping({ artifacts }) {
   ).errors;
 }
 
-function auditAssemblySourceMapping({ artifacts, target }) {
+function auditAssemblySourceMapping({
+  artifacts,
+  target,
+  mediaVerification
+}) {
   return validateAssemblySourceMapping(
     artifacts.assembly.data,
     artifacts.assets.data,
     artifacts.voice.data,
-    target?.video
+    target?.video,
+    mediaVerification
   ).errors;
+}
+
+function formatSeconds(seconds) {
+  return `${roundTime(seconds)}s`;
+}
+
+// Écarts non bloquants entre les médias locaux et la cible : signalés,
+// jamais corrigés. Le recalage temporel appartient au rendu.
+function collectMediaWarnings(artifacts, target, warnings) {
+  const video = target?.video;
+  const medias = artifacts.assets.data.assets.map(
+    asset => asset.media
+  );
+
+  if (isPlainObject(video)) {
+    const belowResolution = medias.filter(
+      media =>
+        media.width < video.width ||
+        media.height < video.height
+    ).length;
+
+    if (belowResolution > 0) {
+      warnings.push(
+        `${belowResolution} média(s) sous la résolution cible ${video.width}x${video.height}`
+      );
+    }
+
+    const ratio = String(video.aspect_ratio).match(/^(\d+):(\d+)$/);
+
+    const otherRatio = ratio
+      ? medias.filter(
+          media =>
+            media.width * Number(ratio[2]) !==
+            media.height * Number(ratio[1])
+        ).length
+      : 0;
+
+    if (otherRatio > 0) {
+      warnings.push(
+        `${otherRatio} média(s) au ratio différent de ${video.aspect_ratio}`
+      );
+    }
+
+    const otherFps = medias.filter(
+      media => media.kind === "video" && media.fps !== video.fps
+    ).length;
+
+    if (otherFps > 0) {
+      warnings.push(
+        `${otherFps} vidéo(s) à une cadence différente de ${video.fps} images/s`
+      );
+    }
+  }
+
+  for (const unit of artifacts.voice.data.narration_units) {
+    const drift = roundTime(
+      unit.audio.duration_seconds - unit.estimated_seconds
+    );
+
+    if (drift !== 0) {
+      warnings.push(
+        `${unit.unit_id}: durée audio mesurée ` +
+        `${formatSeconds(unit.audio.duration_seconds)}, estimée ` +
+        `${formatSeconds(unit.estimated_seconds)} ` +
+        `(écart ${drift > 0 ? "+" : ""}${drift}s)`
+      );
+    }
+  }
+}
+
+// Médias locaux : tout asset et toute unité doivent être rattachés à un
+// fichier, et la couche média doit les avoir tous recontrôlés sur
+// disque juste avant l'audit.
+function auditMediaFiles(
+  { artifacts, target, mediaVerification },
+  warnings
+) {
+  const errors = [];
+
+  const assets = artifacts.assets.data.assets;
+  const units = artifacts.voice.data.narration_units;
+
+  const unresolved = assets.filter(
+    asset => !isPlainObject(asset?.media)
+  ).length;
+
+  if (unresolved > 0) {
+    errors.push(
+      `assets.json: ${unresolved} asset(s) sans média local`
+    );
+  }
+
+  const unsynthesized = units.filter(
+    unit => !isPlainObject(unit?.audio)
+  ).length;
+
+  if (unsynthesized > 0) {
+    errors.push(
+      `voice.json: ${unsynthesized} unité(s) sans audio local`
+    );
+  }
+
+  if (
+    !isPlainObject(mediaVerification) ||
+    mediaVerification.scope !== QUALITY_SCOPE_LOCAL_MEDIA ||
+    !Array.isArray(mediaVerification.errors) ||
+    !Array.isArray(mediaVerification.files)
+  ) {
+    errors.push("rapport de vérification média absent ou invalide");
+
+    return errors;
+  }
+
+  if (
+    mediaVerification.valid !== true ||
+    mediaVerification.errors.length > 0
+  ) {
+    errors.push(
+      ...(
+        mediaVerification.errors.length > 0
+          ? mediaVerification.errors
+          : ["rapport de vérification média en échec"]
+      )
+    );
+  }
+
+  const expected = assets.length + units.length;
+
+  if (mediaVerification.files.length !== expected) {
+    errors.push(
+      `${mediaVerification.files.length} fichier(s) vérifié(s) sur disque pour ${expected} attendu(s)`
+    );
+  }
+
+  if (errors.length === 0) {
+    collectMediaWarnings(artifacts, target, warnings);
+  }
+
+  return errors;
 }
 
 function auditTitles({ artifacts }) {
@@ -572,26 +744,45 @@ const AUDITS = {
   script_voice_mapping: auditScriptVoiceMapping,
   assembly_source_mapping: auditAssemblySourceMapping,
   titles: auditTitles,
-  durations: auditDurations
+  durations: auditDurations,
+  media_files: auditMediaFiles
 };
+
+// Contrôles attendus selon le périmètre audité.
+export function expectedQualityCheckIds(scope) {
+  return scope === QUALITY_SCOPE_LOCAL_MEDIA
+    ? [...QUALITY_CHECK_IDS, ...QUALITY_MEDIA_CHECK_IDS]
+    : QUALITY_CHECK_IDS;
+}
 
 // Audite les six artefacts persistés. Ne répare rien, ne rejoue aucun
 // modèle. Un contrôle qui ne peut pas s'exécuter sur des données
 // corrompues est un contrôle en échec.
+//
+// mediaVerification est le rapport de recontrôle disque remis par la
+// couche média. Absent : l'audit porte sur les contrats seuls, et tout
+// média référencé dans les artefacts est alors une incohérence.
 export function auditPipelineArtifacts({
   artifacts,
   target,
-  mode
+  mode,
+  mediaVerification
 }) {
   const warnings = [];
 
   const context = {
     artifacts: isPlainObject(artifacts) ? artifacts : {},
     target,
-    mode
+    mode,
+    mediaVerification
   };
 
-  const checks = QUALITY_CHECK_IDS.map(id => {
+  const scope =
+    mediaVerification === undefined
+      ? QUALITY_SCOPE_CONTRACTS
+      : QUALITY_SCOPE_LOCAL_MEDIA;
+
+  const checks = expectedQualityCheckIds(scope).map(id => {
     let errors;
 
     try {
@@ -610,8 +801,36 @@ export function auditPipelineArtifacts({
   });
 
   return {
+    scope,
     checks,
     warnings
+  };
+}
+
+// Bloc "media" du rapport : ce que l'audit a réellement contrôlé.
+// final_video vaut toujours "not_rendered" : aucune vidéo finale n'est
+// produite ni inspectée à ce stade du pipeline.
+export function describeMediaScope(artifacts, scope) {
+  if (scope !== QUALITY_SCOPE_LOCAL_MEDIA) {
+    return {
+      scope: QUALITY_SCOPE_CONTRACTS,
+      final_video: QUALITY_FINAL_VIDEO
+    };
+  }
+
+  const units = artifacts.voice.data.narration_units;
+
+  return {
+    scope: QUALITY_SCOPE_LOCAL_MEDIA,
+    final_video: QUALITY_FINAL_VIDEO,
+    assets_inspected: artifacts.assets.data.assets.length,
+    narration_units_inspected: units.length,
+    estimated_narration_seconds: sum(
+      units.map(unit => unit.estimated_seconds)
+    ),
+    measured_narration_seconds: sum(
+      units.map(unit => unit.audio.duration_seconds)
+    )
   };
 }
 
@@ -656,13 +875,47 @@ export function validateQualityReport(data) {
     errors.push(`verdict doit être "${QUALITY_VERDICT}"`);
   }
 
+  const scope = data.media?.scope;
+
+  if (
+    !isPlainObject(data.media) ||
+    !Object.hasOwn(MEDIA_KEYS_BY_SCOPE, scope ?? "")
+  ) {
+    errors.push(
+      `media: périmètre absent ou invalide — scope doit être ` +
+      `"${QUALITY_SCOPE_CONTRACTS}" ou "${QUALITY_SCOPE_LOCAL_MEDIA}"`
+    );
+  } else {
+    checkExactKeys(
+      data.media,
+      MEDIA_KEYS_BY_SCOPE[scope],
+      "media",
+      errors
+    );
+
+    if (data.media.final_video !== QUALITY_FINAL_VIDEO) {
+      errors.push(
+        `media: final_video doit être "${QUALITY_FINAL_VIDEO}"`
+      );
+    }
+
+    for (const key of MEDIA_KEYS_BY_SCOPE[scope].slice(2)) {
+      if (
+        !Number.isFinite(data.media[key]) ||
+        data.media[key] <= 0
+      ) {
+        errors.push(`media: ${key} invalide`);
+      }
+    }
+  }
+
   if (!Array.isArray(data.checks)) {
     errors.push("checks doit être un tableau");
   } else {
     if (
       !isDeepStrictEqual(
         data.checks.map(check => check?.id),
-        QUALITY_CHECK_IDS
+        expectedQualityCheckIds(scope)
       )
     ) {
       errors.push(

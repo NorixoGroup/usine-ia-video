@@ -10,6 +10,8 @@ import {
 import {
   ASSEMBLY_STATUS,
   roundTime,
+  toClipMediaReference,
+  toUnitAudioReference,
   validateOutputSpec,
   validateAssemblyPlan,
   validateAssemblySourceMapping
@@ -21,6 +23,13 @@ import {
 // d'assets et de narration validés sont posés sur une timeline à deux
 // pistes. Aucune durée n'est corrigée : un écart entre l'image et la
 // narration d'un segment fait échouer le Assembly Gate.
+//
+// Lorsque les manifestes sont rattachés à des médias locaux, le plan
+// référence ces médias. L'agent ne lit aucun fichier : la couche média
+// recontrôle les fichiers sur disque et lui remet son rapport
+// (mediaVerification), qu'il exige alors valide et complet. Le plan
+// reste "unrendered" : la timeline garde les durées prévues, les durées
+// mesurées sont portées par les références.
 
 function buildTrack(items, toEntry) {
   const track = [];
@@ -30,12 +39,18 @@ function buildTrack(items, toEntry) {
     const entry = toEntry(item);
     const end = roundTime(cursor + entry.duration_seconds);
 
-    track.push({
+    const element = {
       ...entry.ids,
       start_seconds: cursor,
       end_seconds: end,
       duration_seconds: entry.duration_seconds
-    });
+    };
+
+    if (entry.reference) {
+      element[entry.reference.key] = entry.reference.value;
+    }
+
+    track.push(element);
 
     cursor = end;
   }
@@ -46,26 +61,36 @@ function buildTrack(items, toEntry) {
 function buildPlan(assets, voice, target) {
   const videoTrack = buildTrack(
     assets.assets,
-    asset => ({
-      ids: {
-        asset_id: asset.asset_id,
-        unit_id: buildUnitId(
-          asset.section_index,
-          asset.segment_index
-        )
-      },
-      duration_seconds: asset.duration_seconds
-    })
+    asset => {
+      const media = toClipMediaReference(asset);
+
+      return {
+        ids: {
+          asset_id: asset.asset_id,
+          unit_id: buildUnitId(
+            asset.section_index,
+            asset.segment_index
+          )
+        },
+        duration_seconds: asset.duration_seconds,
+        reference: media && { key: "media", value: media }
+      };
+    }
   );
 
   const audioTrack = buildTrack(
     voice.narration_units,
-    unit => ({
-      ids: {
-        unit_id: unit.unit_id
-      },
-      duration_seconds: unit.estimated_seconds
-    })
+    unit => {
+      const audio = toUnitAudioReference(unit);
+
+      return {
+        ids: {
+          unit_id: unit.unit_id
+        },
+        duration_seconds: unit.estimated_seconds,
+        reference: audio && { key: "audio", value: audio }
+      };
+    }
   );
 
   return {
@@ -91,7 +116,8 @@ export async function runAssemblyAgent({
   assets,
   voice,
   target,
-  testMode = false
+  testMode = false,
+  mediaVerification
 }) {
   const assetsValidation = validateAssetManifest(assets);
 
@@ -139,7 +165,8 @@ export async function runAssemblyAgent({
       data,
       assets,
       voice,
-      target
+      target,
+      mediaVerification
     );
 
   if (!sourceMappingValidation.valid) {

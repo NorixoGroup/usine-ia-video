@@ -5,9 +5,14 @@
 //
 // Aucun fichier de production n'importe ce module. Préchargé, il altère
 // EN MÉMOIRE ce que l'orchestrateur relit depuis le disque pour un
-// artefact précis, à une lecture précise. Le fichier sur le disque n'est
+// artefact précis, à une lecture précise. L'artefact sur le disque n'est
 // jamais modifié. Il sert à prouver que chaque agent aval revalide ce
 // qu'il relit et bloque la suite du pipeline.
+//
+// Les fautes média altèrent en plus, au même instant, un FAUX média du
+// dossier de fixtures du test (tmp/r9-media-* uniquement), pour prouver
+// qu'un média modifié ou supprimé après son inspection est détecté avant
+// l'étape aval.
 //
 // Sans PIPELINE_FAULT connu, le chargement échoue : aucune activation
 // implicite.
@@ -98,8 +103,109 @@ const FAULTS = {
       clip.start_seconds += 1;
       clip.end_seconds += 1;
     }
+  },
+
+  // --- Fautes média (pipeline lancé avec --media-dir) ---------------
+  //
+  // alterMedia modifie ou supprime un FAUX média du dossier de fixtures
+  // du test, après son inspection et juste avant l'étape aval qui doit
+  // le recontrôler. Refusé hors de tmp/r9-media-*.
+
+  // assets.json relu pour Assembly : l'asset a déjà été inspecté.
+  "media-asset-modified-before-assembly": {
+    file: "assets.json",
+    read: 1,
+    alterMedia(mediaRoot) {
+      fs.appendFileSync(
+        path.join(mediaRoot, "assets", "s01-g01-sh01.mp4"),
+        "altération après inspection"
+      );
+    }
+  },
+
+  // voice.json relu pour Assembly : l'audio a déjà été inspecté.
+  "media-voice-deleted-before-assembly": {
+    file: "voice.json",
+    read: 1,
+    alterMedia(mediaRoot) {
+      fs.rmSync(path.join(mediaRoot, "voice", "s01-g01.wav"));
+    }
+  },
+
+  // assembly.json relu pour Quality : Assembly a déjà validé le média.
+  "media-asset-deleted-before-quality": {
+    file: "assembly.json",
+    read: 1,
+    alterMedia(mediaRoot) {
+      fs.rmSync(
+        path.join(mediaRoot, "assets", "s02-g01-sh02.mp4")
+      );
+    }
+  },
+
+  "media-voice-modified-before-quality": {
+    file: "assembly.json",
+    read: 1,
+    alterMedia(mediaRoot) {
+      fs.appendFileSync(
+        path.join(mediaRoot, "voice", "s02-g01.mp3"),
+        "altération après inspection"
+      );
+    }
+  },
+
+  // assets.json relu pour Assembly : empreinte enregistrée falsifiée.
+  "media-manifest-sha-tampered": {
+    file: "assets.json",
+    read: 1,
+    tamper(envelope) {
+      envelope.data.assets[0].media.sha256 = "0".repeat(64);
+    }
+  },
+
+  // assets.json relu pour Assembly : référence sortant du dossier média.
+  "media-manifest-path-traversal": {
+    file: "assets.json",
+    read: 1,
+    tamper(envelope) {
+      envelope.data.assets[0].media.path =
+        "assets/../../outside.mp4";
+    }
   }
 };
+
+// Dossier média visé par alterMedia : uniquement un dossier de fixtures
+// tmp/r9-media-* du dépôt, jamais un dossier de médias réels.
+function resolveFixtureMediaRoot() {
+  const prefix = "--media-dir=";
+
+  const argument = process.argv.find(
+    value => value.startsWith(prefix)
+  );
+
+  if (!argument) {
+    throw new Error(
+      "pipeline-fault-injector — cette faute exige --media-dir."
+    );
+  }
+
+  const mediaRoot = fs.realpathSync(
+    path.resolve(argument.slice(prefix.length))
+  );
+
+  const allowed = path.join(
+    fs.realpathSync(path.join(process.cwd(), "tmp")),
+    "r9-media-"
+  );
+
+  if (!mediaRoot.startsWith(allowed)) {
+    throw new Error(
+      `pipeline-fault-injector — altération refusée hors de tmp/r9-media-* (${mediaRoot}).`
+    );
+  }
+
+  return mediaRoot;
+}
 
 const faultName = process.env.PIPELINE_FAULT;
 
@@ -137,10 +243,19 @@ fs.readFileSync = function readFileSyncWithFault(file, ...rest) {
     return content;
   }
 
+  injections += 1;
+
+  if (fault.alterMedia) {
+    fault.alterMedia(resolveFixtureMediaRoot());
+  }
+
+  if (!fault.tamper) {
+    return content;
+  }
+
   const envelope = JSON.parse(content);
 
   fault.tamper(envelope);
-  injections += 1;
 
   return JSON.stringify(envelope, null, 2) + "\n";
 };

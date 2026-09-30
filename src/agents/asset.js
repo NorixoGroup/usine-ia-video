@@ -4,6 +4,7 @@ import {
 
 import {
   ASSET_STATUS,
+  ASSET_STATUS_RESOLVED_LOCAL,
   buildAssetId,
   summarizeAssets,
   validateAssetManifest,
@@ -15,8 +16,59 @@ import {
 // Aucun modèle, aucun fournisseur, aucun réseau : le plan visuel validé
 // est transformé shot par shot, sans réécriture. Les assets ne sont ni
 // recherchés, ni choisis, ni téléchargés ici.
+//
+// Lorsque la couche média fournit des relevés d'inspection de fichiers
+// locaux (localMedia, par asset_id), chaque asset est rattaché à son
+// fichier : tout ou rien. L'agent ne lit lui-même aucun fichier.
 
-function buildManifest(visual) {
+function isPlainObject(value) {
+  return (
+    value !== null &&
+    typeof value === "object" &&
+    !Array.isArray(value)
+  );
+}
+
+function attachLocalMedia(assets, localMedia) {
+  if (!isPlainObject(localMedia)) {
+    throw new Error(
+      "Asset Agent : relevés de médias locaux invalides."
+    );
+  }
+
+  const assetIds = assets.map(asset => asset.asset_id);
+
+  const missing = assetIds.filter(
+    id => !Object.hasOwn(localMedia, id)
+  );
+
+  if (missing.length > 0) {
+    throw new Error(
+      "Asset Agent : média local manquant pour " +
+      missing.join(", ") +
+      "."
+    );
+  }
+
+  const unexpected = Object.keys(localMedia).filter(
+    id => !assetIds.includes(id)
+  );
+
+  if (unexpected.length > 0) {
+    throw new Error(
+      "Asset Agent : fichier média sans asset correspondant — " +
+      unexpected.join(", ") +
+      "."
+    );
+  }
+
+  for (const asset of assets) {
+    asset.status = ASSET_STATUS_RESOLVED_LOCAL;
+    asset.media = structuredClone(localMedia[asset.asset_id]);
+  }
+}
+
+function buildManifest(visual, localMedia) {
   const assets = [];
 
   visual.sections.forEach((section, sectionIndex) => {
@@ -44,6 +96,10 @@ function buildManifest(visual) {
     });
   });
 
+  if (localMedia !== undefined) {
+    attachLocalMedia(assets, localMedia);
+  }
+
   return {
     title: visual.title,
     assets,
@@ -53,7 +109,8 @@ function buildManifest(visual) {
 
 export async function runAssetAgent({
   visual,
-  testMode = false
+  testMode = false,
+  localMedia
 }) {
   const visualValidation =
     validateVisualDirectorDossier(visual);
@@ -65,7 +122,7 @@ export async function runAssetAgent({
     );
   }
 
-  const data = buildManifest(visual);
+  const data = buildManifest(visual, localMedia);
 
   const validation = validateAssetManifest(data);
 

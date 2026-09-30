@@ -1,6 +1,7 @@
 import {
   QUALITY_VERDICT,
   auditPipelineArtifacts,
+  describeMediaScope,
   measurePipelineArtifacts,
   validateQualityReport
 } from "../utils/validate-quality-report.js";
@@ -10,18 +11,27 @@ import {
 // Il AUDITE les six artefacts persistés et ne répare rien : aucun
 // modèle, aucune API, aucun juge rejoué. Un seul contrôle en échec fait
 // échouer l'agent, et aucun rapport n'est alors produit.
+//
+// Le rapport indique toujours son périmètre (bloc "media") :
+// - "contracts_only" : seuls les contrats ont été audités ;
+// - "local_media" : les médias locaux rattachés ont en plus été
+//   recontrôlés sur disque par la couche média, qui remet son rapport
+//   (mediaVerification). L'agent ne lit lui-même aucun fichier.
+// Dans les deux cas, aucune vidéo finale n'est produite ni inspectée.
 
 export async function runQualityAgent({
   artifacts,
   target,
-  testMode = false
+  testMode = false,
+  mediaVerification
 }) {
   const mode = testMode ? "test" : "full";
 
-  const { checks, warnings } = auditPipelineArtifacts({
+  const { scope, checks, warnings } = auditPipelineArtifacts({
     artifacts,
     target,
-    mode
+    mode,
+    mediaVerification
   });
 
   const failedChecks = checks.filter(check => !check.valid);
@@ -43,6 +53,7 @@ export async function runQualityAgent({
     verdict: QUALITY_VERDICT,
     checks,
     metrics: measurePipelineArtifacts(artifacts),
+    media: describeMediaScope(artifacts, scope),
     warnings
   };
 

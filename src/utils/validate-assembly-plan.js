@@ -128,13 +128,139 @@ export function validateOutputSpec(output, label = "output") {
   return errors;
 }
 
-function validateTrackItem(item, keys, idField, label, errors) {
+// Références optionnelles vers les médias locaux inspectés : présentes
+// sur toute la timeline, ou absentes partout.
+const CLIP_REFERENCE = {
+  key: "media",
+  keys: ["path", "kind", "duration_seconds"],
+  directory: "assets",
+  idField: "asset_id",
+  extensions: [
+    ".mp4", ".mov", ".mkv", ".webm", ".png", ".jpg", ".jpeg"
+  ]
+};
+
+const AUDIO_REFERENCE = {
+  key: "audio",
+  keys: ["path", "duration_seconds"],
+  directory: "voice",
+  idField: "unit_id",
+  extensions: [".wav", ".mp3", ".m4a"]
+};
+
+// Référence locale relative à la racine média : ni URL, ni file://, ni
+// chemin absolu, ni remontée de dossier.
+function referencePathError(reference, spec, id) {
+  if (!isNonEmptyString(reference)) {
+    return "path manquant";
+  }
+
+  if (/^[a-z][a-z0-9+.-]*:/i.test(reference)) {
+    return "path ne doit pas être une URL ni une référence distante";
+  }
+
+  if (reference.startsWith("/") || reference.includes("\\")) {
+    return "path ne doit pas être un chemin absolu";
+  }
+
+  if (
+    reference.split("/").some(
+      segment =>
+        segment === "" ||
+        segment === "." ||
+        segment === ".."
+    )
+  ) {
+    return "path ne doit contenir ni remontée ni segment vide";
+  }
+
+  const extension = spec.extensions.find(
+    candidate => reference.toLowerCase().endsWith(candidate)
+  );
+
+  if (
+    !extension ||
+    reference.slice(0, -extension.length) !==
+      `${spec.directory}/${id}`
+  ) {
+    return `path doit être ${spec.directory}/<${spec.idField}>.<extension>`;
+  }
+
+  return null;
+}
+
+function validateReference(item, spec, label, errors) {
+  const reference = item[spec.key];
+  const referenceLabel = `${label}.${spec.key}`;
+
+  if (!isPlainObject(reference)) {
+    errors.push(`${referenceLabel}: référence média invalide`);
+    return;
+  }
+
+  checkExactKeys(reference, spec.keys, referenceLabel, errors);
+
+  const pathError = referencePathError(
+    reference.path,
+    spec,
+    item[spec.idField]
+  );
+
+  if (pathError) {
+    errors.push(`${referenceLabel}: ${pathError}`);
+  }
+
+  if (spec.key === "media") {
+    if (!["video", "image"].includes(reference.kind)) {
+      errors.push(`${referenceLabel}: kind invalide`);
+    }
+
+    // Une image n'a pas de durée propre.
+    if (
+      reference.kind === "image"
+        ? reference.duration_seconds !== null
+        : !isFiniteNumber(reference.duration_seconds) ||
+          reference.duration_seconds <= 0
+    ) {
+      errors.push(`${referenceLabel}: duration_seconds invalide`);
+    }
+
+    return;
+  }
+
+  if (
+    !isFiniteNumber(reference.duration_seconds) ||
+    reference.duration_seconds <= 0
+  ) {
+    errors.push(`${referenceLabel}: duration_seconds invalide`);
+  }
+}
+
+function validateTrackItem(
+  item,
+  keys,
+  idField,
+  label,
+  errors,
+  referenceSpec
+) {
   if (!isPlainObject(item)) {
     errors.push(`${label}: élément absent ou invalide`);
     return;
   }
 
-  checkExactKeys(item, keys, label, errors);
+  const hasReference = Object.hasOwn(item, referenceSpec.key);
+
+  checkExactKeys(
+    item,
+    hasReference ? [...keys, referenceSpec.key] : keys,
+    label,
+    errors
+  );
+
+  if (hasReference) {
+    validateReference(item, referenceSpec, label, errors);
+  }
 
   for (const field of idField) {
     if (!isNonEmptyString(item[field])) {
@@ -259,7 +385,8 @@ export function validateAssemblyPlan(data) {
       CLIP_KEYS,
       ["asset_id", "unit_id"],
       `video_track[${index}]`,
-      errors
+      errors,
+      CLIP_REFERENCE
     );
   });
 
@@ -269,9 +396,29 @@ export function validateAssemblyPlan(data) {
       AUDIO_KEYS,
       ["unit_id"],
       `audio_track[${index}]`,
-      errors
+      errors,
+      AUDIO_REFERENCE
     );
   });
+
+  // Tout ou rien : la timeline référence un média pour chaque clip et
+  // chaque unité, ou n'en référence aucun.
+  const referenced = [
+    ...data.video_track.map(
+      clip => isPlainObject(clip) && Object.hasOwn(clip, "media")
+    ),
+    ...data.audio_track.map(
+      unit => isPlainObject(unit) && Object.hasOwn(unit, "audio")
+    )
+  ];
+
+  const referencedCount = referenced.filter(Boolean).length;
+
+  if (referencedCount > 0 && referencedCount < referenced.length) {
+    errors.push(
+      `références média partielles interdites : ${referencedCount} élément(s) sur ${referenced.length}`
+    );
+  }
 
   // Continuité, couverture et résumé ne sont vérifiables que sur des
   // éléments de piste valides.
@@ -394,14 +541,100 @@ function compareCount(actual, expected, labels, errors) {
   }
 }
 
+// Référence de timeline vers le média local d'un asset résolu, ou
+// undefined si l'asset n'est rattaché à aucun fichier.
+export function toClipMediaReference(asset) {
+  if (!isPlainObject(asset?.media)) {
+    return undefined;
+  }
+
+  return {
+    path: asset.media.path,
+    kind: asset.media.kind,
+    duration_seconds: asset.media.duration_seconds
+  };
+}
+
+// Référence de timeline vers l'audio local d'une unité, ou undefined.
+// duration_seconds est ici la durée MESURÉE du fichier.
+export function toUnitAudioReference(unit) {
+  if (!isPlainObject(unit?.audio)) {
+    return undefined;
+  }
+
+  return {
+    path: unit.audio.path,
+    duration_seconds: unit.audio.duration_seconds
+  };
+}
+
+// Contrôle que chaque média référencé par les manifestes sources figure
+// dans le rapport de vérification disque fourni par la couche média,
+// avec la même taille et la même empreinte.
+function checkMediaVerification(sources, mediaVerification, errors) {
+  if (sources.length === 0) {
+    if (mediaVerification !== undefined) {
+      errors.push(
+        "rapport de vérification média fourni sans média local référencé"
+      );
+    }
+
+    return;
+  }
+
+  if (
+    !isPlainObject(mediaVerification) ||
+    mediaVerification.scope !== "local_media" ||
+    !Array.isArray(mediaVerification.errors) ||
+    !Array.isArray(mediaVerification.files)
+  ) {
+    errors.push(
+      "médias locaux référencés sans rapport de vérification disque"
+    );
+    return;
+  }
+
+  if (
+    mediaVerification.valid !== true ||
+    mediaVerification.errors.length > 0
+  ) {
+    errors.push(
+      "vérification disque des médias en échec — " +
+      (mediaVerification.errors.join(" ; ") || "rapport invalide")
+    );
+    return;
+  }
+
+  for (const source of sources) {
+    const verified = mediaVerification.files.some(
+      file =>
+        isPlainObject(file) &&
+        file.role === source.role &&
+        file.id === source.id &&
+        file.path === source.record.path &&
+        file.size_bytes === source.record.size_bytes &&
+        file.sha256 === source.record.sha256
+    );
+
+    if (!verified) {
+      errors.push(
+        `média non vérifié sur disque : ${source.record.path}`
+      );
+    }
+  }
+}
+
 // Source Mapping Gate : le plan doit utiliser chaque asset et chaque
 // unité de narration exactement une fois, dans l'ordre et avec les
-// durées des manifestes sources.
+// durées des manifestes sources. Lorsque les sources sont rattachées à
+// des médias locaux, le plan doit les référencer à l'identique et ces
+// médias doivent avoir été recontrôlés sur disque.
 export function validateAssemblySourceMapping(
   plan,
   assets,
   voice,
-  target
+  target,
+  mediaVerification
 ) {
   const errors = [];
 
@@ -503,6 +736,14 @@ export function validateAssemblySourceMapping(
         `${label}: unit_id différent du segment de l'asset source`
       );
     }
+
+    if (
+      !isDeepStrictEqual(clip.media, toClipMediaReference(asset))
+    ) {
+      errors.push(
+        `${label}: media différent du média de l'asset source`
+      );
+    }
   }
 
   compareCount(
@@ -540,7 +781,47 @@ export function validateAssemblySourceMapping(
         `${label}: duration_seconds différent de l'unité source`
       );
     }
+
+    if (
+      !isDeepStrictEqual(item.audio, toUnitAudioReference(unit))
+    ) {
+      errors.push(
+        `${label}: audio différent de l'audio de l'unité source`
+      );
+    }
   }
+
+  // Médias locaux : assets et voix sont tous rattachés, ou aucun.
+  const mediaSources = [
+    ...assets.assets
+      .filter(asset => isPlainObject(asset?.media))
+      .map(asset => ({
+        role: "asset",
+        id: asset.asset_id,
+        record: asset.media
+      })),
+    ...voice.narration_units
+      .filter(unit => isPlainObject(unit?.audio))
+      .map(unit => ({
+        role: "voice",
+        id: unit.unit_id,
+        record: unit.audio
+      }))
+  ];
+
+  const expectedSources =
+    assets.assets.length + voice.narration_units.length;
+
+  if (
+    mediaSources.length > 0 &&
+    mediaSources.length < expectedSources
+  ) {
+    errors.push(
+      `médias locaux partiels interdits : ${mediaSources.length} source(s) rattachée(s) sur ${expectedSources}`
+    );
+  }
+
+  checkMediaVerification(mediaSources, mediaVerification, errors);
 
   return {
     valid: errors.length === 0,
