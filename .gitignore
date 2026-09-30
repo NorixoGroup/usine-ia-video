@@ -1,0 +1,23 @@
+# Secrets / variables d'environnement
+.env
+.env.local
+.env.*.local
+
+# Node
+node_modules/
+npm-debug.log*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Fichiers temporaires / rendus
+tmp/
+output/
+
+# Artefacts de production générés
+projects/

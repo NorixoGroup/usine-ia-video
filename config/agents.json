@@ -1,0 +1,63 @@
+{
+  "orchestrator": {
+    "id": "orchestrator",
+    "role": "Piloter le pipeline complet et contrôler les passages entre agents"
+  },
+  "agents": [
+    {
+      "id": "research",
+      "order": 1,
+      "role": "Rechercher et vérifier les informations nécessaires au documentaire"
+    },
+    {
+      "id": "script",
+      "order": 2,
+      "role": "Produire le script voix-off factuel pour une vidéo de 25 à 30 minutes"
+    },
+    {
+      "id": "visual_director",
+      "order": 3,
+      "role": "Transformer le script en timeline visuelle 16:9 exploitable"
+    },
+    {
+      "id": "asset",
+      "order": 4,
+      "role": "Identifier les assets vidéo, photo, archive, carte et graphique nécessaires"
+    },
+    {
+      "id": "voice",
+      "order": 5,
+      "role": "Produire la narration via ElevenLabs"
+    },
+    {
+      "id": "assembly",
+      "order": 6,
+      "role": "Assembler les assets et la narration pour produire le master 4K UHD"
+    },
+    {
+      "id": "quality",
+      "order": 7,
+      "role": "Contrôler durée, format, audio, assets, cohérence et intégrité du rendu"
+    }
+  ],
+  "post_publication_agents": [
+    {
+      "id": "youtube_comments",
+      "role": "Analyser les nouveaux commentaires YouTube, répondre automatiquement uniquement lorsque la réponse est sûre et transférer les cas ambigus ou sensibles à l'humain",
+      "decisions": [
+        "AUTO_REPLY",
+        "NO_REPLY",
+        "NEEDS_HUMAN"
+      ],
+      "context_sources": [
+        "video_script",
+        "research_dossier",
+        "video_metadata"
+      ],
+      "safety": {
+        "default_on_uncertainty": "NEEDS_HUMAN",
+        "auto_publish": false
+      }
+    }
+  ]
+}

@@ -1,0 +1,17 @@
+{
+  "name": "usine-ia-video",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Pipeline automatise de production video pour Les Decouvertes du Nomade",
+  "type": "module",
+  "scripts": {
+    "check": "node scripts/check-environment.js",
+    "mvp": "node src/orchestrator/mvp.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.129.0"
+  }
+}

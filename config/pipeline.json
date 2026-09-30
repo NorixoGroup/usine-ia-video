@@ -1,0 +1,41 @@
+{
+  "project": {
+    "name": "Les Decouvertes du Nomade",
+    "language": "fr",
+    "platform": "youtube",
+    "content_type": "documentary"
+  },
+  "video": {
+    "aspect_ratio": "16:9",
+    "resolution": {
+      "width": 3840,
+      "height": 2160
+    },
+    "fps": 30,
+    "target_duration_minutes": 27,
+    "minimum_duration_minutes": 25,
+    "maximum_duration_minutes": 30
+  },
+  "pipeline": {
+    "idea_generation": true,
+    "research": true,
+    "script_generation": true,
+    "scene_breakdown": true,
+    "voice_generation": true,
+    "asset_search": true,
+    "video_generation": false,
+    "assembly": true,
+    "quality_control": true
+  },
+  "providers": {
+    "reasoning": "anthropic",
+    "voice": "elevenlabs",
+    "stock_video": {
+      "pexels_api": false,
+      "manual_fallback": true
+    },
+    "generative_video": {
+      "google_veo": false
+    }
+  }
+}

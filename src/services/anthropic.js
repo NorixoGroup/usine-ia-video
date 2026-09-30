@@ -1,0 +1,91 @@
+import Anthropic from "@anthropic-ai/sdk";
+
+let client = null;
+
+function getApiKey() {
+  const key = process.env.ANTHROPIC_API_KEY;
+
+  if (!key || key.length < 50) {
+    throw new Error(
+      "ANTHROPIC_API_KEY absente ou invalide. Charge .env.local avant l'appel."
+    );
+  }
+
+  return key;
+}
+
+export function getAnthropicClient() {
+  if (!client) {
+    client = new Anthropic({
+      apiKey: getApiKey()
+    });
+  }
+
+  return client;
+}
+
+export async function createMessage({
+  system,
+  messages,
+  model = "claude-sonnet-4-5",
+  maxTokens = 1024,
+  temperature = 0.2,
+  tools
+}) {
+  if (!Array.isArray(messages) || messages.length === 0) {
+    throw new Error("createMessage exige au moins un message.");
+  }
+
+  const anthropic = getAnthropicClient();
+
+  const request = {
+    model,
+    max_tokens: maxTokens,
+    temperature,
+    messages
+  };
+
+  if (system) {
+    request.system = system;
+  }
+
+  if (tools?.length) {
+    request.tools = tools;
+  }
+
+  const startedAt = Date.now();
+
+  try {
+    const response = await anthropic.messages.create(request);
+
+    return {
+      response,
+      meta: {
+        model: response.model,
+        input_tokens: response.usage?.input_tokens ?? null,
+        output_tokens: response.usage?.output_tokens ?? null,
+        stop_reason: response.stop_reason ?? null,
+        duration_ms: Date.now() - startedAt
+      }
+    };
+  } catch (error) {
+    const status = error?.status ? ` HTTP ${error.status}` : "";
+
+    throw new Error(
+      `Erreur Anthropic${status}: ${error?.message || "erreur inconnue"}`,
+      { cause: error }
+    );
+  }
+}
+
+export function extractText(response) {
+  if (!response?.content) {
+    return "";
+  }
+
+  return response.content
+    .filter((block) => block.type === "text")
+    .map((block) => block.text)
+    .join("\n")
+    .trim();
+}

@@ -1,0 +1,19 @@
+{
+  "web_search": {
+    "enabled": true,
+    "type": "web_search_20250305",
+    "name": "web_search",
+    "max_uses": 5
+  },
+  "source_policy": {
+    "prefer_primary_sources": true,
+    "require_sources_for_key_facts": true,
+    "allow_unsourced_claims": false,
+    "mark_unverified_claims": true
+  },
+  "research_limits": {
+    "minimum_sources": 5,
+    "target_sources": 8,
+    "maximum_sources": 15
+  }
+}
