@@ -9,6 +9,8 @@
 import { networkGuard } from "./fixture-network-guard.js";
 
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import net from "node:net";
 import dns from "node:dns";
 import http from "node:http";
@@ -21,6 +23,11 @@ import {
   createMessage,
   extractText
 } from "../src/services/anthropic.js";
+
+import {
+  configureCallGuard,
+  resetCallGuard
+} from "../src/services/call-guard.js";
 
 import {
   FIXTURE_IDS,
@@ -1017,15 +1024,23 @@ await test("CAS C — le chemin historique atteint anthropic.messages.create", a
     return mockedResponse;
   };
 
+  // R13 : un appel réel exige désormais une autorisation en mémoire.
+  const guardDir = fs.mkdtempSync(
+    path.join(os.tmpdir(), "fixture-engine-call-guard-")
+  );
+
   try {
     await withEnv(
       {
         ANTHROPIC_FIXTURES: undefined,
         NO_API: undefined,
+        PIPELINE_REAL_CALLS_ACK: "1",
         // Clé entièrement factice, en mémoire uniquement.
         ANTHROPIC_API_KEY: "x".repeat(60)
       },
       async () => {
+        configureCallGuard({ productionDir: guardDir, cap: 1 });
+
         const messages = USER("test");
         const tools = [{ type: "mock_tool", name: "mock" }];
 
@@ -1068,6 +1083,8 @@ await test("CAS C — le chemin historique atteint anthropic.messages.create", a
       }
     );
   } finally {
+    resetCallGuard();
+    fs.rmSync(guardDir, { recursive: true, force: true });
     Anthropic.Messages.prototype.create =
       networkGuard.sdkMessagesCreate;
   }

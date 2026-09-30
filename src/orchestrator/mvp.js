@@ -54,6 +54,24 @@ import {
   readJsonArtifact
 } from "./artifacts.js";
 
+import {
+  assertRealCallAuthorization,
+  configureCallGuard,
+  getCallGuardStatus,
+  redactSecrets
+} from "../services/call-guard.js";
+
+import {
+  STOP_AFTER_VALUES,
+  acquireProductionLock,
+  applyResume,
+  describeMediaNeeds,
+  loadResumableProduction,
+  planReuse,
+  productionMode,
+  sealAndWriteArtifact
+} from "./resume.js";
+
 const ROOT = process.cwd();
 
 function readJson(relativePath) {
@@ -167,18 +185,140 @@ if (
   );
 }
 
-const productionId = `prod-${new Date()
-  .toISOString()
-  .replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
+// Mode d'exécution (R13). Sans --mode : test, comme avant. Le mode
+// complet n'est jamais implicite : il exige un plafond d'appels réels
+// explicite et l'accusé d'environnement (voir call-guard).
+const modeRequested = args.some((value) => value.startsWith("--mode"));
+const mode = getArgument("mode") ?? "test";
+const testMode = mode !== "full";
 
-const productionDir = path.join(ROOT, "projects", productionId);
+if (modeRequested && !["test", "full"].includes(mode)) {
+  throw new Error(
+    `Orchestrateur : --mode inconnu "${mode}". Valeurs admises : test, full.`
+  );
+}
 
-fs.mkdirSync(productionDir, { recursive: true });
+const realCallsCapRequested = args.some(
+  (value) => value.startsWith("--real-calls-cap")
+);
+const realCallsCap = getArgument("real-calls-cap");
 
-const production = {
+if (mode === "full") {
+  if (!researchScriptMode) {
+    throw new Error(
+      "Orchestrateur : --mode=full exige --research-script."
+    );
+  }
+
+  // NO_API, accusé d'environnement et plafond : refus AVANT toute
+  // création de production.
+  assertRealCallAuthorization({ cap: realCallsCap });
+} else if (realCallsCapRequested) {
+  throw new Error(
+    "Orchestrateur : --real-calls-cap exige --mode=full."
+  );
+}
+
+const resumeRequested = args.some(
+  (value) => value.startsWith("--resume")
+);
+const resumeId = getArgument("resume");
+
+if (resumeRequested && !resumeId) {
+  throw new Error(
+    "Orchestrateur : --resume exige un identifiant (--resume=<production-id>)."
+  );
+}
+
+if (resumeRequested && !researchScriptMode) {
+  throw new Error(
+    "Orchestrateur : --resume exige --research-script."
+  );
+}
+
+if (
+  resumeRequested &&
+  args.some(
+    (value) =>
+      value.startsWith("--title") || value.startsWith("--prompt")
+  )
+) {
+  throw new Error(
+    "Orchestrateur : --title et --prompt sont interdits avec --resume " +
+    "(l'entrée de la production est immuable)."
+  );
+}
+
+const acceptUnresolved = args
+  .filter((value) => value.startsWith("--accept-unresolved-calls"))
+  .map((value) =>
+    value.startsWith("--accept-unresolved-calls=")
+      ? value.slice("--accept-unresolved-calls=".length).trim()
+      : ""
+  );
+
+if (acceptUnresolved.length > 0 && !(resumeRequested && mode === "full")) {
+  throw new Error(
+    "Orchestrateur : --accept-unresolved-calls exige --resume et --mode=full."
+  );
+}
+
+const stopAfterRequested = args.some(
+  (value) => value.startsWith("--stop-after")
+);
+const stopAfter = getArgument("stop-after");
+
+if (stopAfterRequested) {
+  if (!researchScriptMode) {
+    throw new Error(
+      "Orchestrateur : --stop-after exige --research-script."
+    );
+  }
+
+  if (!STOP_AFTER_VALUES.includes(stopAfter)) {
+    throw new Error(
+      `Orchestrateur : --stop-after invalide "${stopAfter ?? ""}". ` +
+      `Valeurs admises : ${STOP_AFTER_VALUES.join(", ")}.`
+    );
+  }
+
+  if (renderRequested) {
+    throw new Error(
+      "Orchestrateur : --stop-after est incompatible avec --render."
+    );
+  }
+}
+
+const resumed = resumeRequested
+  ? loadResumableProduction({ root: ROOT, productionId: resumeId })
+  : null;
+
+if (resumed && productionMode(resumed.production) !== mode) {
+  throw new Error(
+    `Reprise refusée : --mode=${mode} différent du mode de la production ` +
+    `("${productionMode(resumed.production)}").`
+  );
+}
+
+const productionId = resumed
+  ? resumed.production.id
+  : `prod-${new Date()
+      .toISOString()
+      .replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
+
+const productionDir = resumed
+  ? resumed.productionDir
+  : path.join(ROOT, "projects", productionId);
+
+if (!resumed) {
+  fs.mkdirSync(productionDir, { recursive: true });
+}
+
+const production = resumed ? resumed.production : {
   id: productionId,
   created_at: new Date().toISOString(),
   status: "created",
+  mode,
 
   input: {
     title,
@@ -212,22 +352,26 @@ const production = {
   }))
 };
 
-if (mediaDir) {
+if (mediaDir && !resumed) {
   production.input.media_dir = mediaDir;
 }
 
 // État de l'étape technique de rendu, entre Assembly et Quality. Ce
 // n'est pas un agent : les 7 agents restent inchangés.
-if (renderRequested) {
-  production.render = {
-    status: "pending",
-    profile: renderProfile,
-    output_dir: renderOutputDir,
-    output_file: renderOutputName ?? `${productionId}.mp4`,
-    started_at: null,
-    completed_at: null,
-    error: null
-  };
+const renderBlock = renderRequested
+  ? {
+      status: "pending",
+      profile: renderProfile,
+      output_dir: renderOutputDir,
+      output_file: renderOutputName ?? `${productionId}.mp4`,
+      started_at: null,
+      completed_at: null,
+      error: null
+    }
+  : null;
+
+if (renderBlock && !resumed) {
+  production.render = renderBlock;
 }
 
 function saveProduction() {
@@ -237,7 +381,9 @@ function saveProduction() {
   );
 }
 
-saveProduction();
+if (!resumed) {
+  saveProduction();
+}
 
 console.log("==============================================");
 console.log(" LES DECOUVERTES DU NOMADE — USINE IA VIDEO");
@@ -269,6 +415,18 @@ console.log(
     ? `locaux — ${mediaDir}`
     : "aucun (contrats seuls)"
 );
+if (resumed) {
+  console.log("Reprise    : production existante (agents 1-3 réutilisés si scellés valides)");
+}
+if (mode === "full") {
+  console.log(
+    "Appels réels :",
+    `mode complet, plafond ${realCallsCap} pour cette exécution`
+  );
+}
+if (stopAfter) {
+  console.log("Pause      : après", stopAfter);
+}
 console.log("");
 
 if (!dryRun && !researchScriptMode) {
@@ -277,6 +435,81 @@ if (!dryRun && !researchScriptMode) {
     "Utilise --dry-run ou --research-script pendant la construction du MVP."
   );
   process.exit(2);
+}
+
+// Verrou, garde des appels réels et état de reprise (mode
+// research-script uniquement).
+let reuse = {};
+
+function pauseIfRequested(agentId) {
+  if (stopAfter !== agentId) {
+    return;
+  }
+
+  production.status = "paused";
+  production.paused_after = agentId;
+  production.paused_at = new Date().toISOString();
+  saveProduction();
+
+  console.log("");
+  console.log("==============================================");
+  console.log(` RESULTAT : PAUSE — après ${agentId}`);
+  console.log(` État : projects/${production.id}/production.json`);
+
+  if (["asset", "voice", "assembly"].includes(agentId)) {
+    const needs = describeMediaNeeds({
+      assets: readJsonArtifact(productionDir, "assets.json").data,
+      voice:
+        agentId === "asset"
+          ? undefined
+          : readJsonArtifact(productionDir, "voice.json").data
+    });
+
+    for (const line of needs) {
+      console.log(` ${line}`);
+    }
+  }
+
+  console.log(
+    ` Reprise : node src/orchestrator/mvp.js --research-script --resume=${production.id}`
+  );
+  console.log(
+    "           (mêmes options de mode et d'appels réels, + --media-dir=<dossier> --render)"
+  );
+  console.log("==============================================");
+
+  process.exit(0);
+}
+
+if (researchScriptMode) {
+  acquireProductionLock(productionDir);
+
+  if (resumed) {
+    reuse = planReuse({ productionDir, production });
+  }
+
+  if (mode === "full") {
+    configureCallGuard({
+      productionDir,
+      cap: realCallsCap,
+      acceptUnresolved
+    });
+  }
+
+  if (resumed) {
+    applyResume({
+      production,
+      reuse,
+      mediaDir,
+      render: renderBlock
+    });
+  }
+
+  // Registre des scellés SHA-256 : présent dès le départ, y compris
+  // pour une production qui échoue avant son premier artefact.
+  production.artifact_sha256 ??= {};
+  production.status = "running";
+  saveProduction();
 }
 
 console.log("--- PIPELINE ---");
@@ -353,28 +586,34 @@ if (dryRun) {
       `[${researchState.order}/${production.agents.length}] research`
     );
 
-    researchState.status = "running";
-    researchState.started_at = new Date().toISOString();
-    saveProduction();
+    if (!reuse.research) {
+      researchState.status = "running";
+      researchState.started_at = new Date().toISOString();
+      saveProduction();
 
-    const researchResult = await runResearchAgent({
-      title,
-      prompt,
-      testMode: true
-    });
+      const researchResult = await runResearchAgent({
+        title: production.input.title,
+        prompt: production.input.prompt,
+        testMode
+      });
 
-    writeJsonArtifact(
-      productionDir,
-      "research.json",
-      researchResult
-    );
+      sealAndWriteArtifact({
+        productionDir,
+        production,
+        filename: "research.json",
+        data: researchResult,
+        save: saveProduction
+      });
 
-    researchState.status = "completed";
-    researchState.completed_at = new Date().toISOString();
-    saveProduction();
+      researchState.status = "completed";
+      researchState.completed_at = new Date().toISOString();
+      saveProduction();
 
-    console.log("    ✓ Research PASS");
-    console.log("    ✓ research.json écrit");
+      console.log("    ✓ Research PASS");
+      console.log("    ✓ research.json écrit");
+    } else {
+      console.log("    ↺ Research RÉUTILISÉ — scellé SHA-256 vérifié, aucun appel");
+    }
 
     const persistedResearch = readJsonArtifact(
       productionDir,
@@ -390,33 +629,41 @@ if (dryRun) {
       );
     }
 
+    pauseIfRequested("research");
+
     console.log("");
     console.log(
       `[${scriptState.order}/${production.agents.length}] script`
     );
 
-    scriptState.status = "running";
-    scriptState.started_at = new Date().toISOString();
-    saveProduction();
+    if (!reuse.script) {
+      scriptState.status = "running";
+      scriptState.started_at = new Date().toISOString();
+      saveProduction();
 
-    const scriptResult = await runScriptAgent({
-      research: persistedResearch.data,
-      title,
-      testMode: true
-    });
+      const scriptResult = await runScriptAgent({
+        research: persistedResearch.data,
+        title: production.input.title,
+        testMode
+      });
 
-    writeJsonArtifact(
-      productionDir,
-      "script.json",
-      scriptResult
-    );
+      sealAndWriteArtifact({
+        productionDir,
+        production,
+        filename: "script.json",
+        data: scriptResult,
+        save: saveProduction
+      });
 
-    scriptState.status = "completed";
-    scriptState.completed_at = new Date().toISOString();
-    saveProduction();
+      scriptState.status = "completed";
+      scriptState.completed_at = new Date().toISOString();
+      saveProduction();
 
-    console.log("    ✓ Script PASS");
-    console.log("    ✓ script.json écrit");
+      console.log("    ✓ Script PASS");
+      console.log("    ✓ script.json écrit");
+    } else {
+      console.log("    ↺ Script RÉUTILISÉ — scellé SHA-256 vérifié, aucun appel");
+    }
 
     const persistedScript = readJsonArtifact(
       productionDir,
@@ -432,32 +679,40 @@ if (dryRun) {
       );
     }
 
+    pauseIfRequested("script");
+
     console.log("");
     console.log(
       `[${visualDirectorState.order}/${production.agents.length}] visual_director`
     );
 
-    visualDirectorState.status = "running";
-    visualDirectorState.started_at = new Date().toISOString();
-    saveProduction();
+    if (!reuse.visual_director) {
+      visualDirectorState.status = "running";
+      visualDirectorState.started_at = new Date().toISOString();
+      saveProduction();
 
-    const visualResult = await runVisualDirector({
-      script: persistedScript.data,
-      testMode: true
-    });
+      const visualResult = await runVisualDirector({
+        script: persistedScript.data,
+        testMode
+      });
 
-    writeJsonArtifact(
-      productionDir,
-      "visual.json",
-      visualResult
-    );
+      sealAndWriteArtifact({
+        productionDir,
+        production,
+        filename: "visual.json",
+        data: visualResult,
+        save: saveProduction
+      });
 
-    visualDirectorState.status = "completed";
-    visualDirectorState.completed_at = new Date().toISOString();
-    saveProduction();
+      visualDirectorState.status = "completed";
+      visualDirectorState.completed_at = new Date().toISOString();
+      saveProduction();
 
-    console.log("    ✓ Visual Director PASS");
-    console.log("    ✓ visual.json écrit");
+      console.log("    ✓ Visual Director PASS");
+      console.log("    ✓ visual.json écrit");
+    } else {
+      console.log("    ↺ Visual Director RÉUTILISÉ — scellé SHA-256 vérifié, aucun appel");
+    }
 
     const persistedVisual = readJsonArtifact(
       productionDir,
@@ -473,6 +728,8 @@ if (dryRun) {
       );
     }
 
+    pauseIfRequested("visual_director");
+
     console.log("");
     console.log(
       `[${assetState.order}/${production.agents.length}] asset`
@@ -484,7 +741,7 @@ if (dryRun) {
 
     const assetResult = await runAssetAgent({
       visual: persistedVisual.data,
-      testMode: true,
+      testMode,
       localMedia: mediaDir
         ? await inspectLocalAssets({ mediaDir })
         : undefined
@@ -502,6 +759,8 @@ if (dryRun) {
 
     console.log("    ✓ Asset PASS");
     console.log("    ✓ assets.json écrit");
+
+    pauseIfRequested("asset");
 
     const voiceSourceScript = readJsonArtifact(
       productionDir,
@@ -528,7 +787,7 @@ if (dryRun) {
 
     const voiceResult = await runVoiceAgent({
       script: voiceSourceScript.data,
-      testMode: true,
+      testMode,
       localAudio: mediaDir
         ? await inspectLocalVoice({ mediaDir })
         : undefined
@@ -546,6 +805,8 @@ if (dryRun) {
 
     console.log("    ✓ Voice PASS");
     console.log("    ✓ voice.json écrit");
+
+    pauseIfRequested("voice");
 
     const persistedAssets = readJsonArtifact(
       productionDir,
@@ -590,7 +851,7 @@ if (dryRun) {
       assets: persistedAssets.data,
       voice: persistedVoice.data,
       target: production.target.video,
-      testMode: true,
+      testMode,
       mediaVerification: mediaDir
         ? await verifyLocalMedia({
             mediaDir,
@@ -612,6 +873,8 @@ if (dryRun) {
 
     console.log("    ✓ Assembly PASS");
     console.log("    ✓ assembly.json écrit");
+
+    pauseIfRequested("assembly");
 
     // Étape technique de rendu : le plan, les manifestes et les médias
     // sont relus et recontrôlés sur disque juste avant de lancer ffmpeg.
@@ -654,7 +917,7 @@ if (dryRun) {
         outputDir: renderOutputDir,
         outputName: production.render.output_file,
         workDir: path.join(ROOT, "tmp", `render-${productionId}`),
-        testMode: true
+        testMode
       });
 
       writeJsonArtifact(
@@ -702,7 +965,7 @@ if (dryRun) {
     const qualityResult = await runQualityAgent({
       artifacts: qualityArtifacts,
       target: production.target,
-      testMode: true,
+      testMode,
       mediaVerification: mediaDir
         ? await verifyLocalMedia({
             mediaDir,
@@ -764,6 +1027,12 @@ if (dryRun) {
       `             projects/${production.id}/quality.json`
     );
     console.log(" Agents 1-7 : EXECUTES");
+    if (mode === "full") {
+      const guardStatus = getCallGuardStatus();
+      console.log(
+        ` Appels réels : ${guardStatus.used}/${guardStatus.cap} (cache : ${guardStatus.cache_hits})`
+      );
+    }
     console.log(
       mediaDir
         ? " Médias     : locaux, inspectés et recontrôlés sur disque"
@@ -791,22 +1060,23 @@ if (dryRun) {
       (agent) => agent.status === "running"
     );
 
+    // Aucun secret dans production.json ni sur stderr.
+    const failureMessage = redactSecrets(
+      error instanceof Error
+        ? error.message
+        : String(error)
+    );
+
     if (production.render?.status === "running") {
       production.render.status = "failed";
       production.render.completed_at = new Date().toISOString();
-      production.render.error =
-        error instanceof Error
-          ? error.message
-          : String(error);
+      production.render.error = failureMessage;
     }
 
     if (runningAgent) {
       runningAgent.status = "failed";
       runningAgent.completed_at = new Date().toISOString();
-      runningAgent.error =
-        error instanceof Error
-          ? error.message
-          : String(error);
+      runningAgent.error = failureMessage;
     }
 
     production.status = "failed";
@@ -816,11 +1086,7 @@ if (dryRun) {
     console.error("");
     console.error("==============================================");
     console.error(" RESULTAT : FAIL — PIPELINE ARRETE");
-    console.error(
-      error instanceof Error
-        ? error.message
-        : String(error)
-    );
+    console.error(failureMessage);
     console.error("==============================================");
 
     process.exit(1);

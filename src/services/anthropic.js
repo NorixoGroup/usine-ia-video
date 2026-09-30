@@ -1,5 +1,10 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { getAnthropicFixture } from "../fixtures/anthropic.js";
+import {
+  beginRealCall,
+  endRealCall,
+  failRealCall
+} from "./call-guard.js";
 
 let client = null;
 
@@ -73,12 +78,20 @@ export async function createMessage({
     request.tools = tools;
   }
 
+  // Garde des appels réels : autorisation, plafond, journal, cache.
+  const reservation = beginRealCall(request);
+
+  if (reservation.cached) {
+    return reservation.cached;
+  }
+
   const startedAt = Date.now();
+  let result;
 
   try {
     const response = await anthropic.messages.create(request);
 
-    return {
+    result = {
       response,
       meta: {
         model: response.model,
@@ -89,6 +102,8 @@ export async function createMessage({
       }
     };
   } catch (error) {
+    failRealCall(reservation, error);
+
     const status = error?.status ? ` HTTP ${error.status}` : "";
 
     throw new Error(
@@ -96,6 +111,10 @@ export async function createMessage({
       { cause: error }
     );
   }
+
+  endRealCall(reservation, result);
+
+  return result;
 }
 
 export function extractText(response) {
