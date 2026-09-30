@@ -568,3 +568,112 @@ export function failRealCall(reservation, error) {
     // Le journal reste à "started" : l'appel sera traité comme sans issue.
   }
 }
+
+// Réservation minimale pour un futur provider de narration. Contrairement au
+// cache JSON Anthropic, aucun binaire n'est mis en cache : l'artefact local
+// inspecté est la source d'idempotence. Le journal ne contient que ses
+// métadonnées vérifiables.
+export function beginNarrationCall({ providerKind, unitId, request }) {
+  if (!state) {
+    throw new Error(
+      "Appel narration réel non autorisé : aucune autorisation configurée."
+    );
+  }
+
+  assertNoApiNotSet();
+  assertAckSet();
+
+  if (
+    typeof providerKind !== "string" || providerKind.length === 0 ||
+    typeof unitId !== "string" || unitId.length === 0 ||
+    !request || typeof request !== "object"
+  ) {
+    throw new Error("Appel narration réel : requête invalide.");
+  }
+
+  const hash = requestSha256({
+    kind: "narration",
+    provider_kind: providerKind,
+    unit_id: unitId,
+    request
+  });
+
+  if (
+    state.journal.entries.some(
+      entry => entry.status === "started" && entry.request_sha256 === hash
+    )
+  ) {
+    throw new Error(
+      "Double appel narration refusé : une requête identique est déjà en cours."
+    );
+  }
+
+  if (state.used >= state.cap) {
+    throw new Error(
+      `Plafond d'appels réels atteint (${state.cap}) : appel narration refusé.`
+    );
+  }
+
+  const seq = state.journal.entries.length + 1;
+  const entry = {
+    call_id: `c${String(seq).padStart(4, "0")}-${hash.slice(0, 12)}`,
+    seq,
+    status: "started",
+    request_sha256: hash,
+    provider_kind: providerKind,
+    unit_id: unitId,
+    started_at: new Date().toISOString(),
+    ended_at: null
+  };
+
+  state.used += 1;
+  state.journal.entries.push(entry);
+
+  try {
+    writeJournal();
+  } catch (error) {
+    state.used -= 1;
+    state.journal.entries.pop();
+    throw error;
+  }
+
+  return { callId: entry.call_id, hash, entry };
+}
+
+export function endNarrationCall(reservation, artifact) {
+  if (
+    !reservation?.entry ||
+    !artifact ||
+    typeof artifact.provider_kind !== "string" ||
+    typeof artifact.unit_id !== "string" ||
+    typeof artifact.path !== "string" ||
+    !/^[0-9a-f]{64}$/.test(artifact.sha256 ?? "") ||
+    !Number.isInteger(artifact.size_bytes) || artifact.size_bytes <= 0 ||
+    !Number.isFinite(artifact.duration_seconds) || artifact.duration_seconds <= 0 ||
+    artifact.provider_kind !== reservation.entry.provider_kind ||
+    artifact.unit_id !== reservation.entry.unit_id ||
+    artifact.path !== `voice/${reservation.entry.unit_id}.wav` &&
+      artifact.path !== `voice/${reservation.entry.unit_id}.mp3` &&
+      artifact.path !== `voice/${reservation.entry.unit_id}.m4a`
+  ) {
+    throw new Error(
+      `Appel narration ${reservation?.callId ?? "inconnu"} : artefact invalide.`
+    );
+  }
+
+  Object.assign(reservation.entry, {
+    status: "succeeded",
+    ended_at: new Date().toISOString(),
+    provider_kind: artifact.provider_kind,
+    unit_id: artifact.unit_id,
+    path: artifact.path,
+    sha256: artifact.sha256,
+    size_bytes: artifact.size_bytes,
+    duration_seconds: artifact.duration_seconds
+  });
+  writeJournal();
+}
+
+export function failNarrationCall(reservation, error) {
+  failRealCall(reservation, error);
+}

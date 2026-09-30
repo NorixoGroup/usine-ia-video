@@ -343,6 +343,29 @@ export function inspectLocalVoice(options) {
   return inspectLocalRole("voice", options);
 }
 
+// Inspection ciblée d'un fichier Voice déjà situé sous la racine locale.
+// Elle applique exactement les mêmes contrôles de chemin, extension,
+// ffprobe, taille et SHA-256 que l'inventaire complet.
+export async function inspectLocalVoiceReference({
+  mediaDir,
+  reference,
+  ffprobePath
+}) {
+  const root = resolveMediaRoot(mediaDir);
+
+  if (
+    typeof reference !== "string" ||
+    !reference.startsWith(`${VOICE_DIRECTORY}/`)
+  ) {
+    fail("référence Voice invalide.");
+  }
+
+  return toAudioRecord(
+    reference,
+    await inspectReference(root, reference, "voice", { ffprobePath })
+  );
+}
+
 function listManifestRecords(assets, voice, errors) {
   const entries = [];
 

@@ -72,21 +72,35 @@ function attachLocalAudio(narrationUnits, localAudio) {
   }
 }
 
-function buildManifest(script, localAudio) {
+export function buildNarrationPlan(script) {
   const narrationUnits = [];
 
   script.sections.forEach((section, sectionIndex) => {
     section.segments.forEach((segment, segmentIndex) => {
       narrationUnits.push({
-        unit_id: buildUnitId(sectionIndex, segmentIndex),
-        section_index: sectionIndex,
-        segment_index: segmentIndex,
+        unitId: buildUnitId(sectionIndex, segmentIndex),
+        sectionIndex,
+        segmentIndex,
         text: segment.voiceover,
-        estimated_seconds: segment.estimated_seconds,
-        status: VOICE_STATUS
+        estimatedSeconds: segment.estimated_seconds
       });
     });
   });
+
+  return narrationUnits;
+}
+
+function buildManifest(script, localAudio) {
+  const narrationUnits = buildNarrationPlan(script).map(
+    ({ unitId, sectionIndex, segmentIndex, text, estimatedSeconds }) => ({
+      unit_id: unitId,
+      section_index: sectionIndex,
+      segment_index: segmentIndex,
+      text,
+      estimated_seconds: estimatedSeconds,
+      status: VOICE_STATUS
+    })
+  );
 
   if (localAudio !== undefined) {
     attachLocalAudio(narrationUnits, localAudio);

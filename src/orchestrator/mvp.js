@@ -19,8 +19,18 @@ import {
 } from "../agents/asset.js";
 
 import {
+  buildNarrationPlan,
   runVoiceAgent
 } from "../agents/voice.js";
+
+import {
+  ensureNarrationAudio
+} from "../services/narration-provider.js";
+
+import {
+  createFixtureNarrationCallGuard,
+  createFixtureNarrationProvider
+} from "../fixtures/narration-provider.js";
 
 import {
   runAssemblyAgent
@@ -120,6 +130,7 @@ const prompt =
 // que des contrats, comme avant. Présent : chaque asset et chaque unité
 // de narration doit y trouver son fichier (tout ou rien).
 const mediaDir = getArgument("media-dir");
+const fixtureNarrationProvider = args.includes("--fixture-narration-provider");
 
 if (
   args.some((value) => value.startsWith("--media-dir")) &&
@@ -127,6 +138,15 @@ if (
 ) {
   throw new Error(
     "Orchestrateur : --media-dir exige un dossier (--media-dir=<dossier>)."
+  );
+}
+
+if (
+  fixtureNarrationProvider &&
+  (!researchScriptMode || !mediaDir)
+) {
+  throw new Error(
+    "Orchestrateur : --fixture-narration-provider exige --research-script et --media-dir."
   );
 }
 
@@ -200,6 +220,12 @@ if (
 const modeRequested = args.some((value) => value.startsWith("--mode"));
 const mode = getArgument("mode") ?? "test";
 const testMode = mode !== "full";
+
+if (fixtureNarrationProvider && !testMode) {
+  throw new Error(
+    "Orchestrateur : --fixture-narration-provider est réservé au mode test local."
+  );
+}
 
 if (modeRequested && !["test", "full"].includes(mode)) {
   throw new Error(
@@ -903,13 +929,22 @@ if (dryRun) {
     voiceState.started_at = new Date().toISOString();
     saveProduction();
 
+    const localAudio = mediaDir
+      ? fixtureNarrationProvider
+        ? await ensureNarrationAudio({
+          mediaDir,
+          units: buildNarrationPlan(voiceSourceScript.data),
+          provider: createFixtureNarrationProvider(),
+          callGuard: createFixtureNarrationCallGuard()
+        })
+        : await inspectLocalVoice({ mediaDir })
+      : undefined;
+
     const voiceResult = await runVoiceAgent({
       script: voiceSourceScript.data,
       testMode,
       durationProfile,
-      localAudio: mediaDir
-        ? await inspectLocalVoice({ mediaDir })
-        : undefined
+      localAudio
     });
 
     writeJsonArtifact(
