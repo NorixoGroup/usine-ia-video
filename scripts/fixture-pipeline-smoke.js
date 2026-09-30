@@ -17,6 +17,21 @@ import {
   validateAssetManifestMapping
 } from "../src/utils/validate-asset-manifest.js";
 
+import {
+  validateVoiceManifest,
+  validateVoiceManifestMapping
+} from "../src/utils/validate-voice-manifest.js";
+
+import {
+  validateAssemblyPlan,
+  validateAssemblySourceMapping
+} from "../src/utils/validate-assembly-plan.js";
+
+import {
+  QUALITY_CHECK_IDS,
+  validateQualityReport
+} from "../src/utils/validate-quality-report.js";
+
 if (process.env.NO_API !== "1") {
   console.error(
     "FAIL — ce smoke doit être lancé avec NO_API=1."
@@ -31,6 +46,26 @@ const ROOT = path.resolve(
 
 const GUARD = path.join(ROOT, "scripts", "fixture-network-guard.js");
 const PROJECTS = path.join(ROOT, "projects");
+
+const FAULT_INJECTOR = path.join(
+  ROOT,
+  "scripts",
+  "pipeline-fault-injector.js"
+);
+
+// Ordre du pipeline : [id de l'agent, nom de son artefact].
+const PIPELINE = [
+  ["research", "research"],
+  ["script", "script"],
+  ["visual_director", "visual"],
+  ["asset", "assets"],
+  ["voice", "voice"],
+  ["assembly", "assembly"],
+  ["quality", "quality"]
+];
+
+const FINAL_STATUS =
+  "research_script_visual_asset_voice_assembly_quality_pass";
 
 const FIXTURE_USAGE_IDS = {
   research: "research",
@@ -63,7 +98,7 @@ function readArtifact(productionId, filename) {
     : null;
 }
 
-function runPipeline({ fixtures, scenario, extraArgs = [] }) {
+function runPipeline({ fixtures, scenario, fault, extraArgs = [] }) {
   // Environnement minimal : aucune clé, aucun secret hérité.
   const env = {
     PATH: process.env.PATH,
@@ -78,13 +113,21 @@ function runPipeline({ fixtures, scenario, extraArgs = [] }) {
     env.ANTHROPIC_FIXTURE_SCENARIO = scenario;
   }
 
+  // L'injecteur de fautes n'est préchargé que pour les cas qui le
+  // demandent explicitement.
+  const preload = ["--import", GUARD];
+
+  if (fault !== undefined) {
+    env.PIPELINE_FAULT = fault;
+    preload.push("--import", FAULT_INJECTOR);
+  }
+
   const before = listProductions();
 
   const child = spawnSync(
     process.execPath,
     [
-      "--import",
-      GUARD,
+      ...preload,
       "src/orchestrator/mvp.js",
       "--research-script",
       ...extraArgs
@@ -109,7 +152,11 @@ function runPipeline({ fixtures, scenario, extraArgs = [] }) {
   const productionId =
     child.stdout.match(/^Production : (\S+)$/m)?.[1] ?? null;
 
-  return {
+  const injectorLine = child.stderr.match(
+    /\[pipeline-fault-injector\] faute (\S+) — injections : (\d+)/
+  );
+
+  const run = {
     status: child.status,
     stdout: child.stdout,
     stderr: child.stderr,
@@ -117,22 +164,24 @@ function runPipeline({ fixtures, scenario, extraArgs = [] }) {
     productionId,
     guardActive: guardLine !== null,
     blockedAttempts: guardLine ? Number(guardLine[1]) : null,
+    fault,
+    injectedFault: injectorLine ? injectorLine[1] : null,
+    injections: injectorLine ? Number(injectorLine[2]) : null,
+    files: productionId
+      ? fs.readdirSync(path.join(PROJECTS, productionId)).sort()
+      : [],
     production: productionId
       ? readArtifact(productionId, "production.json")
-      : null,
-    research: productionId
-      ? readArtifact(productionId, "research.json")
-      : null,
-    script: productionId
-      ? readArtifact(productionId, "script.json")
-      : null,
-    visual: productionId
-      ? readArtifact(productionId, "visual.json")
-      : null,
-    assets: productionId
-      ? readArtifact(productionId, "assets.json")
       : null
   };
+
+  for (const [, artifact] of PIPELINE) {
+    run[artifact] = productionId
+      ? readArtifact(productionId, `${artifact}.json`)
+      : null;
+  }
+
+  return run;
 }
 
 function agentState(run, id) {
@@ -178,16 +227,30 @@ function assertCommon(run) {
 
   assert(run.production, "production.json absent");
 
-  for (const id of ["voice", "assembly", "quality"]) {
-    const state = agentState(run, id);
-
+  // L'injecteur de fautes ne s'active que sur demande explicite, et
+  // injecte alors exactement une faute.
+  if (run.fault === undefined) {
     assert(
-      state.status === "pending" &&
-      state.started_at === null &&
-      state.completed_at === null,
-      `Agent ${id} : ne doit pas être exécuté (${state.status})`
+      run.injectedFault === null,
+      "injecteur de fautes actif sans avoir été demandé"
+    );
+  } else {
+    assert(
+      run.injectedFault === run.fault && run.injections === 1,
+      `faute ${run.fault} : ${run.injections} injection(s)`
     );
   }
+
+  // Aucun média, aucun fichier hors artefacts JSON attendus.
+  const allowedFiles = [
+    "production.json",
+    ...PIPELINE.map(([, artifact]) => `${artifact}.json`)
+  ];
+
+  assert(
+    run.files.every(file => allowedFiles.includes(file)),
+    `fichiers inattendus dans la production : ${run.files}`
+  );
 
   for (const [name, fixtureId] of Object.entries(FIXTURE_USAGE_IDS)) {
     const artifact = run[name];
@@ -253,6 +316,132 @@ function assertAssets(run) {
   );
 }
 
+function assertVoice(run) {
+  const { voice, script } = run;
+
+  assert(
+    voice.agent === "voice" &&
+    voice.usage === null &&
+    voice.validation.valid === true &&
+    voice.script_mapping_validation.valid === true,
+    "voice.json : enveloppe ou gates persistés invalides"
+  );
+
+  const validation = validateVoiceManifest(voice.data);
+
+  assert(
+    validation.valid,
+    `voice.json : ${validation.errors.join(" | ")}`
+  );
+
+  const mapping = validateVoiceManifestMapping(
+    voice.data,
+    script.data
+  );
+
+  assert(
+    mapping.valid,
+    `voice.json / script.json : ${mapping.errors.join(" | ")}`
+  );
+
+  assert(
+    voice.data.narration_units.length ===
+      coverageSegments(run).length &&
+    voice.data.narration_units.every(
+      unit => unit.status === "unsynthesized"
+    ),
+    "voice.json : une unité unsynthesized par segment attendue"
+  );
+}
+
+function assertAssembly(run) {
+  const { assembly, assets, voice, production } = run;
+
+  assert(
+    assembly.agent === "assembly" &&
+    assembly.usage === null &&
+    assembly.validation.valid === true &&
+    assembly.source_mapping_validation.valid === true,
+    "assembly.json : enveloppe ou gates persistés invalides"
+  );
+
+  const validation = validateAssemblyPlan(assembly.data);
+
+  assert(
+    validation.valid,
+    `assembly.json : ${validation.errors.join(" | ")}`
+  );
+
+  const mapping = validateAssemblySourceMapping(
+    assembly.data,
+    assets.data,
+    voice.data,
+    production.target.video
+  );
+
+  assert(
+    mapping.valid,
+    `assembly.json / sources : ${mapping.errors.join(" | ")}`
+  );
+
+  assert(
+    assembly.data.status === "unrendered" &&
+    assembly.data.video_track.length ===
+      assets.data.assets.length &&
+    assembly.data.audio_track.length ===
+      voice.data.narration_units.length,
+    "assembly.json : plan non rendu couvrant chaque asset et chaque unité attendu"
+  );
+}
+
+function assertQuality(run) {
+  const { quality } = run;
+
+  assert(
+    quality.agent === "quality" &&
+    quality.usage === null &&
+    quality.validation.valid === true,
+    "quality.json : enveloppe ou gate persisté invalides"
+  );
+
+  const validation = validateQualityReport(quality.data);
+
+  assert(
+    validation.valid,
+    `quality.json : ${validation.errors.join(" | ")}`
+  );
+
+  assert(
+    quality.data.verdict === "pass" &&
+    quality.data.title === run.script.data.title &&
+    quality.data.checks.length === QUALITY_CHECK_IDS.length &&
+    quality.data.checks.every(
+      check => check.valid === true && check.errors.length === 0
+    ),
+    "quality.json : verdict pass sur tous les contrôles attendu"
+  );
+
+  assert(
+    quality.data.metrics.assets ===
+      run.assets.data.assets.length &&
+    quality.data.metrics.narration_units ===
+      run.voice.data.narration_units.length &&
+    quality.data.metrics.total_video_seconds ===
+      run.assembly.data.summary.total_duration_seconds,
+    "quality.json : métriques incohérentes avec les artefacts"
+  );
+
+  // Le jeu de test dure 40 s : hors cible, non bloquant en mode test.
+  assert(
+    quality.mode === "test" &&
+    quality.data.warnings.length === 1 &&
+    /hors de la cible .* non bloquant en mode test/.test(
+      quality.data.warnings[0]
+    ),
+    `quality.json : warnings inattendus ${JSON.stringify(quality.data.warnings)}`
+  );
+}
+
 function assertPass(run) {
   assertCommon(run);
 
@@ -262,23 +451,28 @@ function assertPass(run) {
   );
 
   assert(
-    run.production.status === "research_script_visual_asset_pass",
+    run.production.status === FINAL_STATUS,
     `status=${run.production.status}`
   );
 
-  for (const id of ["research", "script", "visual_director", "asset"]) {
+  for (const [id, artifact] of PIPELINE) {
+    const state = agentState(run, id);
+
     assert(
-      agentState(run, id).status === "completed",
-      `Agent ${id} : ${agentState(run, id).status}`
+      state.status === "completed" &&
+      state.started_at !== null &&
+      state.completed_at !== null &&
+      state.error === null,
+      `Agent ${id} : ${state.status}`
     );
+
+    assert(run[artifact], `${artifact}.json attendu`);
   }
 
-  assert(
-    run.research && run.script && run.visual && run.assets,
-    "research.json / script.json / visual.json / assets.json attendus"
-  );
-
   assertAssets(run);
+  assertVoice(run);
+  assertAssembly(run);
+  assertQuality(run);
 
   assert(
     run.research.agent === "research" &&
@@ -294,9 +488,9 @@ function assertPass(run) {
 
   assert(
     run.stdout.includes(
-      "RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET"
+      "RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET -> VOICE -> ASSEMBLY -> QUALITY"
     ) &&
-    run.stdout.includes("Agents 5-7 : NON EXECUTES"),
+    run.stdout.includes("Agents 1-7 : EXECUTES"),
     "bandeau final inattendu"
   );
 }
@@ -326,23 +520,53 @@ function assertFail(run, { failedAgent, error, artifacts }) {
     "bandeau d'échec absent"
   );
 
-  for (const name of ["research", "script", "visual"]) {
-    const expected = artifacts.includes(name);
+  // Attente historique R5/R6, conservée telle quelle pour les
+  // scénarios qui la déclarent.
+  if (artifacts) {
+    for (const name of ["research", "script", "visual"]) {
+      const expected = artifacts.includes(name);
 
-    assert(
-      Boolean(run[name]) === expected,
-      `${name}.json ${expected ? "attendu" : "inattendu"}`
-    );
+      assert(
+        Boolean(run[name]) === expected,
+        `${name}.json ${expected ? "attendu" : "inattendu"}`
+      );
+    }
   }
 
-  const asset = agentState(run, "asset");
-
-  assert(
-    asset.status === "pending" &&
-    asset.started_at === null &&
-    run.assets === null,
-    `Agent asset : ne doit pas démarrer (${asset.status})`
+  // Amont : completed avec artefact. Agent en échec : aucun artefact.
+  // Aval : jamais démarré, aucun artefact.
+  const failedIndex = PIPELINE.findIndex(
+    ([id]) => id === failedAgent
   );
+
+  assert(failedIndex !== -1, `agent inconnu : ${failedAgent}`);
+
+  PIPELINE.forEach(([id, artifact], index) => {
+    const agent = agentState(run, id);
+
+    if (index < failedIndex) {
+      assert(
+        agent.status === "completed" && run[artifact] !== null,
+        `Agent ${id} : completed avec ${artifact}.json attendu (${agent.status})`
+      );
+
+      return;
+    }
+
+    assert(
+      run[artifact] === null,
+      `${artifact}.json ne doit pas exister`
+    );
+
+    if (index > failedIndex) {
+      assert(
+        agent.status === "pending" &&
+        agent.started_at === null &&
+        agent.completed_at === null,
+        `Agent ${id} : ne doit pas démarrer (${agent.status})`
+      );
+    }
+  });
 }
 
 function coverageSegments(run) {
@@ -556,6 +780,105 @@ const cases = [
         artifacts: []
       });
     }
+  },
+
+  // Fautes injectées à la relecture disque : l'agent qui relit
+  // l'artefact altéré doit échouer, et rien en aval ne doit démarrer.
+  {
+    name: "faute : visual.json altéré à la relecture → Asset échoue, Voice ne démarre pas",
+    fixtures: true,
+    fault: "asset-source-duplicate-order",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "asset",
+        error:
+          /^Asset Agent : manifeste rejeté par le Asset Gate\..*asset_id dupliqué s01-g01-sh01/
+      });
+    }
+  },
+  {
+    name: "faute : script.json altéré à la relecture → Voice échoue, Assembly ne démarre pas",
+    fixtures: true,
+    fault: "voice-source-empty-voiceover",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "voice",
+        error:
+          /^Voice Agent : script source invalide\..*voiceover manquant/
+      });
+    }
+  },
+  {
+    name: "faute : voice.json altéré (+1 s) → Assembly échoue, Quality ne démarre pas",
+    fixtures: true,
+    fault: "assembly-source-duration-drift",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "assembly",
+        error:
+          /^Assembly Agent : plan rejeté par le Assembly Gate\..*fenêtre vidéo 0s–20s différente de la fenêtre narration 0s–21s/
+      });
+    }
+  },
+  {
+    name: "faute : assets.json altéré (asset manquant) → Assembly échoue, Quality ne démarre pas",
+    fixtures: true,
+    fault: "assembly-source-missing-asset",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "assembly",
+        error:
+          /^Assembly Agent : plan rejeté par le Assembly Gate\..*fenêtre vidéo 20s–32s différente de la fenêtre narration 20s–40s/
+      });
+    }
+  },
+  {
+    name: "faute : titre divergent dans visual.json → Quality échoue",
+    fixtures: true,
+    fault: "quality-title-divergence",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "quality",
+        error:
+          /^Quality Agent : audit rejeté\..*\[titles\] visual\.json: title différent de script\.json/
+      });
+    }
+  },
+  {
+    name: "faute : narration altérée dans voice.json → Quality échoue",
+    fixtures: true,
+    fault: "quality-narration-text",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "quality",
+        error:
+          /^Quality Agent : audit rejeté\..*\[script_voice_mapping\] narration_units\[0\]: text différent du voiceover source/
+      });
+    }
+  },
+  {
+    name: "faute : verdict persisté en échec dans script.json → Quality échoue",
+    fixtures: true,
+    fault: "quality-persisted-verdict",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "quality",
+        error:
+          /^Quality Agent : audit rejeté\..*\[persisted_verdicts\] script\.json: claim_coverage_validation n'est pas un PASS persisté/
+      });
+    }
+  },
+  {
+    name: "faute : trou dans assembly.json → Quality échoue",
+    fixtures: true,
+    fault: "quality-assembly-gap",
+    check(run) {
+      assertFail(run, {
+        failedAgent: "quality",
+        error:
+          /^Quality Agent : audit rejeté\..*\[structure\] assembly\.json: video_track\[1\]: trou entre 8s et 9s/
+      });
+    }
   }
 ];
 
@@ -601,7 +924,7 @@ console.log("");
 console.log("========================================");
 console.log(`Tests : ${passed} PASS / ${failed} FAIL`);
 console.log("API Anthropic réelle utilisée : NON");
-console.log("Agents 5-7 exécutés : NON");
+console.log("Agents 1-7 exécutés sur les scénarios valides : OUI");
 
 if (failed > 0) {
   console.error(
@@ -611,7 +934,7 @@ if (failed > 0) {
 }
 
 console.log(
-  "RESULTAT GLOBAL : PASS — pipeline local Research → Script → Visual Director → Asset prouvé sans API"
+  "RESULTAT GLOBAL : PASS — pipeline local complet Agents 1→7 prouvé sans API"
 );
 
 process.exit(0);

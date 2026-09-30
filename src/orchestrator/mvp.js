@@ -19,6 +19,18 @@ import {
 } from "../agents/asset.js";
 
 import {
+  runVoiceAgent
+} from "../agents/voice.js";
+
+import {
+  runAssemblyAgent
+} from "../agents/assembly.js";
+
+import {
+  runQualityAgent
+} from "../agents/quality.js";
+
+import {
   writeJsonArtifact,
   readJsonArtifact
 } from "./artifacts.js";
@@ -188,14 +200,29 @@ if (dryRun) {
     (agent) => agent.id === "asset"
   );
 
+  const voiceState = production.agents.find(
+    (agent) => agent.id === "voice"
+  );
+
+  const assemblyState = production.agents.find(
+    (agent) => agent.id === "assembly"
+  );
+
+  const qualityState = production.agents.find(
+    (agent) => agent.id === "quality"
+  );
+
   if (
     !researchState ||
     !scriptState ||
     !visualDirectorState ||
-    !assetState
+    !assetState ||
+    !voiceState ||
+    !assemblyState ||
+    !qualityState
   ) {
     throw new Error(
-      "Orchestrateur : états Research/Script/Visual Director/Asset introuvables."
+      "Orchestrateur : états Research/Script/Visual Director/Asset/Voice/Assembly/Quality introuvables."
     );
   }
 
@@ -352,25 +379,151 @@ if (dryRun) {
     console.log("    ✓ Asset PASS");
     console.log("    ✓ assets.json écrit");
 
-    for (const agentState of production.agents) {
-      if (
-        agentState.id !== "research" &&
-        agentState.id !== "script" &&
-        agentState.id !== "visual_director" &&
-        agentState.id !== "asset"
-      ) {
-        agentState.status = "pending";
-      }
+    const voiceSourceScript = readJsonArtifact(
+      productionDir,
+      "script.json"
+    );
+
+    if (
+      !voiceSourceScript ||
+      !voiceSourceScript.data
+    ) {
+      throw new Error(
+        "Orchestrateur : script.json ne contient pas data."
+      );
     }
 
-    production.status = "research_script_visual_asset_pass";
+    console.log("");
+    console.log(
+      `[${voiceState.order}/${production.agents.length}] voice`
+    );
+
+    voiceState.status = "running";
+    voiceState.started_at = new Date().toISOString();
+    saveProduction();
+
+    const voiceResult = await runVoiceAgent({
+      script: voiceSourceScript.data,
+      testMode: true
+    });
+
+    writeJsonArtifact(
+      productionDir,
+      "voice.json",
+      voiceResult
+    );
+
+    voiceState.status = "completed";
+    voiceState.completed_at = new Date().toISOString();
+    saveProduction();
+
+    console.log("    ✓ Voice PASS");
+    console.log("    ✓ voice.json écrit");
+
+    const persistedAssets = readJsonArtifact(
+      productionDir,
+      "assets.json"
+    );
+
+    const persistedVoice = readJsonArtifact(
+      productionDir,
+      "voice.json"
+    );
+
+    if (
+      !persistedAssets ||
+      !persistedAssets.data
+    ) {
+      throw new Error(
+        "Orchestrateur : assets.json ne contient pas data."
+      );
+    }
+
+    if (
+      !persistedVoice ||
+      !persistedVoice.data
+    ) {
+      throw new Error(
+        "Orchestrateur : voice.json ne contient pas data."
+      );
+    }
+
+    console.log("");
+    console.log(
+      `[${assemblyState.order}/${production.agents.length}] assembly`
+    );
+
+    assemblyState.status = "running";
+    assemblyState.started_at = new Date().toISOString();
+    saveProduction();
+
+    const assemblyResult = await runAssemblyAgent({
+      assets: persistedAssets.data,
+      voice: persistedVoice.data,
+      target: production.target.video,
+      testMode: true
+    });
+
+    writeJsonArtifact(
+      productionDir,
+      "assembly.json",
+      assemblyResult
+    );
+
+    assemblyState.status = "completed";
+    assemblyState.completed_at = new Date().toISOString();
+    saveProduction();
+
+    console.log("    ✓ Assembly PASS");
+    console.log("    ✓ assembly.json écrit");
+
+    // Quality audite les six enveloppes complètes, relues depuis le disque.
+    const qualityArtifacts = {
+      research: readJsonArtifact(productionDir, "research.json"),
+      script: readJsonArtifact(productionDir, "script.json"),
+      visual: readJsonArtifact(productionDir, "visual.json"),
+      assets: readJsonArtifact(productionDir, "assets.json"),
+      voice: readJsonArtifact(productionDir, "voice.json"),
+      assembly: readJsonArtifact(productionDir, "assembly.json")
+    };
+
+    console.log("");
+    console.log(
+      `[${qualityState.order}/${production.agents.length}] quality`
+    );
+
+    qualityState.status = "running";
+    qualityState.started_at = new Date().toISOString();
+    saveProduction();
+
+    const qualityResult = await runQualityAgent({
+      artifacts: qualityArtifacts,
+      target: production.target,
+      testMode: true
+    });
+
+    writeJsonArtifact(
+      productionDir,
+      "quality.json",
+      qualityResult
+    );
+
+    qualityState.status = "completed";
+    qualityState.completed_at = new Date().toISOString();
+    saveProduction();
+
+    console.log("    ✓ Quality PASS");
+    console.log("    ✓ quality.json écrit");
+
+    production.status =
+      "research_script_visual_asset_voice_assembly_quality_pass";
     production.completed_at = new Date().toISOString();
     saveProduction();
 
     console.log("");
     console.log("==============================================");
     console.log(
-      " RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET"
+      " RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET -> VOICE -> ASSEMBLY -> QUALITY"
     );
     console.log(
       ` Artefacts : projects/${production.id}/research.json`
@@ -384,7 +537,16 @@ if (dryRun) {
     console.log(
       `             projects/${production.id}/assets.json`
     );
-    console.log(" Agents 5-7 : NON EXECUTES");
+    console.log(
+      `             projects/${production.id}/voice.json`
+    );
+    console.log(
+      `             projects/${production.id}/assembly.json`
+    );
+    console.log(
+      `             projects/${production.id}/quality.json`
+    );
+    console.log(" Agents 1-7 : EXECUTES");
     console.log("==============================================");
 
     process.exit(0);
