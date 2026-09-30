@@ -62,6 +62,15 @@ import {
 } from "../services/call-guard.js";
 
 import {
+  DEFAULT_DURATION_PROFILE,
+  resolveDurationProfile
+} from "../utils/duration-profile.js";
+
+import {
+  validateScriptDossier
+} from "../utils/validate-script.js";
+
+import {
   STOP_AFTER_VALUES,
   acquireProductionLock,
   applyResume,
@@ -289,9 +298,84 @@ if (stopAfterRequested) {
   }
 }
 
+// Profil de durée (R14A) et cadre narré (R14B). Sans option : profil
+// standard (25-30 min) et script historique, comme avant.
+const durationProfileRequested = args.some(
+  (value) => value.startsWith("--duration-profile")
+);
+const durationProfileName = getArgument("duration-profile");
+const narratedFrameRequested = args.includes("--narrated-frame");
+
+if (durationProfileRequested && !durationProfileName) {
+  throw new Error(
+    "Orchestrateur : --duration-profile exige un nom (--duration-profile=<profil>)."
+  );
+}
+
+if (
+  (durationProfileRequested || narratedFrameRequested) &&
+  !researchScriptMode
+) {
+  throw new Error(
+    "Orchestrateur : --duration-profile et --narrated-frame exigent --research-script."
+  );
+}
+
 const resumed = resumeRequested
   ? loadResumableProduction({ root: ROOT, productionId: resumeId })
   : null;
+
+// Profil et cadre d'une production reprise : ceux de la production
+// (immuables) ; une option contradictoire est refusée.
+const storedProfileName = resumed
+  ? resumed.production.duration_profile ?? DEFAULT_DURATION_PROFILE
+  : null;
+const storedNarratedFrame = resumed
+  ? resumed.production.narrated_frame === true
+  : null;
+
+if (
+  resumed &&
+  durationProfileRequested &&
+  durationProfileName !== storedProfileName
+) {
+  throw new Error(
+    `Reprise refusée : --duration-profile=${durationProfileName} différent ` +
+    `du profil de la production ("${storedProfileName}").`
+  );
+}
+
+if (resumed && narratedFrameRequested && !storedNarratedFrame) {
+  throw new Error(
+    "Reprise refusée : --narrated-frame alors que la production n'a pas de cadre narré."
+  );
+}
+
+const durationProfile = resolveDurationProfile(
+  pipelineConfig.video,
+  resumed
+    ? storedProfileName
+    : durationProfileName ?? DEFAULT_DURATION_PROFILE
+);
+
+// Le mode complet produit toujours un script à cadre narré : c'est la
+// condition d'une vidéo publiable (hook et conclusion narrés, illustrés).
+const narratedFrame = resumed
+  ? storedNarratedFrame
+  : narratedFrameRequested || mode === "full";
+
+if (
+  resumed &&
+  (resumed.production.target?.duration_minutes?.min !==
+    durationProfile.min ||
+    resumed.production.target?.duration_minutes?.max !==
+    durationProfile.max)
+) {
+  throw new Error(
+    "Reprise refusée : la plage de durée du profil " +
+    `"${durationProfile.name}" a changé depuis la création de la production.`
+  );
+}
 
 if (resumed && productionMode(resumed.production) !== mode) {
   throw new Error(
@@ -319,6 +403,8 @@ const production = resumed ? resumed.production : {
   created_at: new Date().toISOString(),
   status: "created",
   mode,
+  duration_profile: durationProfile.name,
+  narrated_frame: narratedFrame,
 
   input: {
     title,
@@ -330,9 +416,9 @@ const production = resumed ? resumed.production : {
     language: pipelineConfig.project.language,
     content_type: pipelineConfig.project.content_type,
     duration_minutes: {
-      target: pipelineConfig.video.target_duration_minutes,
-      min: pipelineConfig.video.minimum_duration_minutes,
-      max: pipelineConfig.video.maximum_duration_minutes
+      target: durationProfile.target,
+      min: durationProfile.min,
+      max: durationProfile.max
     },
     video: {
       aspect_ratio: pipelineConfig.video.aspect_ratio,
@@ -426,6 +512,12 @@ if (mode === "full") {
 }
 if (stopAfter) {
   console.log("Pause      : après", stopAfter);
+}
+if (durationProfile.name !== DEFAULT_DURATION_PROFILE) {
+  console.log("Profil durée :", durationProfile.name);
+}
+if (narratedFrame) {
+  console.log("Cadre narré : hook et conclusion sont de vrais segments");
 }
 console.log("");
 
@@ -594,7 +686,8 @@ if (dryRun) {
       const researchResult = await runResearchAgent({
         title: production.input.title,
         prompt: production.input.prompt,
-        testMode
+        testMode,
+        durationProfile
       });
 
       sealAndWriteArtifact({
@@ -644,7 +737,9 @@ if (dryRun) {
       const scriptResult = await runScriptAgent({
         research: persistedResearch.data,
         title: production.input.title,
-        testMode
+        testMode,
+        durationProfile,
+        narratedFrame
       });
 
       sealAndWriteArtifact({
@@ -679,6 +774,28 @@ if (dryRun) {
       );
     }
 
+    // Cadre narré : le script persisté (y compris réutilisé à la
+    // reprise) doit porter un hook et une conclusion en vrais segments.
+    if (narratedFrame) {
+      const frameValidation = validateScriptDossier(
+        persistedScript.data,
+        {
+          durationRange: {
+            min: durationProfile.min,
+            max: durationProfile.max
+          },
+          requireNarratedFrame: true
+        }
+      );
+
+      if (!frameValidation.valid) {
+        throw new Error(
+          "Orchestrateur : script.json sans cadre narré valide. " +
+          frameValidation.errors.join(" | ")
+        );
+      }
+    }
+
     pauseIfRequested("script");
 
     console.log("");
@@ -693,7 +810,8 @@ if (dryRun) {
 
       const visualResult = await runVisualDirector({
         script: persistedScript.data,
-        testMode
+        testMode,
+        durationProfile
       });
 
       sealAndWriteArtifact({
@@ -788,6 +906,7 @@ if (dryRun) {
     const voiceResult = await runVoiceAgent({
       script: voiceSourceScript.data,
       testMode,
+      durationProfile,
       localAudio: mediaDir
         ? await inspectLocalVoice({ mediaDir })
         : undefined
@@ -965,6 +1084,10 @@ if (dryRun) {
     const qualityResult = await runQualityAgent({
       artifacts: qualityArtifacts,
       target: production.target,
+      scriptDurationRange: {
+        min: durationProfile.min,
+        max: durationProfile.max
+      },
       testMode,
       mediaVerification: mediaDir
         ? await verifyLocalMedia({

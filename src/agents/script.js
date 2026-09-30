@@ -8,8 +8,16 @@ import {
 } from "../utils/validate-research.js";
 
 import {
-  validateScriptDossier
+  validateScriptDossier,
+  scriptHasFrameRoles,
+  syncNarratedFrameFields
 } from "../utils/validate-script.js";
+
+import {
+  agentDurationProfile,
+  formatDurationLabel,
+  formatSectionsLabel
+} from "../utils/duration-profile.js";
 
 import {
   validateScriptClaims
@@ -28,7 +36,7 @@ Tu es le Script Agent de la chaîne YouTube
 "Les Découvertes du Nomade".
 
 Tu transformes un dossier de recherche VALIDÉ en script voix-off
-pour un documentaire faceless YouTube de 25 à 30 minutes.
+pour un documentaire faceless YouTube de {{DUREE}}.
 
 RÈGLES ABSOLUES :
 
@@ -94,7 +102,7 @@ RÈGLES ABSOLUES :
 22. Le texte doit être naturel à l'oral, fluide, précis et documentaire.
 23. Évite le remplissage artificiel et les répétitions.
 24. Le hook doit créer de la curiosité sans clickbait trompeur.
-25. La narration complète doit viser 25 à 30 minutes.
+25. La narration complète doit viser {{DUREE}}.
 26. Le script sera ensuite transmis au Visual Director et au Voice Agent.
 
 Réponds uniquement avec un JSON valide.
@@ -107,7 +115,7 @@ Structure obligatoire :
   "title": "",
   "hook": "",
   "thesis": "",
-  "estimated_duration_minutes": 27,
+  "estimated_duration_minutes": {{CIBLE}},
   "sections": [
     {
       "title": "",
@@ -134,7 +142,7 @@ Structure obligatoire :
 
 CONSIGNES DE STRUCTURE :
 
-- 6 à 8 sections.
+- {{SECTIONS}} sections.
 - Plusieurs segments par section lorsque nécessaire.
 - Chaque segment doit rester suffisamment court pour être exploitable
   ensuite par le Visual Director.
@@ -147,6 +155,43 @@ CONSIGNES DE STRUCTURE :
 - estimated_seconds doit représenter raisonnablement la durée du texte
   prononcé.
 `.trim();
+
+// Règles ajoutées au prompt système quand le cadre narré est demandé
+// (R14B). Sans cadre narré, le prompt historique est inchangé.
+const FRAME_RULES = `
+CADRE NARRÉ (obligatoire pour ce script) :
+
+A. Le hook est le PREMIER segment de la PREMIÈRE section.
+   Ce segment porte "role": "hook".
+B. La conclusion est le DERNIER segment de la DERNIÈRE section.
+   Ce segment porte "role": "conclusion".
+C. Le champ "hook" du script reprend EXACTEMENT le voiceover du segment hook.
+   Le champ "conclusion" reprend EXACTEMENT le voiceover du segment conclusion.
+D. Le hook et la conclusion sont de vrais segments, narrés puis illustrés :
+   ils ont estimated_seconds, research_fact_refs, contains_unverified_claim
+   et claims, et obéissent à toutes les règles de fidélité factuelle
+   ci-dessus (aucune affirmation hors claims).
+E. Aucun autre segment ne porte de role.
+F. Le hook et la conclusion s'appuient chacun sur au moins un key_fact.
+`.trim();
+
+const FRAME_REMINDER =
+  'CADRE NARRÉ : le hook est le premier segment de la première section ' +
+  '(role "hook") et la conclusion le dernier segment de la dernière ' +
+  'section (role "conclusion"). Chacun porte ses claims ; les champs ' +
+  "hook et conclusion reprennent exactement leur voiceover.";
+
+// Adapte le prompt au profil de durée et au cadre narré. Avec le profil
+// standard et sans cadre narré, le résultat est strictement le prompt
+// historique (25 à 30 minutes, 27, 6 à 8 sections).
+function buildSystemPrompt(profile, narratedFrame) {
+  const prompt = SYSTEM_PROMPT
+    .replaceAll("{{DUREE}}", formatDurationLabel(profile))
+    .replaceAll("{{CIBLE}}", String(profile.target))
+    .replaceAll("{{SECTIONS}}", formatSectionsLabel(profile.sections));
+
+  return narratedFrame ? `${prompt}\n\n${FRAME_RULES}` : prompt;
+}
 
 function parseJson(text) {
   if (!text?.trim()) {
@@ -238,8 +283,8 @@ function validateResearchReferences(script, research) {
   return errors;
 }
 
-async function validateGeneratedScript(data, research) {
-  const validation = validateScriptDossier(data);
+async function validateGeneratedScript(data, research, options = {}) {
+  const validation = validateScriptDossier(data, options);
 
   if (!validation.valid) {
     throw new Error(
@@ -354,8 +399,27 @@ async function validateGeneratedScript(data, research) {
     );
   }
 
+  // Cadre narré : hook et conclusion sont dérivés de leurs segments, qui
+  // ont pu être réparés par le gate de couverture ci-dessus. Le script
+  // final est revalidé.
+  let finalValidation = validation;
+
+  if (options.requireNarratedFrame || scriptHasFrameRoles(data)) {
+    syncNarratedFrameFields(data);
+
+    finalValidation = validateScriptDossier(data, options);
+
+    if (!finalValidation.valid) {
+      throw new Error(
+        "Script Agent : dossier rejeté par le Script Gate après " +
+        "réparation. " +
+        finalValidation.errors.join(" | ")
+      );
+    }
+  }
+
   return {
-    validation,
+    validation: finalValidation,
     research_reference_validation: {
       valid: true,
       errors: []
@@ -368,8 +432,16 @@ async function validateGeneratedScript(data, research) {
 export async function runScriptAgent({
   research,
   title,
-  testMode = false
+  testMode = false,
+  durationProfile,
+  narratedFrame = false
 }) {
+  const profile = agentDurationProfile(durationProfile);
+  const validationOptions = {
+    durationRange: { min: profile.min, max: profile.max },
+    requireNarratedFrame: narratedFrame === true
+  };
+
   const researchValidation =
     validateResearchDossier(research);
 
@@ -392,10 +464,10 @@ JSON MINIMAL permettant de tester le contrat technique.
 
 Pour ce test uniquement :
 - 2 sections ;
-- 1 segment par section ;
-- estimated_duration_minutes doit rester entre 25 et 30 ;
+- ${narratedFrame ? "1 segment par section, hors hook et conclusion" : "1 segment par section"} ;
+- estimated_duration_minutes doit rester entre ${profile.min} et ${profile.max} ;
 - n'invente aucun fait.
-
+${narratedFrame ? `\n${FRAME_REMINDER}\n` : ""}
 DOSSIER RESEARCH :
 ${JSON.stringify(research)}
 `.trim()
@@ -405,8 +477,8 @@ Rédige le script voix-off documentaire complet.
 Titre :
 ${title || research.topic}
 
-Le documentaire final doit durer entre 25 et 30 minutes.
-
+Le documentaire final doit durer entre ${profile.min} et ${profile.max} minutes.
+${narratedFrame ? `\n${FRAME_REMINDER}\n` : ""}
 Utilise exclusivement le dossier Research suivant.
 
 DOSSIER RESEARCH :
@@ -414,7 +486,7 @@ ${JSON.stringify(research)}
 `.trim();
 
   const { response, meta } = await createMessage({
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(profile, narratedFrame === true),
     messages: [
       {
         role: "user",
@@ -437,7 +509,7 @@ ${JSON.stringify(research)}
   const data = parseJson(text);
 
   const gateResult =
-    await validateGeneratedScript(data, research);
+    await validateGeneratedScript(data, research, validationOptions);
 
   return {
     agent: "script",

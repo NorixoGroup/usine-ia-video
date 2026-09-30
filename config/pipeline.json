@@ -14,7 +14,22 @@
     "fps": 30,
     "target_duration_minutes": 27,
     "minimum_duration_minutes": 25,
-    "maximum_duration_minutes": 30
+    "maximum_duration_minutes": 30,
+    "script_sections": {
+      "minimum": 6,
+      "maximum": 8
+    },
+    "duration_profiles": {
+      "short": {
+        "target_duration_minutes": 4,
+        "minimum_duration_minutes": 3,
+        "maximum_duration_minutes": 5,
+        "script_sections": {
+          "minimum": 3,
+          "maximum": 4
+        }
+      }
+    }
   },
   "pipeline": {
     "idea_generation": true,

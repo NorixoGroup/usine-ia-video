@@ -399,10 +399,15 @@ function auditPersistedVerdicts({ artifacts }) {
   return errors;
 }
 
-function auditStructure({ artifacts }) {
+function auditStructure({ artifacts, scriptDurationRange }) {
   const verdicts = {
     research: validateResearchDossier(artifacts.research.data),
-    script: validateScriptDossier(artifacts.script.data),
+    // Plage de durée déclarée du script : celle du profil de la
+    // production si elle est fournie, sinon 25-30 (comportement
+    // historique). Elle est indépendante de la durée cible mesurée.
+    script: validateScriptDossier(artifacts.script.data, {
+      durationRange: scriptDurationRange
+    }),
     visual: validateVisualDirectorDossier(artifacts.visual.data),
     assets: validateAssetManifest(artifacts.assets.data),
     voice: validateVoiceManifest(artifacts.voice.data),
@@ -1027,7 +1032,8 @@ export function auditPipelineArtifacts({
   target,
   mode,
   mediaVerification,
-  renderVerification
+  renderVerification,
+  scriptDurationRange
 }) {
   const warnings = [];
 
@@ -1036,7 +1042,8 @@ export function auditPipelineArtifacts({
     target,
     mode,
     mediaVerification,
-    renderVerification
+    renderVerification,
+    scriptDurationRange
   };
 
   let scope = QUALITY_SCOPE_CONTRACTS;

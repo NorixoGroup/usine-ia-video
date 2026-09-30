@@ -28,7 +28,8 @@ export async function runQualityAgent({
   target,
   testMode = false,
   mediaVerification,
-  renderVerification
+  renderVerification,
+  scriptDurationRange
 }) {
   const mode = testMode ? "test" : "full";
 
@@ -37,7 +38,8 @@ export async function runQualityAgent({
     target,
     mode,
     mediaVerification,
-    renderVerification
+    renderVerification,
+    scriptDurationRange
   });
 
   const failedChecks = checks.filter(check => !check.valid);

@@ -140,59 +140,115 @@ const SCRIPT_VOICEOVER_ARID_BY_SCENARIO = {
     `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text}`
 };
 
-function buildScript(voiceoverArid) {
+// Cadre narré (R14B) : hook et conclusion sont de vrais segments, avec
+// leurs claims, comme tous les autres.
+const VOICEOVER_HOOK =
+  "D'après les éléments disponibles, qui restent à vérifier, le territoire australien serait en grande partie aride ou semi-aride, alors que la population serait fortement concentrée dans les grandes zones urbaines et côtières.";
+
+const VOICEOVER_CONCLUSION =
+  "En résumé, et sous réserve de vérification, le territoire australien serait en grande partie aride ou semi-aride et sa population serait concentrée dans les grandes zones urbaines et côtières.";
+
+const FRAME_CLAIMS = [
+  {
+    text: CLAIM_ARID,
+    research_fact_ref: 0,
+    is_unverified: true
+  },
+  {
+    text: CLAIM_POPULATION,
+    research_fact_ref: 1,
+    is_unverified: true
+  }
+];
+
+function buildFrameSegment(role, voiceover) {
+  return {
+    role,
+    voiceover,
+    estimated_seconds: 20,
+    research_fact_refs: [0, 1],
+    contains_unverified_claim: true,
+    claims: FRAME_CLAIMS.map(claim => ({ ...claim }))
+  };
+}
+
+// durationMinutes : valeur déclarée par le script (27 = profil standard,
+// 4 = profil short). narratedFrame : hook et conclusion en segments.
+function buildScript(
+  voiceoverArid,
+  { durationMinutes = 27, narratedFrame = false } = {}
+) {
+  const aridSegment = {
+    voiceover: voiceoverArid,
+    estimated_seconds: 20,
+    research_fact_refs: [0],
+    contains_unverified_claim: true,
+    claims: [
+      {
+        text: CLAIM_ARID,
+        research_fact_ref: 0,
+        is_unverified: true
+      }
+    ]
+  };
+
+  const populationSegment = {
+    voiceover: VOICEOVER_POPULATION,
+    estimated_seconds: 20,
+    research_fact_refs: [1],
+    contains_unverified_claim: true,
+    claims: [
+      {
+        text: CLAIM_POPULATION,
+        research_fact_ref: 1,
+        is_unverified: true
+      }
+    ]
+  };
+
   return {
     title: CANONICAL_TITLE,
-    hook:
-      "Un territoire immense, et une population qui semble se tenir ailleurs.",
+    hook: narratedFrame
+      ? VOICEOVER_HOOK
+      : "Un territoire immense, et une population qui semble se tenir ailleurs.",
     thesis:
       "Le documentaire met en regard le territoire australien et la répartition de sa population.",
-    estimated_duration_minutes: 27,
+    estimated_duration_minutes: durationMinutes,
     sections: [
       {
         title: "L'intérieur aride",
         purpose:
           "Présenter les caractéristiques climatiques du territoire.",
-        segments: [
-          {
-            voiceover: voiceoverArid,
-            estimated_seconds: 20,
-            research_fact_refs: [0],
-            contains_unverified_claim: true,
-            claims: [
-              {
-                text: CLAIM_ARID,
-                research_fact_ref: 0,
-                is_unverified: true
-              }
+        segments: narratedFrame
+          ? [
+              buildFrameSegment("hook", VOICEOVER_HOOK),
+              aridSegment
             ]
-          }
-        ]
+          : [aridSegment]
       },
       {
         title: "Une population concentrée",
         purpose: "Présenter la répartition de la population.",
-        segments: [
-          {
-            voiceover: VOICEOVER_POPULATION,
-            estimated_seconds: 20,
-            research_fact_refs: [1],
-            contains_unverified_claim: true,
-            claims: [
-              {
-                text: CLAIM_POPULATION,
-                research_fact_ref: 1,
-                is_unverified: true
-              }
+        segments: narratedFrame
+          ? [
+              populationSegment,
+              buildFrameSegment("conclusion", VOICEOVER_CONCLUSION)
             ]
-          }
-        ]
+          : [populationSegment]
       }
     ],
-    conclusion:
-      "Ces deux éléments, qui restent à vérifier, structurent la suite de l'enquête."
+    conclusion: narratedFrame
+      ? VOICEOVER_CONCLUSION
+      : "Ces deux éléments, qui restent à vérifier, structurent la suite de l'enquête."
   };
 }
+
+// Durée déclarée par le script fixture selon la plage demandée dans le
+// prompt utilisateur (table fermée : toute autre plage est rejetée).
+const DECLARED_MINUTES_BY_RANGE = {
+  "25-30": 27,
+  "3-5": 4
+};
 
 // Script tel qu'il est persisté dans script.json une fois les gates passés.
 const PIPELINE_SCRIPT = buildScript(VOICEOVER_ARID);
@@ -265,6 +321,18 @@ const COVERAGE_TABLE = [
       `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL_RESIDUAL.text}`,
     claims: [CLAIM_ARID],
     undeclared: [UNDECLARED_RAINFALL_RESIDUAL]
+  },
+
+  // Cadre narré (R14B) : hook et conclusion, deux claims chacun.
+  {
+    voiceover: VOICEOVER_HOOK,
+    claims: [CLAIM_ARID, CLAIM_POPULATION],
+    undeclared: []
+  },
+  {
+    voiceover: VOICEOVER_CONCLUSION,
+    claims: [CLAIM_ARID, CLAIM_POPULATION],
+    undeclared: []
   },
 
   // Entrées de scripts/script-claim-coverage-smoke.js.
@@ -346,6 +414,14 @@ const SHOT_POPULATION_URBAN = {
   asset_query: "Australian coastal urban area"
 };
 
+// Hook et conclusion (R14B) : carte d'ensemble puis plan atmosphérique.
+const SHOT_FRAME_MAP = {
+  visual_description:
+    "Carte de l'Australie montrant les régions arides et semi-arides ainsi que la concentration de la population dans les zones urbaines et côtières.",
+  asset_query:
+    "Australia arid semi-arid regions population concentration map"
+};
+
 const VISUAL_ARID_SHOT_BY_SCENARIO = {
   "visual-grounding-repair": SHOT_ARID_OUTBACK,
   "visual-grounding-unrepairable": SHOT_ARID_VEGETATION
@@ -363,12 +439,12 @@ function buildShot(order, durationSeconds, texts, assetType, refs) {
   };
 }
 
-function buildAridSegment(scenario) {
+function buildAridSegment(scenario, segmentIndex = 0) {
   const firstShot =
     VISUAL_ARID_SHOT_BY_SCENARIO[scenario] ?? SHOT_ARID_CLEAN;
 
   return {
-    script_segment_index: 0,
+    script_segment_index: segmentIndex,
     estimated_seconds: 20,
     shots: [
       buildShot(1, 8, firstShot, "stock_video", [0]),
@@ -378,9 +454,9 @@ function buildAridSegment(scenario) {
   };
 }
 
-function buildPopulationSegment() {
+function buildPopulationSegment(segmentIndex = 0) {
   return {
-    script_segment_index: 0,
+    script_segment_index: segmentIndex,
     estimated_seconds: 20,
     shots: [
       buildShot(1, 12, SHOT_POPULATION_MAP, "map", [1]),
@@ -388,6 +464,48 @@ function buildPopulationSegment() {
     ]
   };
 }
+
+function buildFrameSegmentPlan(segmentIndex) {
+  return {
+    script_segment_index: segmentIndex,
+    estimated_seconds: 20,
+    shots: [
+      buildShot(1, 12, SHOT_FRAME_MAP, "map", [0, 1]),
+      buildShot(2, 8, SHOT_ATMOSPHERIC, "generated", [])
+    ]
+  };
+}
+
+// Plan des scripts à cadre narré : hook en premier segment de la
+// première section, conclusion en dernier segment de la dernière.
+function buildFramedPlan(scenario) {
+  return {
+    title: CANONICAL_TITLE,
+    sections: [
+      {
+        title: "L'intérieur aride",
+        segments: [
+          buildFrameSegmentPlan(0),
+          buildAridSegment(scenario, 1)
+        ]
+      },
+      {
+        title: "Une population concentrée",
+        segments: [
+          buildPopulationSegment(0),
+          buildFrameSegmentPlan(1)
+        ]
+      }
+    ]
+  };
+}
+
+// Scripts R14 : profil short (4 min déclarées), cadre narré, ou les deux.
+const R14_SCRIPT_VARIANTS = [
+  { durationMinutes: 27, narratedFrame: true },
+  { durationMinutes: 4, narratedFrame: false },
+  { durationMinutes: 4, narratedFrame: true }
+];
 
 const VISUAL_PLAN_TABLE = [
   {
@@ -417,7 +535,26 @@ const VISUAL_PLAN_TABLE = [
         }
       ]
     })
-  }
+  },
+  ...R14_SCRIPT_VARIANTS.map(variant => ({
+    script: buildScript(VOICEOVER_ARID, variant),
+    build: scenario =>
+      variant.narratedFrame
+        ? buildFramedPlan(scenario)
+        : {
+            title: CANONICAL_TITLE,
+            sections: [
+              {
+                title: "L'intérieur aride",
+                segments: [buildAridSegment(scenario)]
+              },
+              {
+                title: "Une population concentrée",
+                segments: [buildPopulationSegment()]
+              }
+            ]
+          }
+  }))
 ];
 
 // ------------------------------------------------------------------
@@ -438,6 +575,11 @@ const GROUNDING_TABLE = [
   {
     shot: SHOT_ATMOSPHERIC,
     claims: [],
+    unsupported: []
+  },
+  {
+    shot: SHOT_FRAME_MAP,
+    claims: [CLAIM_ARID, CLAIM_POPULATION],
     unsupported: []
   },
   {
@@ -613,10 +755,31 @@ function resolveScript(fixtureId, scenario, userMessage) {
     );
   }
 
+  // Variante demandée par le prompt utilisateur : plage de durée (R14A)
+  // et cadre narré (R14B). Sans marqueur R14, c'est le script historique.
+  const range = userMessage.match(
+    /estimated_duration_minutes doit rester entre (\d+) et (\d+) ;/
+  );
+
+  const declaredMinutes = range
+    ? DECLARED_MINUTES_BY_RANGE[`${range[1]}-${range[2]}`]
+    : undefined;
+
+  if (declaredMinutes === undefined) {
+    fail(
+      fixtureId,
+      "plage de durée hors du jeu de données canonique."
+    );
+  }
+
   return json(
     buildScript(
       SCRIPT_VOICEOVER_ARID_BY_SCENARIO[scenario] ??
-      VOICEOVER_ARID
+      VOICEOVER_ARID,
+      {
+        durationMinutes: declaredMinutes,
+        narratedFrame: /\nCADRE NARRÉ : /.test(userMessage)
+      }
     )
   );
 }

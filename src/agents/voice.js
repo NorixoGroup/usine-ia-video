@@ -15,7 +15,9 @@ import {
 //
 // Aucun modèle, aucun fournisseur, aucun fichier audio : chaque
 // segment.voiceover du script validé devient une unité de narration,
-// recopiée à l'identique. hook, thesis et conclusion ne sont pas narrés.
+// recopiée à l'identique. thesis n'est pas narrée ; hook et conclusion
+// le sont lorsqu'ils sont de vrais segments (script à cadre narré, role
+// hook et conclusion) et ne le sont pas dans un script historique.
 //
 // Lorsque la couche média fournit des relevés d'inspection de fichiers
 // audio locaux (localAudio, par unit_id), chaque unité est rattachée à
@@ -100,9 +102,14 @@ function buildManifest(script, localAudio) {
 export async function runVoiceAgent({
   script,
   testMode = false,
-  localAudio
+  localAudio,
+  durationProfile
 }) {
-  const scriptValidation = validateScriptDossier(script);
+  const scriptValidation = validateScriptDossier(script, {
+    durationRange: durationProfile
+      ? { min: durationProfile.min, max: durationProfile.max }
+      : undefined
+  });
 
   if (!scriptValidation.valid) {
     throw new Error(

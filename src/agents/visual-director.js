@@ -343,10 +343,15 @@ function validateScriptMapping(
 
 export async function runVisualDirector({
   script,
-  testMode = false
+  testMode = false,
+  durationProfile
 }) {
   const scriptValidation =
-    validateScriptDossier(script);
+    validateScriptDossier(script, {
+      durationRange: durationProfile
+        ? { min: durationProfile.min, max: durationProfile.max }
+        : undefined
+    });
 
   if (!scriptValidation.valid) {
     throw new Error(

@@ -2,6 +2,12 @@ import fs from "node:fs";
 import { createMessage, extractText } from "../services/anthropic.js";
 import { validateResearchDossier } from "../utils/validate-research.js";
 
+import {
+  agentDurationProfile,
+  formatDurationLabel,
+  formatSectionsLabel
+} from "../utils/duration-profile.js";
+
 const RESEARCH_CONFIG = JSON.parse(
   fs.readFileSync(
     new URL("../../config/research.json", import.meta.url),
@@ -13,7 +19,7 @@ const SYSTEM_PROMPT = `
 Tu es l'agent de recherche factuelle de la chaîne YouTube
 "Les Découvertes du Nomade".
 
-Tu prépares la base documentaire d'une vidéo faceless de 25 à 30 minutes.
+Tu prépares la base documentaire d'une vidéo faceless de {{DUREE}}.
 
 Tes priorités absolues sont :
 1. exactitude factuelle ;
@@ -42,14 +48,14 @@ LIMITES DU DOSSIER FULL :
 - Produis entre 8 et 12 key_facts au total.
 - Chaque key_fact contient au maximum 2 sources, en conservant les sources les plus solides et directement pertinentes.
 - Produis entre 3 et 5 story_angles.
-- Produis entre 6 et 8 sections.
+- Produis entre {{SECTIONS_ET}} sections.
 - Produis entre 6 et 10 visual_opportunities.
 - Chaque claim doit être concis et directement exploitable.
 - Chaque supports_claim doit expliquer brièvement ce que la source confirme, sans résumé inutile de la page.
 - Évite les répétitions entre executive_summary, key_facts et sections.
 - Ne multiplie pas les sources pour augmenter artificiellement leur nombre.
 - La qualité et la pertinence des preuves priment sur la quantité.
-- Le dossier doit être suffisamment riche pour préparer un documentaire de 25 à 30 minutes, mais suffisamment compact pour être transmis au Script Agent.
+- Le dossier doit être suffisamment riche pour préparer un documentaire de {{DUREE}}, mais suffisamment compact pour être transmis au Script Agent.
 
 Réponds uniquement en JSON valide.
 Aucun markdown.
@@ -101,6 +107,18 @@ Structure obligatoire :
   "research_gaps": []
 }
 `.trim();
+
+// Adapte le prompt au profil de durée. Avec le profil standard le
+// résultat est strictement le prompt historique (25 à 30 minutes,
+// 6 et 8 sections).
+function buildSystemPrompt(profile) {
+  return SYSTEM_PROMPT
+    .replaceAll("{{DUREE}}", formatDurationLabel(profile))
+    .replaceAll(
+      "{{SECTIONS_ET}}",
+      formatSectionsLabel(profile.sections).replace(" à ", " et ")
+    );
+}
 
 function parseJson(text) {
   if (!text?.trim()) {
@@ -177,8 +195,11 @@ function parseJson(text) {
 export async function runResearchAgent({
   title,
   prompt,
-  testMode = false
+  testMode = false,
+  durationProfile
 }) {
+  const profile = agentDurationProfile(durationProfile);
+
   if (!title?.trim()) {
     throw new Error("Research Agent : titre obligatoire.");
   }
@@ -209,11 +230,11 @@ Consigne éditoriale :
 ${prompt || "Aucune consigne supplémentaire."}
 
 La recherche doit permettre ensuite la rédaction d'un documentaire
-YouTube factuel de 25 à 30 minutes pour "Les Découvertes du Nomade".
+YouTube factuel de ${formatDurationLabel(profile)} pour "Les Découvertes du Nomade".
 `.trim();
 
   const { response, meta } = await createMessage({
-    system: SYSTEM_PROMPT,
+    system: buildSystemPrompt(profile),
     messages: [
       {
         role: "user",
