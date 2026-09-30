@@ -46,6 +46,10 @@ import {
 } from "../render/render-timeline.js";
 
 import {
+  outputNameError
+} from "../utils/validate-render-report.js";
+
+import {
   writeJsonArtifact,
   readJsonArtifact
 } from "./artifacts.js";
@@ -138,6 +142,31 @@ if (!RENDER_PROFILE_NAMES.includes(renderProfile)) {
   );
 }
 
+// Nom du MP4 rendu, optionnel : un simple nom de fichier .mp4, écrit
+// dans le dossier de sortie. Absent : <production-id>.mp4, comme avant.
+const renderOutputNameRequested = args.some(
+  (value) => value.startsWith("--output-name")
+);
+
+const renderOutputName = getArgument("output-name");
+
+if (renderOutputNameRequested && !renderRequested) {
+  throw new Error(
+    "Orchestrateur : --output-name exige --render."
+  );
+}
+
+if (
+  renderOutputNameRequested &&
+  outputNameError(renderOutputName) !== null
+) {
+  throw new Error(
+    "Orchestrateur : --output-name invalide — " +
+    `${outputNameError(renderOutputName)} ` +
+    `("${renderOutputName ?? ""}").`
+  );
+}
+
 const productionId = `prod-${new Date()
   .toISOString()
   .replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
@@ -194,7 +223,7 @@ if (renderRequested) {
     status: "pending",
     profile: renderProfile,
     output_dir: renderOutputDir,
-    output_file: `${productionId}.mp4`,
+    output_file: renderOutputName ?? `${productionId}.mp4`,
     started_at: null,
     completed_at: null,
     error: null
