@@ -37,6 +37,15 @@ import {
 } from "../media/local-media.js";
 
 import {
+  renderVideo,
+  verifyRenderedVideo
+} from "../render/ffmpeg-renderer.js";
+
+import {
+  RENDER_PROFILE_NAMES
+} from "../render/render-timeline.js";
+
+import {
   writeJsonArtifact,
   readJsonArtifact
 } from "./artifacts.js";
@@ -90,6 +99,45 @@ if (
   );
 }
 
+// Rendu réel du MP4, sur demande explicite uniquement. Sans --render,
+// le pipeline s'arrête au plan de montage, comme avant.
+const renderRequested = args.includes("--render");
+const renderProfile = getArgument("render-profile") || "target";
+const renderOutputDir =
+  getArgument("output-dir") || path.join(ROOT, "output");
+
+if (renderRequested && !mediaDir) {
+  throw new Error(
+    "Orchestrateur : --render exige --media-dir=<dossier>."
+  );
+}
+
+if (renderRequested && !researchScriptMode) {
+  throw new Error(
+    "Orchestrateur : --render exige --research-script."
+  );
+}
+
+if (
+  !renderRequested &&
+  args.some(
+    (value) =>
+      value.startsWith("--render-profile") ||
+      value.startsWith("--output-dir")
+  )
+) {
+  throw new Error(
+    "Orchestrateur : --render-profile et --output-dir exigent --render."
+  );
+}
+
+if (!RENDER_PROFILE_NAMES.includes(renderProfile)) {
+  throw new Error(
+    `Orchestrateur : --render-profile inconnu "${renderProfile}". ` +
+    `Valeurs admises : ${RENDER_PROFILE_NAMES.join(", ")}.`
+  );
+}
+
 const productionId = `prod-${new Date()
   .toISOString()
   .replace(/[:.]/g, "-")}-${crypto.randomBytes(3).toString("hex")}`;
@@ -137,6 +185,20 @@ const production = {
 
 if (mediaDir) {
   production.input.media_dir = mediaDir;
+}
+
+// État de l'étape technique de rendu, entre Assembly et Quality. Ce
+// n'est pas un agent : les 7 agents restent inchangés.
+if (renderRequested) {
+  production.render = {
+    status: "pending",
+    profile: renderProfile,
+    output_dir: renderOutputDir,
+    output_file: `${productionId}.mp4`,
+    started_at: null,
+    completed_at: null,
+    error: null
+  };
 }
 
 function saveProduction() {
@@ -522,6 +584,64 @@ if (dryRun) {
     console.log("    ✓ Assembly PASS");
     console.log("    ✓ assembly.json écrit");
 
+    // Étape technique de rendu : le plan, les manifestes et les médias
+    // sont relus et recontrôlés sur disque juste avant de lancer ffmpeg.
+    if (renderRequested) {
+      const renderAssembly = readJsonArtifact(
+        productionDir,
+        "assembly.json"
+      );
+
+      const renderAssets = readJsonArtifact(
+        productionDir,
+        "assets.json"
+      );
+
+      const renderVoice = readJsonArtifact(
+        productionDir,
+        "voice.json"
+      );
+
+      console.log("");
+      console.log(`[rendu] ffmpeg — profil ${renderProfile}`);
+
+      production.render.status = "running";
+      production.render.started_at = new Date().toISOString();
+      saveProduction();
+
+      fs.mkdirSync(renderOutputDir, { recursive: true });
+
+      const renderResult = await renderVideo({
+        assembly: renderAssembly?.data,
+        assets: renderAssets?.data,
+        voice: renderVoice?.data,
+        mediaDir,
+        mediaVerification: await verifyLocalMedia({
+          mediaDir,
+          assets: renderAssets?.data,
+          voice: renderVoice?.data
+        }),
+        profile: renderProfile,
+        outputDir: renderOutputDir,
+        outputName: production.render.output_file,
+        workDir: path.join(ROOT, "tmp", `render-${productionId}`),
+        testMode: true
+      });
+
+      writeJsonArtifact(
+        productionDir,
+        "render.json",
+        renderResult
+      );
+
+      production.render.status = "completed";
+      production.render.completed_at = new Date().toISOString();
+      saveProduction();
+
+      console.log("    ✓ Rendu PASS");
+      console.log("    ✓ render.json écrit");
+    }
+
     // Quality audite les six enveloppes complètes, relues depuis le disque.
     const qualityArtifacts = {
       research: readJsonArtifact(productionDir, "research.json"),
@@ -531,6 +651,15 @@ if (dryRun) {
       voice: readJsonArtifact(productionDir, "voice.json"),
       assembly: readJsonArtifact(productionDir, "assembly.json")
     };
+
+    // Avec un rendu : render.json s'ajoute, et la vidéo est recontrôlée
+    // sur disque juste avant l'audit.
+    if (renderRequested) {
+      qualityArtifacts.render = readJsonArtifact(
+        productionDir,
+        "render.json"
+      );
+    }
 
     console.log("");
     console.log(
@@ -550,6 +679,13 @@ if (dryRun) {
             mediaDir,
             assets: qualityArtifacts.assets?.data,
             voice: qualityArtifacts.voice?.data
+          })
+        : undefined,
+      renderVerification: renderRequested
+        ? await verifyRenderedVideo({
+            outputDir: renderOutputDir,
+            render: qualityArtifacts.render,
+            assembly: qualityArtifacts.assembly?.data
           })
         : undefined
     });
@@ -604,7 +740,20 @@ if (dryRun) {
         ? " Médias     : locaux, inspectés et recontrôlés sur disque"
         : " Médias     : aucun — contrats seuls"
     );
-    console.log(" Vidéo finale : NON RENDUE (aucun final.mp4)");
+    if (renderRequested) {
+      console.log(
+        `             projects/${production.id}/render.json`
+      );
+      console.log(
+        ` Vidéo finale : RENDUE — ${path.join(renderOutputDir, production.render.output_file)}`
+      );
+      console.log(
+        `                profil ${renderProfile}, contrôlée par ffprobe`
+      );
+    } else {
+      console.log(" Vidéo finale : NON RENDUE (aucun final.mp4)");
+    }
+
     console.log("==============================================");
 
     process.exit(0);
@@ -612,6 +761,15 @@ if (dryRun) {
     const runningAgent = production.agents.find(
       (agent) => agent.status === "running"
     );
+
+    if (production.render?.status === "running") {
+      production.render.status = "failed";
+      production.render.completed_at = new Date().toISOString();
+      production.render.error =
+        error instanceof Error
+          ? error.message
+          : String(error);
+    }
 
     if (runningAgent) {
       runningAgent.status = "failed";

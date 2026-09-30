@@ -89,6 +89,11 @@ export function normalizeProbeResult(raw, absolutePath) {
       parseRate(stream.r_frame_rate),
     sample_rate: toPositiveNumber(stream.sample_rate),
     channels: toPositiveNumber(stream.channels),
+    // Durée propre du flux, lorsque le conteneur la fournit.
+    duration_seconds:
+      toPositiveNumber(stream.duration) === null
+        ? null
+        : roundSeconds(toPositiveNumber(stream.duration)),
     // Une pochette incrustée dans un fichier audio n'est pas une vidéo.
     attached_picture: stream.disposition?.attached_pic === 1
   }));

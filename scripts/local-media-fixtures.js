@@ -142,10 +142,16 @@ export function generateAudio(
 }
 
 // Vidéo portant aussi une piste audio (stock footage sonore).
-export function generateVideoWithAudio(file, { seconds }) {
+export function generateVideoWithAudio(
+  file,
+  {
+    seconds,
+    color = "green"
+  }
+) {
   ffmpeg([
     "-f", "lavfi",
-    "-i", `color=c=green:s=${VIDEO_SIZE}:r=${VIDEO_FPS}`,
+    "-i", `color=c=${color}:s=${VIDEO_SIZE}:r=${VIDEO_FPS}`,
     "-f", "lavfi",
     "-i", `sine=frequency=330:sample_rate=${AUDIO_SAMPLE_RATE}`,
     "-t", String(seconds),
@@ -191,6 +197,61 @@ export function generateCanonicalMediaSet(mediaDir) {
 
   generateAudio(voice("s01-g01.wav"), { seconds: 20 });
   generateAudio(voice("s02-g01.mp3"), { seconds: 21.5 });
+
+  return mediaDir;
+}
+
+// Couleur de chaque clip du jeu rendable, dans l'ordre du plan : elle
+// permet de prouver l'ordre des clips en relevant une image du MP4.
+export const RENDERABLE_CLIP_COLORS = [
+  "red",
+  "yellow",
+  "blue",
+  "magenta",
+  "cyan"
+];
+
+// Même plan canonique, mais rendable : la voix fait foi au rendu, et
+// la seconde unité mesure 21,5 s pour 20 s estimées. Ses clips doivent
+// donc durer 12,9 s et 8,6 s : les vidéos sources sont plus longues que
+// le besoin prévu. Chaque clip a sa couleur.
+//
+//   assets/s01-g01-sh01.mp4   rouge    vidéo 8 s
+//   assets/s01-g01-sh02.png   jaune    image fixe
+//   assets/s01-g01-sh03.mp4   bleu     vidéo 6 s
+//   assets/s02-g01-sh01.mp4   magenta  vidéo 14 s
+//   assets/s02-g01-sh02.mp4   cyan     vidéo 10 s avec piste audio
+//   voice/s01-g01.wav         20 s
+//   voice/s02-g01.mp3         21,5 s
+export function generateRenderableMediaSet(mediaDir) {
+  const asset = name => path.join(mediaDir, "assets", name);
+  const voice = name => path.join(mediaDir, "voice", name);
+
+  const [red, yellow, blue, magenta, cyan] = RENDERABLE_CLIP_COLORS;
+
+  generateVideo(asset("s01-g01-sh01.mp4"), {
+    seconds: 8,
+    color: red
+  });
+  generateImage(asset("s01-g01-sh02.png"), { color: yellow });
+  generateVideo(asset("s01-g01-sh03.mp4"), {
+    seconds: 6,
+    color: blue
+  });
+  generateVideo(asset("s02-g01-sh01.mp4"), {
+    seconds: 14,
+    color: magenta
+  });
+  generateVideoWithAudio(asset("s02-g01-sh02.mp4"), {
+    seconds: 10,
+    color: cyan
+  });
+
+  generateAudio(voice("s01-g01.wav"), { seconds: 20 });
+  generateAudio(voice("s02-g01.mp3"), {
+    seconds: 21.5,
+    frequency: 660
+  });
 
   return mediaDir;
 }

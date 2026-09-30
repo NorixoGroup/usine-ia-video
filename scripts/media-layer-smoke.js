@@ -164,6 +164,17 @@ function listFiles(directory) {
 // Fixtures : fabriquées une fois, copiées pour chaque cas destructif.
 // ------------------------------------------------------------------
 
+// Contenu de output/ avant le smoke, pour prouver qu'il n'y touche pas.
+function listOutputDirectory() {
+  const target = path.join(ROOT, "output");
+
+  return fs.existsSync(target)
+    ? fs.readdirSync(target).sort()
+    : [];
+}
+
+const outputBefore = listOutputDirectory();
+
 const fixtureRoot = createMediaFixtureRoot();
 const base = path.join(fixtureRoot, "base");
 
@@ -2566,7 +2577,14 @@ try {
       `fichiers de rendu inattendus : ${rendered}`
     );
 
-    for (const directory of ["output", "tmp"]) {
+    // output/ peut contenir de vrais rendus : ce smoke doit seulement
+    // prouver qu'il n'y a lui-même rien créé ni supprimé.
+    assert(
+      isDeepStrictEqual(listOutputDirectory(), outputBefore),
+      `output/ modifié par le smoke : ${listOutputDirectory()}`
+    );
+
+    for (const directory of ["tmp"]) {
       const target = path.join(ROOT, directory);
 
       const strangers = fs.existsSync(target)

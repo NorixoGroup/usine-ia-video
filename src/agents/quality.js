@@ -16,14 +16,19 @@ import {
 // - "contracts_only" : seuls les contrats ont été audités ;
 // - "local_media" : les médias locaux rattachés ont en plus été
 //   recontrôlés sur disque par la couche média, qui remet son rapport
-//   (mediaVerification). L'agent ne lit lui-même aucun fichier.
-// Dans les deux cas, aucune vidéo finale n'est produite ni inspectée.
+//   (mediaVerification). L'agent ne lit lui-même aucun fichier ;
+// - "rendered_video" : un MP4 a en plus été réellement rendu, décrit
+//   par l'artefact render.json, et recontrôlé sur disque par la couche
+//   de rendu, qui remet son rapport (renderVerification).
+// Dans les deux premiers cas, aucune vidéo finale n'est produite ni
+// inspectée : final_video reste "not_rendered".
 
 export async function runQualityAgent({
   artifacts,
   target,
   testMode = false,
-  mediaVerification
+  mediaVerification,
+  renderVerification
 }) {
   const mode = testMode ? "test" : "full";
 
@@ -31,7 +36,8 @@ export async function runQualityAgent({
     artifacts,
     target,
     mode,
-    mediaVerification
+    mediaVerification,
+    renderVerification
   });
 
   const failedChecks = checks.filter(check => !check.valid);

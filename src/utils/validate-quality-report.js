@@ -148,12 +148,45 @@ export const QUALITY_SCOPE_CONTRACTS = "contracts_only";
 export const QUALITY_SCOPE_LOCAL_MEDIA = "local_media";
 export const QUALITY_FINAL_VIDEO = "not_rendered";
 
+// Périmètre d'un audit portant aussi sur un MP4 réellement rendu et
+// recontrôlé sur disque par la couche de rendu.
+export const QUALITY_SCOPE_RENDERED = "rendered_video";
+export const QUALITY_FINAL_VIDEO_RENDERED = "rendered";
+
 // Contrôles ajoutés lorsque des médias locaux sont rattachés.
 export const QUALITY_MEDIA_CHECK_IDS = [
   "media_files"
 ];
 
+// Contrôle ajouté lorsqu'une vidéo a été rendue.
+export const QUALITY_RENDER_CHECK_IDS = [
+  "final_video"
+];
+
+// Écart maximal admis, en secondes, sur la durée de la vidéo rendue.
+const RENDER_DURATION_TOLERANCE = 0.2;
+
+const RENDER_ENVELOPE_KEYS = [
+  "stage",
+  "mode",
+  "data",
+  "validation",
+  "usage"
+];
+
+const RENDER_PROFILES = ["target", "preview"];
+
 const MEDIA_KEYS_BY_SCOPE = {
+  [QUALITY_SCOPE_RENDERED]: [
+    "scope",
+    "final_video",
+    "assets_inspected",
+    "narration_units_inspected",
+    "estimated_narration_seconds",
+    "measured_narration_seconds",
+    "rendered_duration_seconds",
+    "render_profile"
+  ],
   [QUALITY_SCOPE_CONTRACTS]: [
     "scope",
     "final_video"
@@ -232,11 +265,22 @@ function sum(values) {
 // Contrôles de l'audit
 // ------------------------------------------------------------------
 
-function auditEnvelopes({ artifacts, mode }) {
+function auditEnvelopes({ artifacts, mode, renderVerification }) {
   const errors = [];
 
   if (!QUALITY_MODES.includes(mode)) {
     errors.push(`mode d'audit invalide : ${mode}`);
+  }
+
+  // Un render.json ne peut être audité qu'avec le recontrôle disque de
+  // la vidéo qu'il décrit.
+  if (
+    artifacts.render !== undefined &&
+    renderVerification === undefined
+  ) {
+    errors.push(
+      "render.json: artefact fourni sans contrôle de la vidéo rendue"
+    );
   }
 
   for (const [name, spec] of Object.entries(ENVELOPES)) {
@@ -734,7 +778,211 @@ function auditDurations({ artifacts, target, mode }, warnings) {
   return errors;
 }
 
+// Vidéo finale : render.json doit décrire un MP4 réellement rendu, que
+// la couche de rendu vient de recontrôler sur disque (présence, taille,
+// empreinte, relevé du fichier), et ce rendu doit suivre le plan de
+// montage et les médias audités. Quality ne lit lui-même aucun fichier.
+function auditFinalVideo(
+  { artifacts, target, mode, renderVerification },
+  warnings
+) {
+  const errors = [];
+  const render = artifacts.render;
+
+  if (!isPlainObject(render)) {
+    return ["render.json: artefact absent ou invalide"];
+  }
+
+  checkExactKeys(render, RENDER_ENVELOPE_KEYS, "render.json", errors);
+
+  if (render.stage !== "render") {
+    errors.push(`render.json: stage "${render.stage}" au lieu de "render"`);
+  }
+
+  if (render.mode !== mode) {
+    errors.push(
+      `render.json: mode "${render.mode}" différent du mode d'audit "${mode}"`
+    );
+  }
+
+  if (render.usage !== null) {
+    errors.push("render.json: usage doit être null");
+  }
+
+  if (
+    !isPlainObject(render.validation) ||
+    render.validation.valid !== true ||
+    !Array.isArray(render.validation.errors) ||
+    render.validation.errors.length !== 0
+  ) {
+    errors.push("render.json: validation n'est pas un PASS persisté");
+  }
+
+  const data = render.data;
+
+  if (
+    !isPlainObject(data) ||
+    !isPlainObject(data.output) ||
+    !isPlainObject(data.summary) ||
+    !Array.isArray(data.video_track) ||
+    !Array.isArray(data.audio_track)
+  ) {
+    errors.push("render.json: data absent ou invalide");
+
+    return errors;
+  }
+
+  if (data.status !== "rendered") {
+    errors.push('render.json: status doit être "rendered"');
+  }
+
+  if (!RENDER_PROFILES.includes(data.profile)) {
+    errors.push("render.json: profile invalide");
+  }
+
+  // Recontrôle disque du MP4 par la couche de rendu.
+  if (
+    !isPlainObject(renderVerification) ||
+    renderVerification.scope !== QUALITY_SCOPE_RENDERED ||
+    !Array.isArray(renderVerification.errors)
+  ) {
+    errors.push("rapport de contrôle de la vidéo rendue absent ou invalide");
+  } else if (
+    renderVerification.valid !== true ||
+    renderVerification.errors.length > 0
+  ) {
+    errors.push(
+      ...(
+        renderVerification.errors.length > 0
+          ? renderVerification.errors
+          : ["rapport de contrôle de la vidéo rendue en échec"]
+      )
+    );
+  } else if (
+    !isDeepStrictEqual(renderVerification.output, data.output)
+  ) {
+    errors.push(
+      "vidéo contrôlée sur disque différente de celle décrite par render.json"
+    );
+  }
+
+  // Cohérence avec les artefacts audités.
+  if (data.title !== artifacts.script.data.title) {
+    errors.push("render.json: title différent de script.json");
+  }
+
+  const plan = artifacts.assembly.data;
+
+  if (
+    !isDeepStrictEqual(
+      data.video_track.map(clip => [
+        clip?.asset_id,
+        clip?.unit_id,
+        clip?.source?.path
+      ]),
+      plan.video_track.map(clip => [
+        clip.asset_id,
+        clip.unit_id,
+        clip.media?.path
+      ])
+    )
+  ) {
+    errors.push(
+      "render.json: clips rendus différents du plan de montage"
+    );
+  }
+
+  if (
+    !isDeepStrictEqual(
+      data.audio_track.map(unit => [
+        unit?.unit_id,
+        unit?.source?.path
+      ]),
+      plan.audio_track.map(unit => [
+        unit.unit_id,
+        unit.audio?.path
+      ])
+    )
+  ) {
+    errors.push(
+      "render.json: unités rendues différentes du plan de montage"
+    );
+  }
+
+  // La narration mesurée fait foi : la vidéo ne peut être ni plus
+  // courte qu'elle, ni plus longue de plus d'une image par unité.
+  const measured = sum(
+    artifacts.voice.data.narration_units.map(
+      unit => unit.audio.duration_seconds
+    )
+  );
+
+  const rendered = data.summary.rendered_duration_seconds;
+  const fps = data.output.fps;
+
+  if (
+    !Number.isFinite(rendered) ||
+    !Number.isFinite(fps) ||
+    fps <= 0 ||
+    rendered < measured - 0.002 ||
+    rendered >
+      measured +
+      artifacts.voice.data.narration_units.length / fps +
+      0.002
+  ) {
+    errors.push(
+      `render.json: durée rendue ${rendered}s incohérente avec la narration mesurée ${measured}s`
+    );
+  }
+
+  if (
+    !Number.isFinite(data.output.duration_seconds) ||
+    Math.abs(data.output.duration_seconds - rendered) >
+      RENDER_DURATION_TOLERANCE
+  ) {
+    errors.push(
+      `render.json: durée du fichier ${data.output.duration_seconds}s ` +
+      `à plus de ${RENDER_DURATION_TOLERANCE}s de la timeline ${rendered}s`
+    );
+  }
+
+  if (fps !== target?.video?.fps) {
+    errors.push(
+      `render.json: cadence ${fps} différente de la cible ${target?.video?.fps} images/s`
+    );
+  }
+
+  // Profil : la cible de production, ou un aperçu réduit toléré
+  // uniquement en mode test.
+  const video = target?.video;
+
+  if (data.profile === "target") {
+    if (
+      data.output.width !== video?.width ||
+      data.output.height !== video?.height
+    ) {
+      errors.push(
+        `render.json: dimensions ${data.output.width}x${data.output.height} ` +
+        `différentes de la cible ${video?.width}x${video?.height}`
+      );
+    }
+  } else if (data.profile === "preview") {
+    const message =
+      `vidéo rendue au profil preview ${data.output.width}x${data.output.height}, ` +
+      `inférieur à la cible ${video?.width}x${video?.height}`;
+
+    if (mode === "test") {
+      warnings.push(`${message} — non bloquant en mode test`);
+    } else {
+      errors.push(`${message} — refusé en mode complet`);
+    }
+  }
+
+  return errors;
+}
+
 const AUDITS = {
+  final_video: auditFinalVideo,
   envelopes: auditEnvelopes,
   persisted_verdicts: auditPersistedVerdicts,
   structure: auditStructure,
@@ -750,6 +998,14 @@ const AUDITS = {
 
 // Contrôles attendus selon le périmètre audité.
 export function expectedQualityCheckIds(scope) {
+  if (scope === QUALITY_SCOPE_RENDERED) {
+    return [
+      ...QUALITY_CHECK_IDS,
+      ...QUALITY_MEDIA_CHECK_IDS,
+      ...QUALITY_RENDER_CHECK_IDS
+    ];
+  }
+
   return scope === QUALITY_SCOPE_LOCAL_MEDIA
     ? [...QUALITY_CHECK_IDS, ...QUALITY_MEDIA_CHECK_IDS]
     : QUALITY_CHECK_IDS;
@@ -762,11 +1018,16 @@ export function expectedQualityCheckIds(scope) {
 // mediaVerification est le rapport de recontrôle disque remis par la
 // couche média. Absent : l'audit porte sur les contrats seuls, et tout
 // média référencé dans les artefacts est alors une incohérence.
+//
+// renderVerification est le rapport de recontrôle disque du MP4 remis
+// par la couche de rendu. Présent : l'audit porte aussi sur la vidéo
+// rendue, décrite par l'artefact render.json.
 export function auditPipelineArtifacts({
   artifacts,
   target,
   mode,
-  mediaVerification
+  mediaVerification,
+  renderVerification
 }) {
   const warnings = [];
 
@@ -774,13 +1035,17 @@ export function auditPipelineArtifacts({
     artifacts: isPlainObject(artifacts) ? artifacts : {},
     target,
     mode,
-    mediaVerification
+    mediaVerification,
+    renderVerification
   };
 
-  const scope =
-    mediaVerification === undefined
-      ? QUALITY_SCOPE_CONTRACTS
-      : QUALITY_SCOPE_LOCAL_MEDIA;
+  let scope = QUALITY_SCOPE_CONTRACTS;
+
+  if (renderVerification !== undefined) {
+    scope = QUALITY_SCOPE_RENDERED;
+  } else if (mediaVerification !== undefined) {
+    scope = QUALITY_SCOPE_LOCAL_MEDIA;
+  }
 
   const checks = expectedQualityCheckIds(scope).map(id => {
     let errors;
@@ -808,10 +1073,14 @@ export function auditPipelineArtifacts({
 }
 
 // Bloc "media" du rapport : ce que l'audit a réellement contrôlé.
-// final_video vaut toujours "not_rendered" : aucune vidéo finale n'est
-// produite ni inspectée à ce stade du pipeline.
+// final_video vaut "not_rendered" tant qu'aucun MP4 n'a été rendu puis
+// recontrôlé sur disque ; seul le périmètre "rendered_video" porte
+// "rendered".
 export function describeMediaScope(artifacts, scope) {
-  if (scope !== QUALITY_SCOPE_LOCAL_MEDIA) {
+  if (
+    scope !== QUALITY_SCOPE_LOCAL_MEDIA &&
+    scope !== QUALITY_SCOPE_RENDERED
+  ) {
     return {
       scope: QUALITY_SCOPE_CONTRACTS,
       final_video: QUALITY_FINAL_VIDEO
@@ -820,7 +1089,7 @@ export function describeMediaScope(artifacts, scope) {
 
   const units = artifacts.voice.data.narration_units;
 
-  return {
+  const media = {
     scope: QUALITY_SCOPE_LOCAL_MEDIA,
     final_video: QUALITY_FINAL_VIDEO,
     assets_inspected: artifacts.assets.data.assets.length,
@@ -831,6 +1100,19 @@ export function describeMediaScope(artifacts, scope) {
     measured_narration_seconds: sum(
       units.map(unit => unit.audio.duration_seconds)
     )
+  };
+
+  if (scope !== QUALITY_SCOPE_RENDERED) {
+    return media;
+  }
+
+  return {
+    ...media,
+    scope: QUALITY_SCOPE_RENDERED,
+    final_video: QUALITY_FINAL_VIDEO_RENDERED,
+    rendered_duration_seconds:
+      artifacts.render.data.summary.rendered_duration_seconds,
+    render_profile: artifacts.render.data.profile
   };
 }
 
@@ -883,7 +1165,8 @@ export function validateQualityReport(data) {
   ) {
     errors.push(
       `media: périmètre absent ou invalide — scope doit être ` +
-      `"${QUALITY_SCOPE_CONTRACTS}" ou "${QUALITY_SCOPE_LOCAL_MEDIA}"`
+      `"${QUALITY_SCOPE_CONTRACTS}" ou "${QUALITY_SCOPE_LOCAL_MEDIA}"` +
+      ` ou "${QUALITY_SCOPE_RENDERED}"`
     );
   } else {
     checkExactKeys(
@@ -893,13 +1176,27 @@ export function validateQualityReport(data) {
       errors
     );
 
-    if (data.media.final_video !== QUALITY_FINAL_VIDEO) {
+    // Seul le périmètre "rendered_video" peut annoncer une vidéo rendue.
+    const expectedFinalVideo =
+      scope === QUALITY_SCOPE_RENDERED
+        ? QUALITY_FINAL_VIDEO_RENDERED
+        : QUALITY_FINAL_VIDEO;
+
+    if (data.media.final_video !== expectedFinalVideo) {
       errors.push(
-        `media: final_video doit être "${QUALITY_FINAL_VIDEO}"`
+        `media: final_video doit être "${expectedFinalVideo}"`
       );
     }
 
     for (const key of MEDIA_KEYS_BY_SCOPE[scope].slice(2)) {
+      if (key === "render_profile") {
+        if (!RENDER_PROFILES.includes(data.media[key])) {
+          errors.push(`media: ${key} invalide`);
+        }
+
+        continue;
+      }
+
       if (
         !Number.isFinite(data.media[key]) ||
         data.media[key] <= 0
