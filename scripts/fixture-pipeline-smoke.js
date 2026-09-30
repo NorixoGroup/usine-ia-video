@@ -12,6 +12,11 @@ import path from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import {
+  validateAssetManifest,
+  validateAssetManifestMapping
+} from "../src/utils/validate-asset-manifest.js";
+
 if (process.env.NO_API !== "1") {
   console.error(
     "FAIL — ce smoke doit être lancé avec NO_API=1."
@@ -123,6 +128,9 @@ function runPipeline({ fixtures, scenario, extraArgs = [] }) {
       : null,
     visual: productionId
       ? readArtifact(productionId, "visual.json")
+      : null,
+    assets: productionId
+      ? readArtifact(productionId, "assets.json")
       : null
   };
 }
@@ -170,7 +178,7 @@ function assertCommon(run) {
 
   assert(run.production, "production.json absent");
 
-  for (const id of ["asset", "voice", "assembly", "quality"]) {
+  for (const id of ["voice", "assembly", "quality"]) {
     const state = agentState(run, id);
 
     assert(
@@ -203,6 +211,48 @@ function assertCommon(run) {
   }
 }
 
+function assertAssets(run) {
+  const { assets, visual } = run;
+
+  assert(
+    assets.agent === "asset" &&
+    assets.usage === null &&
+    assets.validation.valid === true &&
+    assets.visual_mapping_validation.valid === true,
+    "assets.json : enveloppe ou gates persistés invalides"
+  );
+
+  const validation = validateAssetManifest(assets.data);
+
+  assert(
+    validation.valid,
+    `assets.json : ${validation.errors.join(" | ")}`
+  );
+
+  const mapping = validateAssetManifestMapping(
+    assets.data,
+    visual.data
+  );
+
+  assert(
+    mapping.valid,
+    `assets.json / visual.json : ${mapping.errors.join(" | ")}`
+  );
+
+  assert(
+    assets.data.assets.length === groundingShots(run).length &&
+    assets.data.assets.every(
+      asset => asset.status === "unresolved"
+    ),
+    "assets.json : un asset unresolved par shot attendu"
+  );
+
+  assert(
+    !/https?:\/\//i.test(JSON.stringify(assets.data)),
+    "assets.json contient une URL"
+  );
+}
+
 function assertPass(run) {
   assertCommon(run);
 
@@ -212,11 +262,11 @@ function assertPass(run) {
   );
 
   assert(
-    run.production.status === "research_script_visual_pass",
+    run.production.status === "research_script_visual_asset_pass",
     `status=${run.production.status}`
   );
 
-  for (const id of ["research", "script", "visual_director"]) {
+  for (const id of ["research", "script", "visual_director", "asset"]) {
     assert(
       agentState(run, id).status === "completed",
       `Agent ${id} : ${agentState(run, id).status}`
@@ -224,9 +274,11 @@ function assertPass(run) {
   }
 
   assert(
-    run.research && run.script && run.visual,
-    "research.json / script.json / visual.json attendus"
+    run.research && run.script && run.visual && run.assets,
+    "research.json / script.json / visual.json / assets.json attendus"
   );
+
+  assertAssets(run);
 
   assert(
     run.research.agent === "research" &&
@@ -242,9 +294,9 @@ function assertPass(run) {
 
   assert(
     run.stdout.includes(
-      "RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR"
+      "RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET"
     ) &&
-    run.stdout.includes("Agents 4-7 : NON EXECUTES"),
+    run.stdout.includes("Agents 5-7 : NON EXECUTES"),
     "bandeau final inattendu"
   );
 }
@@ -282,6 +334,15 @@ function assertFail(run, { failedAgent, error, artifacts }) {
       `${name}.json ${expected ? "attendu" : "inattendu"}`
     );
   }
+
+  const asset = agentState(run, "asset");
+
+  assert(
+    asset.status === "pending" &&
+    asset.started_at === null &&
+    run.assets === null,
+    `Agent asset : ne doit pas démarrer (${asset.status})`
+  );
 }
 
 function coverageSegments(run) {
@@ -540,7 +601,7 @@ console.log("");
 console.log("========================================");
 console.log(`Tests : ${passed} PASS / ${failed} FAIL`);
 console.log("API Anthropic réelle utilisée : NON");
-console.log("Agents 4-7 exécutés : NON");
+console.log("Agents 5-7 exécutés : NON");
 
 if (failed > 0) {
   console.error(
@@ -550,7 +611,7 @@ if (failed > 0) {
 }
 
 console.log(
-  "RESULTAT GLOBAL : PASS — pipeline local Research → Script → Visual Director prouvé sans API"
+  "RESULTAT GLOBAL : PASS — pipeline local Research → Script → Visual Director → Asset prouvé sans API"
 );
 
 process.exit(0);

@@ -15,6 +15,10 @@ import {
 } from "../agents/visual-director.js";
 
 import {
+  runAssetAgent
+} from "../agents/asset.js";
+
+import {
   writeJsonArtifact,
   readJsonArtifact
 } from "./artifacts.js";
@@ -180,13 +184,18 @@ if (dryRun) {
     (agent) => agent.id === "visual_director"
   );
 
+  const assetState = production.agents.find(
+    (agent) => agent.id === "asset"
+  );
+
   if (
     !researchState ||
     !scriptState ||
-    !visualDirectorState
+    !visualDirectorState ||
+    !assetState
   ) {
     throw new Error(
-      "Orchestrateur : états Research/Script/Visual Director introuvables."
+      "Orchestrateur : états Research/Script/Visual Director/Asset introuvables."
     );
   }
 
@@ -302,24 +311,66 @@ if (dryRun) {
     console.log("    ✓ Visual Director PASS");
     console.log("    ✓ visual.json écrit");
 
+    const persistedVisual = readJsonArtifact(
+      productionDir,
+      "visual.json"
+    );
+
+    if (
+      !persistedVisual ||
+      !persistedVisual.data
+    ) {
+      throw new Error(
+        "Orchestrateur : visual.json ne contient pas data."
+      );
+    }
+
+    console.log("");
+    console.log(
+      `[${assetState.order}/${production.agents.length}] asset`
+    );
+
+    assetState.status = "running";
+    assetState.started_at = new Date().toISOString();
+    saveProduction();
+
+    const assetResult = await runAssetAgent({
+      visual: persistedVisual.data,
+      testMode: true
+    });
+
+    writeJsonArtifact(
+      productionDir,
+      "assets.json",
+      assetResult
+    );
+
+    assetState.status = "completed";
+    assetState.completed_at = new Date().toISOString();
+    saveProduction();
+
+    console.log("    ✓ Asset PASS");
+    console.log("    ✓ assets.json écrit");
+
     for (const agentState of production.agents) {
       if (
         agentState.id !== "research" &&
         agentState.id !== "script" &&
-        agentState.id !== "visual_director"
+        agentState.id !== "visual_director" &&
+        agentState.id !== "asset"
       ) {
         agentState.status = "pending";
       }
     }
 
-    production.status = "research_script_visual_pass";
+    production.status = "research_script_visual_asset_pass";
     production.completed_at = new Date().toISOString();
     saveProduction();
 
     console.log("");
     console.log("==============================================");
     console.log(
-      " RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR"
+      " RESULTAT : PASS — RESEARCH -> SCRIPT -> VISUAL DIRECTOR -> ASSET"
     );
     console.log(
       ` Artefacts : projects/${production.id}/research.json`
@@ -330,7 +381,10 @@ if (dryRun) {
     console.log(
       `             projects/${production.id}/visual.json`
     );
-    console.log(" Agents 4-7 : NON EXECUTES");
+    console.log(
+      `             projects/${production.id}/assets.json`
+    );
+    console.log(" Agents 5-7 : NON EXECUTES");
     console.log("==============================================");
 
     process.exit(0);
