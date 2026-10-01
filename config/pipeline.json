@@ -47,7 +47,7 @@
     "voice": {
       "kind": "elevenlabs",
       "model_id": "eleven_multilingual_v2",
-      "voice_id": null,
+      "voice_id": "UBXZKOKbt62aLQHhc1Jm",
       "output_format": "mp3_44100_128",
       "timeout_ms": 30000
     },
