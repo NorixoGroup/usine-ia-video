@@ -13,6 +13,13 @@ import {
 import { buildScript } from "./canonical-artifacts.js";
 import { buildNarrationPlan, runVoiceAgent } from "../src/agents/voice.js";
 import { ensureNarrationAudio } from "../src/services/narration-provider.js";
+import { inspectLocalVoice } from "../src/media/local-media.js";
+import {
+  JOURNAL_FILE,
+  reconcileNarrationJournal,
+  requestSha256
+} from "../src/services/call-guard.js";
+import { elevenLabsRequestIdentity } from "../src/services/elevenlabs-narration-provider.js";
 
 if (process.env.NO_API !== "1" || !networkGuard) {
   throw new Error("Smoke narration provider : NO_API=1 et Network Guard obligatoires.");
@@ -90,6 +97,48 @@ function provider({ bytes = validBytes("provider-source"), extension = ".wav", f
       return { bytes, extension, path: "../../outside.wav" };
     }
   };
+}
+
+function reconciliationRequest(unit, overrides = {}) {
+  return elevenLabsRequestIdentity({
+    unitId: unit.unitId,
+    text: overrides.text ?? unit.text,
+    providerConfig: {
+      voiceId: overrides.voiceId ?? "voice-a",
+      modelId: overrides.modelId ?? "eleven_multilingual_v2",
+      outputFormat: overrides.outputFormat ?? "mp3_44100_128"
+    }
+  });
+}
+
+function writeStartedJournal(directory, request, kind = "elevenlabs") {
+  const hash = requestSha256({
+    kind: "narration",
+    provider_kind: kind,
+    unit_id: request.unit_id,
+    request
+  });
+  const entry = {
+    call_id: "c0001-123456789abc", seq: 1, status: "started",
+    request_sha256: hash, provider_kind: kind, unit_id: request.unit_id,
+    started_at: "2026-01-01T00:00:00.000Z", ended_at: null
+  };
+  fs.writeFileSync(path.join(directory, JOURNAL_FILE), JSON.stringify({ schema: 1, entries: [entry] }));
+  return entry;
+}
+
+async function reconcileCandidate(directory, request, unit = plan[0]) {
+  const records = await inspectLocalVoice({ mediaDir: directory });
+  return reconcileNarrationJournal({
+    productionDir: directory,
+    candidates: [{ request, artifact: {
+      provider_kind: "elevenlabs", unit_id: unit.unitId, ...records[unit.unitId]
+    } }]
+  });
+}
+
+function journalEntry(directory) {
+  return JSON.parse(fs.readFileSync(path.join(directory, JOURNAL_FILE), "utf8")).entries[0];
 }
 
 await test("CASE 1 — audio local valide : 0 provider call", async () => {
@@ -171,6 +220,65 @@ await test("CASE 9/10 — provider path ignoré, NO_API et réseau inchangés", 
   await ensureNarrationAudio({ mediaDir: directory, units: plan, provider: fake, callGuard: guard() });
   assert(!fs.existsSync(path.join(root, "outside.wav")), "provider a imposé un chemin hors contrat");
   assert(networkGuard.attempts().length === 0, JSON.stringify(networkGuard.attempts()));
+});
+
+await test("R1 — started matching + MP3 canonique → succeeded, zéro provider", async () => {
+  const directory = media("reconcile-match");
+  writeValid(directory, plan[0].unitId, ".mp3");
+  const request = reconciliationRequest(plan[0]);
+  writeStartedJournal(directory, request);
+  const result = await reconcileCandidate(directory, request);
+  assert(result.reconciled === 1 && journalEntry(directory).status === "succeeded", "réconciliation attendue");
+});
+
+for (const [name, overrides] of [["R2 texte", { text: "autre texte" }], ["R3 voix", { voiceId: "voice-b" }], ["R4 modèle", { modelId: "other-model" }], ["format mismatch", { outputFormat: "mp3_other" }]]) {
+  await test(`${name} différent → fail closed, zéro provider`, async () => {
+    const directory = media(`reconcile-${name.replace(/[^a-z0-9]/gi, "-")}`);
+    writeValid(directory, plan[0].unitId, ".mp3");
+    writeStartedJournal(directory, reconciliationRequest(plan[0]));
+    const result = await reconcileCandidate(directory, reconciliationRequest(plan[0], overrides));
+    assert(result.reconciled === 0 && journalEntry(directory).status === "started", "started devait rester bloqué");
+  });
+}
+
+await test("R5 malformed MP3 → fail closed", async () => {
+  const directory = media("reconcile-malformed");
+  fs.mkdirSync(path.join(directory, "voice"), { recursive: true });
+  fs.writeFileSync(path.join(directory, "voice", `${plan[0].unitId}.mp3`), "bad");
+  const request = reconciliationRequest(plan[0]);
+  writeStartedJournal(directory, request);
+  await expectReject(() => reconcileCandidate(directory, request), /Local Media/);
+  assert(journalEntry(directory).status === "started", "malformed ne doit pas réussir");
+});
+
+await test("R6 artifact absent → fail closed", async () => {
+  const directory = media("reconcile-absent");
+  fs.mkdirSync(path.join(directory, "voice"), { recursive: true });
+  const request = reconciliationRequest(plan[0]);
+  writeStartedJournal(directory, request);
+  const result = reconcileNarrationJournal({ productionDir: directory, candidates: [] });
+  assert(result.reconciled === 0 && journalEntry(directory).status === "started", "started devait rester bloqué");
+});
+
+await test("R7 entry non-narration jamais résolue", async () => {
+  const directory = media("reconcile-anthropic");
+  writeValid(directory, plan[0].unitId, ".mp3");
+  const request = reconciliationRequest(plan[0]);
+  writeStartedJournal(directory, request, "anthropic");
+  const result = await reconcileCandidate(directory, request);
+  assert(result.reconciled === 0 && journalEntry(directory).status === "started", "Anthropic ne doit jamais être résolu");
+});
+
+await test("R8 succeeded + audio valide → reuse normal, zéro provider", async () => {
+  const directory = media("reconcile-succeeded");
+  for (const unit of plan) writeValid(directory, unit.unitId, ".mp3");
+  const request = reconciliationRequest(plan[0]);
+  const entry = writeStartedJournal(directory, request);
+  entry.status = "succeeded";
+  fs.writeFileSync(path.join(directory, JOURNAL_FILE), JSON.stringify({ schema: 1, entries: [entry] }));
+  const fake = provider();
+  await ensureNarrationAudio({ mediaDir: directory, units: plan, provider: fake, callGuard: guard() });
+  assert(fake.calls.length === 0, "reuse devait éviter provider");
 });
 
 removeMediaFixtureRoot(root);

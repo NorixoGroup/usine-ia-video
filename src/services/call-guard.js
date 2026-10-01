@@ -144,6 +144,29 @@ export function requestSha256(request) {
     .digest("hex");
 }
 
+// Identité non secrète d'une narration. Le fournisseur réel et les outils de
+// reprise partagent exactement la même empreinte déterministe.
+export function narrationRequestIdentity({
+  providerKind,
+  unitId,
+  text,
+  modelId,
+  voiceId,
+  outputFormat,
+  parameters = {}
+}) {
+  return {
+    kind: "narration",
+    provider_kind: providerKind,
+    unit_id: unitId,
+    text,
+    model_id: modelId,
+    voice_id: voiceId,
+    output_format: outputFormat,
+    parameters
+  };
+}
+
 function atomicWrite(file, content) {
   const temporary = `${file}.tmp-${process.pid}`;
 
@@ -216,6 +239,52 @@ function loadJournal(productionDir) {
   validateJournal(journal);
 
   return journal;
+}
+
+// Réconciliation pré-configuration, utilisée uniquement avant que le garde
+// global refuse un journal started. Les candidats doivent venir de l'inspection
+// FFprobe/SHA locale; aucune entrée non-narration n'est jamais considérée.
+export function reconcileNarrationJournal({ productionDir, candidates = [] }) {
+  if (!Array.isArray(candidates)) {
+    throw new Error("Réconciliation narration : candidats invalides.");
+  }
+  const journal = loadJournal(productionDir);
+  let changed = 0;
+
+  for (const candidate of candidates) {
+    const { request, artifact } = candidate ?? {};
+    if (!request || !artifact || request.provider_kind !== "elevenlabs") continue;
+    const hash = requestSha256({
+      kind: "narration", provider_kind: request.provider_kind,
+      unit_id: request.unit_id, request
+    });
+    const entry = journal.entries.find(item =>
+      item.status === "started" && item.provider_kind === "elevenlabs" &&
+      item.unit_id === request.unit_id && item.request_sha256 === hash
+    );
+    if (!entry) continue;
+    if (
+      artifact.provider_kind !== "elevenlabs" || artifact.unit_id !== entry.unit_id ||
+      artifact.path !== `voice/${entry.unit_id}.mp3` ||
+      !/^[0-9a-f]{64}$/.test(artifact.sha256 ?? "") ||
+      !Number.isInteger(artifact.size_bytes) || artifact.size_bytes <= 0 ||
+      !Number.isFinite(artifact.duration_seconds) || artifact.duration_seconds <= 0
+    ) {
+      continue;
+    }
+    Object.assign(entry, {
+      status: "succeeded", ended_at: new Date().toISOString(),
+      path: artifact.path, sha256: artifact.sha256,
+      size_bytes: artifact.size_bytes, duration_seconds: artifact.duration_seconds,
+      text_characters: request.text.length, reconciled: true
+    });
+    changed += 1;
+  }
+  if (changed > 0) {
+    const file = path.join(productionDir, JOURNAL_FILE);
+    atomicWrite(file, JSON.stringify(journal, null, 2) + "\n");
+  }
+  return { reconciled: changed, journal };
 }
 
 // Pose l'autorisation en mémoire pour cette invocation. Refuse si un
@@ -676,4 +745,56 @@ export function endNarrationCall(reservation, artifact) {
 
 export function failNarrationCall(reservation, error) {
   failRealCall(reservation, error);
+}
+
+// Adaptateur minimal vers la frontière injectable de narration. Les fakes
+// locaux restent libres d'injecter leur propre garde; ce chemin est réservé
+// aux appels réels autorisés.
+export function createRealNarrationCallGuard() {
+  return {
+    preflight({ calls, label }) {
+      return assertRealCallBudget({ calls, label });
+    },
+    begin({ providerKind, unitId, request }) {
+      return beginNarrationCall({ providerKind, unitId, request });
+    },
+    succeed(reservation, artifact) {
+      return endNarrationCall(reservation, artifact);
+    },
+    fail(reservation, error) {
+      return failNarrationCall(reservation, error);
+    }
+  };
+}
+
+// Transition étroite pour la seule fenêtre F : un artifact canonique a déjà
+// été validé/persisté mais le processus est tombé avant endNarrationCall.
+// L'appelant doit fournir l'artifact issu de l'inspection locale existante.
+export function reconcileNarrationCall({ request, artifact }) {
+  if (!state || !request || !artifact) {
+    throw new Error("Réconciliation narration : état ou données absents.");
+  }
+
+  const hash = requestSha256({
+    kind: "narration",
+    provider_kind: request.provider_kind,
+    unit_id: request.unit_id,
+    request
+  });
+  const entry = state.journal.entries.find(
+    candidate =>
+      candidate.status === "started" &&
+      candidate.provider_kind === request.provider_kind &&
+      candidate.unit_id === request.unit_id &&
+      candidate.request_sha256 === hash
+  );
+
+  if (!entry) {
+    throw new Error(
+      "Réconciliation narration refusée : aucun appel started correspondant."
+    );
+  }
+
+  endNarrationCall({ callId: entry.call_id, hash, entry }, artifact);
+  return { reconciled: true, callId: entry.call_id };
 }

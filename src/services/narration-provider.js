@@ -179,15 +179,18 @@ export async function ensureNarrationAudio({
   });
 
   for (const unit of missing) {
-    const reservation = callGuard.begin({
-      providerKind: provider.kind ?? "narration",
-      unitId: unit.unitId,
-      request: {
+    const request = typeof provider.requestIdentity === "function"
+      ? provider.requestIdentity({ unit, providerConfig })
+      : {
         unit_id: unit.unitId,
         text: unit.text,
         estimated_seconds: unit.estimatedSeconds,
         provider_config: providerConfig
-      }
+      };
+    const reservation = callGuard.begin({
+      providerKind: provider.kind ?? "narration",
+      unitId: unit.unitId,
+      request
     });
 
     try {

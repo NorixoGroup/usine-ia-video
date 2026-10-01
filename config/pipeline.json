@@ -44,7 +44,13 @@
   },
   "providers": {
     "reasoning": "anthropic",
-    "voice": "elevenlabs",
+    "voice": {
+      "kind": "elevenlabs",
+      "model_id": "eleven_multilingual_v2",
+      "voice_id": null,
+      "output_format": "mp3_44100_128",
+      "timeout_ms": 30000
+    },
     "stock_video": {
       "pexels_api": false,
       "manual_fallback": true

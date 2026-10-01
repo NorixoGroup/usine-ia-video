@@ -28,6 +28,11 @@ import {
 } from "../services/narration-provider.js";
 
 import {
+  createElevenLabsNarrationProvider,
+  elevenLabsRequestIdentity
+} from "../services/elevenlabs-narration-provider.js";
+
+import {
   createFixtureNarrationCallGuard,
   createFixtureNarrationProvider
 } from "../fixtures/narration-provider.js";
@@ -67,6 +72,8 @@ import {
 import {
   assertRealCallAuthorization,
   configureCallGuard,
+  createRealNarrationCallGuard,
+  reconcileNarrationJournal,
   getCallGuardStatus,
   redactSecrets
 } from "../services/call-guard.js";
@@ -131,6 +138,7 @@ const prompt =
 // de narration doit y trouver son fichier (tout ou rien).
 const mediaDir = getArgument("media-dir");
 const fixtureNarrationProvider = args.includes("--fixture-narration-provider");
+const realNarration = args.includes("--real-narration");
 
 if (
   args.some((value) => value.startsWith("--media-dir")) &&
@@ -138,6 +146,12 @@ if (
 ) {
   throw new Error(
     "Orchestrateur : --media-dir exige un dossier (--media-dir=<dossier>)."
+  );
+}
+
+if (realNarration && (!researchScriptMode || !mediaDir)) {
+  throw new Error(
+    "Orchestrateur : --real-narration exige --research-script et --media-dir."
   );
 }
 
@@ -225,6 +239,10 @@ if (fixtureNarrationProvider && !testMode) {
   throw new Error(
     "Orchestrateur : --fixture-narration-provider est réservé au mode test local."
   );
+}
+
+if (realNarration && mode !== "full") {
+  throw new Error("Orchestrateur : --real-narration exige --mode=full.");
 }
 
 if (modeRequested && !["test", "full"].includes(mode)) {
@@ -606,6 +624,36 @@ if (researchScriptMode) {
     reuse = planReuse({ productionDir, production });
   }
 
+  // Une reprise real-narration peut avoir publié un MP3 validé juste avant
+  // une chute. Réconcilier exclusivement cette fenêtre F avant le garde
+  // générique préserve le blocage de tout autre started call.
+  if (mode === "full" && realNarration && resumed && mediaDir) {
+    const configuredVoice = pipelineConfig.providers.voice;
+    if (configuredVoice?.kind === "elevenlabs" && configuredVoice.voice_id) {
+      const scriptForReconciliation = readJsonArtifact(productionDir, "script.json").data;
+      const localVoice = await inspectLocalVoice({ mediaDir });
+      const candidates = buildNarrationPlan(scriptForReconciliation)
+        .filter(unit => Object.hasOwn(localVoice, unit.unitId))
+        .map(unit => ({
+          request: elevenLabsRequestIdentity({
+            unitId: unit.unitId,
+            text: unit.text,
+            providerConfig: {
+              modelId: configuredVoice.model_id,
+              voiceId: configuredVoice.voice_id,
+              outputFormat: configuredVoice.output_format
+            }
+          }),
+          artifact: {
+            provider_kind: "elevenlabs",
+            unit_id: unit.unitId,
+            ...localVoice[unit.unitId]
+          }
+        }));
+      reconcileNarrationJournal({ productionDir, candidates });
+    }
+  }
+
   if (mode === "full") {
     configureCallGuard({
       productionDir,
@@ -929,6 +977,22 @@ if (dryRun) {
     voiceState.started_at = new Date().toISOString();
     saveProduction();
 
+    const voiceProviderConfig = pipelineConfig.providers.voice;
+    const realProviderConfig = voiceProviderConfig?.kind === "elevenlabs"
+      ? {
+        modelId: voiceProviderConfig.model_id,
+        voiceId: voiceProviderConfig.voice_id,
+        outputFormat: voiceProviderConfig.output_format,
+        timeoutMs: voiceProviderConfig.timeout_ms
+      }
+      : null;
+
+    if (realNarration && !realProviderConfig?.voiceId) {
+      throw new Error(
+        "Orchestrateur : --real-narration exige un voice_id ElevenLabs configuré."
+      );
+    }
+
     const localAudio = mediaDir
       ? fixtureNarrationProvider
         ? await ensureNarrationAudio({
@@ -937,6 +1001,14 @@ if (dryRun) {
           provider: createFixtureNarrationProvider(),
           callGuard: createFixtureNarrationCallGuard()
         })
+        : realNarration
+          ? await ensureNarrationAudio({
+            mediaDir,
+            units: buildNarrationPlan(voiceSourceScript.data),
+            provider: createElevenLabsNarrationProvider(),
+            providerConfig: realProviderConfig,
+            callGuard: createRealNarrationCallGuard()
+          })
         : await inspectLocalVoice({ mediaDir })
       : undefined;
 
