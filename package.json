@@ -6,7 +6,8 @@
   "type": "module",
   "scripts": {
     "check": "node scripts/check-environment.js",
-    "mvp": "node src/orchestrator/mvp.js"
+    "mvp": "node src/orchestrator/mvp.js",
+    "youtube-agent": "node src/youtube-agent/server.js"
   },
   "engines": {
     "node": ">=22"

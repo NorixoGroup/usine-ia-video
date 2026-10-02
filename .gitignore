@@ -21,3 +21,6 @@ output/
 
 # Artefacts de production générés
 projects/
+
+# Données locales du YouTube Agent (registre, mémoire, journal)
+data/
