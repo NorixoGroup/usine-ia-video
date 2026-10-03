@@ -795,6 +795,61 @@ try {
 
   fs.rmSync(evidencePages, { recursive: true, force: true });
 
+  // Contradictions internes (R20.4, phase F). Deux faits HIGH de rang 1
+  // (aucune pause de hiérarchie) qui donnent deux populations différentes ;
+  // le juge des fixtures les déclare contradictoires.
+  const contradictionFacts = [
+    { claim: "La population australienne atteint 26 millions d'habitants", importance: "high", verification_status: "verified", sources: [hierarchySource(7, "https://www.abs.gov.au/f-a")] },
+    { claim: "La population australienne atteint 28 millions d'habitants", importance: "high", verification_status: "verified", sources: [hierarchySource(8, "https://www.abs.gov.au/f-b")] }
+  ];
+
+  await test("nouvelle production de test : contradictions en mode report (repère contradiction_enforcement)", () => {
+    assert(readProduction(truthPause.productionId).contradiction_enforcement === "report", "repère");
+    const truth = readEnvelope(truthPause.productionId, "truth").data;
+    assert(truth.contradictions.judged === true && truth.contradictions.status === "none", JSON.stringify(truth.contradictions.status));
+  });
+
+  const contradictionRun = run(["--research-script", "--stop-after=research"], fixtures());
+  sealResearch(contradictionRun.productionId, contradictionFacts);
+  {
+    const production = readProduction(contradictionRun.productionId);
+    production.contradiction_enforcement = "block";
+    writeProduction(contradictionRun.productionId, production);
+  }
+  const contradictionPause = run(["--research-script", `--resume=${contradictionRun.productionId}`], fixtures());
+
+  await test("contradiction entre deux faits HIGH (block) : pause « contradiction à revoir », sans résolution automatique, Script non lancé", () => {
+    assert(contradictionPause.status === 0, `exit ${contradictionPause.status}\n${contradictionPause.stderr}`);
+    assert(/CONTRADICTION À REVOIR/.test(contradictionPause.stdout) && /juge des contradictions \(1 paire suspecte, 1 appel\)/.test(contradictionPause.stdout), contradictionPause.stdout.slice(-900));
+    const production = readProduction(contradictionRun.productionId);
+    assert(production.status === "paused" && production.truth.status === "contradiction_review" && production.truth.contradiction_review.contested_facts.join() === "0,1", JSON.stringify(production.truth.contradiction_review));
+    assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
+    const truth = readEnvelope(contradictionRun.productionId, "truth").data;
+    assert(truth.facts.every(item => item.truth_status === "retained") && truth.contradictions.counts.contradiction === 1, "résolution automatique");
+    assert(contradictionPause.blocked === 0, "réseau");
+  });
+
+  await test("reprise sans changement : juge des contradictions réutilisé, aucun appel, même pause", () => {
+    const again = run(["--research-script", `--resume=${contradictionRun.productionId}`], fixtures());
+    assert(again.status === 0 && /juge des contradictions RÉUTILISÉ/.test(again.stdout) && /CONTRADICTION À REVOIR/.test(again.stdout), again.stdout.slice(-600));
+    assert(again.blocked === 0, "réseau");
+  });
+
+  const historicalContradictionRun = run(["--research-script", "--stop-after=research"], fixtures());
+  sealResearch(historicalContradictionRun.productionId, contradictionFacts);
+  {
+    const production = readProduction(historicalContradictionRun.productionId);
+    delete production.contradiction_enforcement;
+    writeProduction(historicalContradictionRun.productionId, production);
+  }
+  const historicalContradiction = run(["--research-script", `--resume=${historicalContradictionRun.productionId}`, "--stop-after=truth"], fixtures());
+
+  await test("production historique (sans repère) : aucun juge, paires du code signalées, aucune pause de contradiction", () => {
+    assert(historicalContradiction.status === 0 && !/juge des contradictions/.test(historicalContradiction.stdout) && !/CONTRADICTION À REVOIR/.test(historicalContradiction.stdout), historicalContradiction.stdout.slice(-600));
+    const truth = readEnvelope(historicalContradictionRun.productionId, "truth").data;
+    assert(truth.contradictions.judged === false && truth.contradictions.counts.unresolved === 1 && truth.contradictions.skip_reason === "production historique, aucun appel", JSON.stringify(truth.contradictions.counts));
+  });
+
   await test("--regenerate=script avec --stop-after=truth → refus avant toute production", () => {
     expectRefusal(
       run(

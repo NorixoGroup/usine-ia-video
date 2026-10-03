@@ -8,6 +8,7 @@ import {
 } from "../utils/source-policy.js";
 import { TITLE_VERDICTS, evaluateTitle, kindLabel } from "../utils/title-validation.js";
 import { EDITORIAL_STATUSES, EVIDENCE_REVIEW_ACTIONS, evaluateFactEvidence, technicalLabel } from "../utils/fact-evidence.js";
+import { CONTRADICTION_REVIEW_ACTIONS, blockingFindings, evaluateContradictions } from "../utils/fact-contradictions.js";
 
 // Truth Report — référence des faits validés, entre Research et Script.
 //
@@ -44,8 +45,16 @@ import { EDITORIAL_STATUSES, EVIDENCE_REVIEW_ACTIONS, evaluateFactEvidence, tech
 // truth_status « rejected », à son indice d'origine ; research_dossier reste
 // identique. En evidenceEnforcement "block", un fait HIGH rejeté met la
 // production en pause (stop.kind "evidence_review"), un fait HIGH non
-// vérifiable aussi (stop.kind "evidence_unverifiable"). Ordre de priorité
-// des pauses : hiérarchie des sources, preuves, titre.
+// vérifiable aussi (stop.kind "evidence_unverifiable").
+//
+// Phase F : la rubrique contradictions est remplie par
+// evaluateContradictions (paires suspectes du code, jugées par le modèle,
+// compatibilités vérifiées par le code). En contradictionEnforcement
+// "block", une contradiction non résolue engageant un fait HIGH met la
+// production en pause (stop.kind "contradiction_review"), sans résolution
+// automatique. Un fait contesté ne soutient plus le titre (Q-F8), lorsque
+// les contradictions ont été jugées. Ordre de priorité des pauses :
+// hiérarchie des sources, preuves, contradictions, titre.
 
 export const TRUTH_SCHEMA = "truth.v1";
 
@@ -116,6 +125,20 @@ function buildEvidenceStop(factEvidence, keyFacts) {
   return { stopped: false, reasons: [] };
 }
 
+function buildContradictionStop(contradictions, research) {
+  const blocking = blockingFindings(contradictions, research);
+
+  if (blocking.length === 0) return { stopped: false, reasons: [] };
+
+  return {
+    stopped: true,
+    kind: "contradiction_review",
+    reasons: blocking.map(finding => `${finding.a} ↔ ${finding.b} (${finding.verdict === "contradiction" ? "contradiction" : "non résolue"}, ${finding.category}) : ${finding.reasons.join(" ")}`),
+    review: [],
+    actions: CONTRADICTION_REVIEW_ACTIONS
+  };
+}
+
 function buildTitleStop(titleCheck) {
   return {
     stopped: true,
@@ -135,7 +158,9 @@ export function buildTruthReport({
   titleJudge = null,
   titleSkipReason = null,
   evidenceEnforcement = "report",
-  factEvidence = null
+  factEvidence = null,
+  contradictionEnforcement = "report",
+  contradictions = null
 }) {
   if (!ENFORCEMENT_MODES.includes(enforcement)) {
     throw new Error(`Truth Report : enforcement invalide "${enforcement}".`);
@@ -147,6 +172,10 @@ export function buildTruthReport({
 
   if (!ENFORCEMENT_MODES.includes(evidenceEnforcement)) {
     throw new Error(`Truth Report : evidenceEnforcement invalide "${evidenceEnforcement}".`);
+  }
+
+  if (!ENFORCEMENT_MODES.includes(contradictionEnforcement)) {
+    throw new Error(`Truth Report : contradictionEnforcement invalide "${contradictionEnforcement}".`);
   }
 
   const evidenceCheck = factEvidence ?? evaluateFactEvidence({ research, skipReason: "preuves non lues" });
@@ -192,18 +221,25 @@ export function buildTruthReport({
     if (editorial_status === "rejected") fact.truth_status = REJECTED;
   });
 
-  const titleCheck = evaluateTitle({ title, research, hierarchy, factEvidence: evidenceCheck, judge: titleJudge, skipReason: titleSkipReason, policy });
+  const contradictionCheck = contradictions ?? evaluateContradictions({ research, factEvidence: evidenceCheck, skipReason: "juge non appelé" });
+  const contested = contradictionCheck.judged ? contradictionCheck.contested_facts : [];
+  const titleCheck = evaluateTitle({ title, research, hierarchy, factEvidence: evidenceCheck, contested, judge: titleJudge, skipReason: titleSkipReason, policy });
   const hierarchyStop = buildStop(hierarchy, enforcement);
   const evidenceStop = evidenceEnforcement === "block" && evidenceCheck.checked
     ? buildEvidenceStop(evidenceCheck, keyFacts)
+    : { stopped: false, reasons: [] };
+  const contradictionStop = contradictionEnforcement === "block" && contradictionCheck.judged
+    ? buildContradictionStop(contradictionCheck, research)
     : { stopped: false, reasons: [] };
   const stop = hierarchyStop.stopped
     ? hierarchyStop
     : evidenceStop.stopped
       ? evidenceStop
-      : titleEnforcement === "block" && titleCheck.verdict === "not_demonstrated"
-        ? buildTitleStop(titleCheck)
-        : hierarchyStop;
+      : contradictionStop.stopped
+        ? contradictionStop
+        : titleEnforcement === "block" && titleCheck.verdict === "not_demonstrated"
+          ? buildTitleStop(titleCheck)
+          : hierarchyStop;
 
   return {
     schema: TRUTH_SCHEMA,
@@ -221,7 +257,7 @@ export function buildTruthReport({
     facts,
     rejected_count: facts.filter(fact => fact.truth_status === REJECTED).length,
     sources: [...sources.values()],
-    contradictions: { status: NOT_EVALUATED, items: [] },
+    contradictions: { enforcement: contradictionEnforcement, ...contradictionCheck },
     policy_checks: evaluateSourcePolicy(research, policy),
     source_hierarchy: { enforcement, ...hierarchy },
     fact_evidence: {
@@ -279,6 +315,7 @@ export function validateTruthReport(truth, research) {
     rejected: truth.source_hierarchy?.enforcement,
     evidence_review: truth.fact_evidence?.enforcement,
     evidence_unverifiable: truth.fact_evidence?.enforcement,
+    contradiction_review: truth.contradictions?.enforcement,
     title_review: truth.title?.enforcement
   };
 
@@ -325,6 +362,11 @@ const LABELS = {
   not_supported: "non soutenue",
   not_judged: "non jugée",
   rejected: "rejeté",
+  contradiction: "contradiction",
+  compatible: "compatible",
+  unresolved: "non résolue",
+  contradictions: "contradictions détectées",
+  none: "aucune contradiction",
   unverifiable: "non vérifiable",
   not_checked: "non contrôlé",
   compliant: "conforme",
@@ -473,7 +515,28 @@ export function renderTruthMarkdown(truth) {
   lines.push("");
   lines.push("## Contradictions détectées");
   lines.push("");
-  lines.push(`Contrôle : ${label(truth.contradictions.status)} (phase contradictions à venir).`);
+  const contradictions = truth.contradictions;
+  lines.push(`Contrôle : ${label(contradictions.status)} — ${contradictions.judged ? "paires jugées par le modèle, compatibilités vérifiées par le code" : `non jugé (${contradictions.skip_reason ?? "juge non appelé"})`} — mode ${contradictions.enforcement === "block" ? "bloquant (nouvelle production)" : "rapport seulement"}.`);
+  lines.push("");
+  lines.push(`Faits comparés : ${contradictions.compared_facts.length} ; textes du dossier comparés : ${contradictions.notes.length} ; paires suspectes : ${contradictions.candidates} ; contradictions : ${contradictions.counts.contradiction} ; non résolues : ${contradictions.counts.unresolved} ; compatibles : ${contradictions.counts.compatible}.`);
+  lines.push("");
+
+  const where = id => {
+    const note = contradictions.notes.find(item => item.id === id);
+    return note ? `dossier ${note.path}` : `fait ${id.slice(1)}`;
+  };
+
+  for (const finding of contradictions.findings) {
+    lines.push(`- **${label(finding.verdict)}** — ${where(finding.a)} ↔ ${where(finding.b)} — ${finding.category}${finding.dimension ? `, distinction : ${finding.dimension}` : ""}`);
+    if (finding.quotes?.a) lines.push(`  - « ${finding.quotes.a} » / « ${finding.quotes.b} »`);
+    for (const reason of finding.reasons) lines.push(`  - ${reason}`);
+  }
+
+  if (contradictions.contested_facts.length > 0) {
+    lines.push("");
+    lines.push(`Faits contestés : ${contradictions.contested_facts.map(index => index + 1).join(", ")}${contradictions.judged ? " (ils ne soutiennent plus le titre)" : " (signalés seulement)"}.`);
+  }
+
   lines.push("");
   lines.push("## Raisons d'un éventuel arrêt");
   lines.push("");
@@ -486,6 +549,8 @@ export function renderTruthMarkdown(truth) {
         ? "Pause — titre à revoir : le titre n'est pas démontré par les faits validés. Ce n'est ni un rejet ni un échec."
         : truth.stop.kind === "evidence_review"
           ? "Pause — preuve à revoir : un fait HIGH n'est pas soutenu par sa preuve. La production est conservée et reste reprenable."
+          : truth.stop.kind === "contradiction_review"
+            ? "Pause — contradiction à revoir : deux textes du dossier se contredisent sur un fait HIGH. Aucune résolution automatique ; la production est conservée et reste reprenable."
           : truth.stop.kind === "evidence_unverifiable"
             ? "Pause — revue requise : la preuve d'un fait HIGH est illisible. Ce n'est ni un rejet ni un échec."
             : "Arrêt : la hiérarchie des sources n'est pas respectée.");

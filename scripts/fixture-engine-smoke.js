@@ -90,7 +90,9 @@ const PROMPT_FILES = {
   "judge-title":
     "src/utils/title-validation.js",
   "judge-evidence":
-    "src/utils/fact-evidence.js"
+    "src/utils/fact-evidence.js",
+  "judge-contradictions":
+    "src/utils/fact-contradictions.js"
 };
 
 const META_KEYS = [

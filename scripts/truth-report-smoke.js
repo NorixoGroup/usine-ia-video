@@ -39,9 +39,9 @@ await test("construction : tous les faits retenus à leur indice d'origine, cont
     assert(fact.claim === research.key_facts[index].claim, `claim ${index}`);
   });
   assert(truth.rejected_count === 0 && truth.stop.stopped === false && truth.alternative_titles.length === 0, "squelette");
-  for (const verdict of [truth.thesis.verdict, truth.contradictions.status]) {
-    assert(verdict === "not_evaluated", verdict);
-  }
+  assert(truth.thesis.verdict === "not_evaluated", truth.thesis.verdict);
+  // Phase F : contradictions évaluées (dossier minimal : aucune paire suspecte).
+  assert(truth.contradictions.status === "none" && truth.contradictions.candidates === 0 && truth.contradictions.enforcement === "report", JSON.stringify(truth.contradictions.status));
   // Phase A : sans juge (mode rapport par défaut), les chiffres sont
   // contrôlés par le code ; « 95 % » est absent des faits validés.
   assert(truth.title.verdict === "not_demonstrated" && truth.title.judged === false && truth.title.enforcement === "report", truth.title.verdict);
@@ -85,7 +85,7 @@ await test("Markdown : toutes les rubriques de relecture, contrôles à venir si
   for (const heading of ["## Verdict du titre", "## Verdict de la thèse", "## Faits retenus", "## Faits rejetés", "## Hiérarchie des sources", "## Contradictions détectées", "## Raisons d'un éventuel arrêt", "## Titres alternatifs"]) {
     assert(md.includes(heading), heading);
   }
-  assert(md.includes(CANONICAL_TITLE) && (md.match(/non encore contrôlé/g) ?? []).length >= 2, "mentions");
+  assert(md.includes(CANONICAL_TITLE) && (md.match(/non encore contrôlé/g) ?? []).length >= 1 && md.includes("## Contradictions détectées") && md.includes("Contrôle : aucune contradiction"), "mentions");
   assert(md.includes("- Verdict : **non démontré**") && md.includes("Justifications :") && md.includes("Chiffre exact « 95 % » : non soutenue"), "verdict du titre");
   assert(md.includes(`## Faits retenus (${research.key_facts.length})`) && md.includes("## Faits rejetés (0)"), "comptes");
   assert(md.includes("Politique des sources : non conforme (rapport seulement") && md.includes("- minimum_sources : non conforme — 0 source(s) distincte(s), minimum 5"), "politique des sources");

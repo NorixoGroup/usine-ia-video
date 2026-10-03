@@ -130,5 +130,11 @@
     "excerpt_chars": 400,
     "max_excerpts_per_source": 3,
     "judge_batch_size": 8
+  },
+  "contradictions": {
+    "note_fields": ["executive_summary", "story_angles", "sections", "visual_opportunities", "claims_requiring_sources", "uncertainties"],
+    "min_shared_words": 2,
+    "min_word_length": 5,
+    "compatibility_dimensions": ["date", "portée", "géographie", "définition", "unité"]
   }
 }

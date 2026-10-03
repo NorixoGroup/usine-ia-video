@@ -203,9 +203,11 @@ export function evidenceConfirmed(factEvidence, index) {
 }
 
 // Définition unique d'un « fait validé » dans tout le pipeline : vérifié,
-// meilleur rang effectif (phase B) au plus le seuil de la hiérarchie, et
-// preuve confirmée (phase E) quand les preuves ont été lues.
-export function validatedFacts(research, hierarchy, policy = SOURCE_POLICY, factEvidence = null) {
+// meilleur rang effectif (phase B) au plus le seuil de la hiérarchie,
+// preuve confirmée (phase E) quand les preuves ont été lues, et non engagé
+// dans une contradiction non résolue (phase F, Q-F8) quand les
+// contradictions ont été jugées. contested : indices des faits contestés.
+export function validatedFacts(research, hierarchy, policy = SOURCE_POLICY, factEvidence = null, contested = []) {
   const minimum = policy.source_tiers.minimum_rank_for_high_facts;
   const facts = Array.isArray(research?.key_facts) ? research.key_facts : [];
 
@@ -220,7 +222,8 @@ export function validatedFacts(research, hierarchy, policy = SOURCE_POLICY, fact
       verification_status: fact?.verification_status ?? null,
       best_rank: bestRank,
       evidence_status: factEvidence?.checked ? factEvidence.facts[index]?.editorial_status ?? null : null,
-      validated: verified && bestRank !== null && bestRank <= minimum && evidenceConfirmed(factEvidence, index)
+      contested: contested.includes(index),
+      validated: verified && bestRank !== null && bestRank <= minimum && evidenceConfirmed(factEvidence, index) && !contested.includes(index)
     };
   });
 }
@@ -261,7 +264,7 @@ export function checkFigure(assertion, facts, config = TITLE_VALIDATION, minimum
   const reasons = [`Chiffre « ${assertion.text} » absent des faits validés (faits vérifiés, sources de rang ≤ ${minimum}).`];
 
   if (unvalidated.length > 0) {
-    reasons.push(`Il figure seulement dans des faits non validés : ${unvalidated.map(fact => `${factLabel(fact.index)} (${fact.verification_status}, meilleur rang ${fact.best_rank ?? "aucun"}${fact.evidence_status ? `, preuve ${fact.evidence_status}` : ""})`).join(", ")}.`);
+    reasons.push(`Il figure seulement dans des faits non validés : ${unvalidated.map(fact => `${factLabel(fact.index)} (${fact.verification_status}, meilleur rang ${fact.best_rank ?? "aucun"}${fact.evidence_status ? `, preuve ${fact.evidence_status}` : ""}${fact.contested ? ", contesté" : ""})`).join(", ")}.`);
   }
 
   const near = facts
@@ -505,9 +508,9 @@ function checkAlternative(item, facts, config, minimum) {
 
 // judge : réponse validée du juge, ou null (production historique ou
 // hiérarchie à résoudre d'abord) ; skipReason explique alors l'absence.
-export function evaluateTitle({ title, research, hierarchy, factEvidence = null, judge = null, skipReason = null, config = TITLE_VALIDATION, policy = SOURCE_POLICY }) {
+export function evaluateTitle({ title, research, hierarchy, factEvidence = null, contested = [], judge = null, skipReason = null, config = TITLE_VALIDATION, policy = SOURCE_POLICY }) {
   const minimum = policy.source_tiers.minimum_rank_for_high_facts;
-  const facts = validatedFacts(research, hierarchy, policy, factEvidence);
+  const facts = validatedFacts(research, hierarchy, policy, factEvidence, contested);
   const assertions = decomposeTitle(title, config);
 
   const evaluated = assertions.map(assertion => {

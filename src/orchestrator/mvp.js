@@ -34,6 +34,15 @@ import {
 } from "../utils/fact-evidence.js";
 
 import {
+  buildContradictionJudgeInput,
+  contradictionJudgeInputSha256,
+  evaluateContradictions,
+  findCandidates,
+  runContradictionJudge,
+  validateContradictionJudgeResponse
+} from "../utils/fact-contradictions.js";
+
+import {
   decomposeTitle,
   runTitleJudge,
   titleJudgeInputSha256,
@@ -573,6 +582,10 @@ const production = resumed ? resumed.production : {
   // toute nouvelle production ; bloquant en mode full seulement. Une
   // production historique, sans ce champ, n'accède pas au réseau.
   fact_evidence_enforcement: mode === "full" ? "block" : "report",
+  // Contradictions internes (R20.4, phase F) : juge pour toute nouvelle
+  // production ; bloquant en mode full seulement. Une production historique,
+  // sans ce champ, n'appelle pas le juge (contrôles du code signalés).
+  contradiction_enforcement: mode === "full" ? "block" : "report",
   duration_profile: durationProfile.name,
   narrated_frame: narratedFrame,
 
@@ -962,6 +975,7 @@ if (dryRun) {
 
     const previousTitleJudge = production.truth?.title_judge ?? null;
     const previousEvidenceJudge = production.truth?.evidence_judge ?? [];
+    const previousContradictionJudge = production.truth?.contradiction_judge ?? null;
 
     production.truth = {
       status: "running",
@@ -1058,11 +1072,50 @@ if (dryRun) {
       titleSkipReason = "production historique, aucun appel";
     } else if (hierarchyBlocks) {
       titleSkipReason = "hiérarchie des sources à résoudre d'abord";
+    }
+
+    // Contradictions internes : un appel du juge par nouvelle production
+    // (réponse réutilisée à entrées identiques) ; production historique :
+    // paires du code signalées seulement, aucun appel.
+    let contradictions;
+
+    if (typeof production.contradiction_enforcement !== "string") {
+      contradictions = evaluateContradictions({ research: persistedResearch.data, factEvidence, skipReason: "production historique, aucun appel" });
+    } else if (hierarchyBlocks) {
+      contradictions = evaluateContradictions({ research: persistedResearch.data, factEvidence, skipReason: "hiérarchie des sources à résoudre d'abord" });
     } else {
+      const { facts, notes, candidates } = findCandidates({ research: persistedResearch.data, factEvidence });
+      const judgeInput = buildContradictionJudgeInput({ facts, notes, candidates, factEvidence });
+      const inputSha256 = contradictionJudgeInputSha256(judgeInput);
+      let response;
+
+      if (
+        previousContradictionJudge?.input_sha256 === inputSha256 &&
+        validateContradictionJudgeResponse(previousContradictionJudge.response, judgeInput).length === 0
+      ) {
+        response = previousContradictionJudge.response;
+        production.truth.contradiction_judge = previousContradictionJudge;
+        console.log("    ↺ juge des contradictions RÉUTILISÉ — mêmes entrées, aucun appel");
+      } else {
+        const judged = await runContradictionJudge(judgeInput);
+
+        response = judged.response;
+        production.truth.contradiction_judge = { input_sha256: inputSha256, response, attempts: judged.attempts, usage: judged.usage };
+        console.log(`    ✓ juge des contradictions (${candidates.length} paire${candidates.length > 1 ? "s" : ""} suspecte${candidates.length > 1 ? "s" : ""}, ${judged.attempts} appel${judged.attempts > 1 ? "s" : ""})`);
+      }
+
+      contradictions = evaluateContradictions({ research: persistedResearch.data, factEvidence, judge: response });
+    }
+
+    const contested = contradictions.judged ? contradictions.contested_facts : [];
+
+    // Juge du titre : après les contradictions, car un fait contesté ne
+    // soutient plus le titre (Q-F8).
+    if (!titleSkipReason) {
       const judgeInput = {
         title: production.input.title,
         assertions: decomposeTitle(production.input.title),
-        facts: validatedFacts(persistedResearch.data, evaluateSourceHierarchy(persistedResearch.data), undefined, factEvidence),
+        facts: validatedFacts(persistedResearch.data, evaluateSourceHierarchy(persistedResearch.data), undefined, factEvidence, contested),
         research: persistedResearch.data
       };
       const inputSha256 = titleJudgeInputSha256(judgeInput);
@@ -1093,7 +1146,9 @@ if (dryRun) {
       titleJudge,
       titleSkipReason,
       evidenceEnforcement: production.fact_evidence_enforcement === "block" ? "block" : "report",
-      factEvidence
+      factEvidence,
+      contradictionEnforcement: production.contradiction_enforcement === "block" ? "block" : "report",
+      contradictions
     });
     const truthValidation = validateTruthReport(truthData, persistedResearch.data);
 
@@ -1136,9 +1191,18 @@ if (dryRun) {
       );
     }
 
-    if (truthData.stop.stopped && ["review_required", "title_review", "evidence_review", "evidence_unverifiable"].includes(truthData.stop.kind)) {
+    if (truthData.stop.stopped && ["review_required", "title_review", "evidence_review", "evidence_unverifiable", "contradiction_review"].includes(truthData.stop.kind)) {
       const titleReview = truthData.stop.kind === "title_review";
       const evidenceReview = truthData.stop.kind.startsWith("evidence_");
+      const contradictionReview = truthData.stop.kind === "contradiction_review";
+
+      if (contradictionReview) {
+        production.truth.contradiction_review = {
+          reasons: truthData.stop.reasons,
+          contested_facts: truthData.contradictions.contested_facts,
+          actions: truthData.stop.actions
+        };
+      }
 
       production.truth.status = truthData.stop.kind;
       production.truth.completed_at = new Date().toISOString();
@@ -1175,10 +1239,12 @@ if (dryRun) {
           ? " RESULTAT : PAUSE — PREUVE À REVOIR (fait HIGH non soutenu par sa preuve)"
           : truthData.stop.kind === "evidence_unverifiable"
             ? " RESULTAT : PAUSE — REVUE REQUISE (preuve illisible d'un fait HIGH)"
+            : contradictionReview
+              ? " RESULTAT : PAUSE — CONTRADICTION À REVOIR (fait HIGH contredit dans le dossier)"
             : " RESULTAT : PAUSE — REVUE REQUISE (hiérarchie des sources)");
       for (const reason of truthData.stop.reasons) console.log(` ${reason}`);
 
-      if (evidenceReview) {
+      if (evidenceReview || contradictionReview) {
         for (const action of truthData.stop.actions) console.log(` Action possible : ${action}`);
       } else if (titleReview) {
         for (const item of truthData.alternative_titles) console.log(` Titre alternatif vérifié : ${item.title}`);
@@ -1199,6 +1265,7 @@ if (dryRun) {
     delete production.truth.review;
     delete production.truth.title_review;
     delete production.truth.evidence_review;
+    delete production.truth.contradiction_review;
     saveProduction();
 
     const persistedTruth = readJsonArtifact(productionDir, "truth.json");

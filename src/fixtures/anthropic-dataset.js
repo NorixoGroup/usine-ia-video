@@ -1006,7 +1006,8 @@ const RESOLVERS = {
   "repair-script-claim-coverage": resolveCoverageRepair,
   "repair-visual-factual-grounding": resolveGroundingRepair,
   "judge-title": resolveTitleJudge,
-  "judge-evidence": resolveEvidenceJudge
+  "judge-evidence": resolveEvidenceJudge,
+  "judge-contradictions": resolveContradictionJudge
 };
 
 // Juge du titre (R20.4, phase A) : fonction pure de son entrée. Chaque
@@ -1069,6 +1070,38 @@ function resolveEvidenceJudge(fixtureId, scenario, userMessage) {
         ? { id: item.id, status: "supported", source: excerpt.id, quote: excerpt.text, explanation: "L'extrait cité établit l'affirmation." }
         : { id: item.id, status: "not_supported", source: "", quote: "", explanation: "Aucun extrait ne soutient l'affirmation." };
     })
+  });
+}
+
+// Juge des contradictions (R20.4, phase F) : fonction pure de son entrée.
+// Chaque paire suspecte est déclarée contradictoire, avec le début de chaque
+// texte cité mot pour mot ; aucune autre contradiction n'est signalée.
+function resolveContradictionJudge(fixtureId, scenario, userMessage) {
+  const [, dataText] = matchOrFail(
+    fixtureId,
+    userMessage,
+    /\nDONNÉES :\n(\{[\s\S]+\})$/
+  );
+  const data = parseJsonOrFail(fixtureId, dataText, "données");
+
+  if (!data || !Array.isArray(data.facts) || !Array.isArray(data.notes) || !Array.isArray(data.candidates)) {
+    fail(fixtureId, "données du juge des contradictions invalides.");
+  }
+
+  const texts = new Map([...data.facts, ...data.notes].map(item => [item.id, String(item.text ?? "")]));
+
+  return json({
+    pairs: data.candidates.map(candidate => ({
+      candidate: candidate.id,
+      a: candidate.a,
+      b: candidate.b,
+      verdict: "contradiction",
+      dimension: "",
+      category: "chiffres",
+      quote_a: texts.get(candidate.a).slice(0, 40),
+      quote_b: texts.get(candidate.b).slice(0, 40),
+      explanation: "Les deux textes donnent des valeurs différentes pour la même mesure."
+    }))
   });
 }
 

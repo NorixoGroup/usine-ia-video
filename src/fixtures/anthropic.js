@@ -29,7 +29,9 @@ const SIGNATURES = {
   "judge-title":
     "Tu es le juge du titre de la chaîne YouTube \"Les Découvertes du Nomade\".",
   "judge-evidence":
-    "Tu es le juge des preuves de la chaîne YouTube \"Les Découvertes du Nomade\"."
+    "Tu es le juge des preuves de la chaîne YouTube \"Les Découvertes du Nomade\".",
+  "judge-contradictions":
+    "Tu es le juge des contradictions de la chaîne YouTube \"Les Découvertes du Nomade\"."
 };
 
 export const FIXTURE_IDS = Object.keys(SIGNATURES);
@@ -45,7 +47,8 @@ const SYNTHETIC_USAGE = {
   "repair-script-claim-coverage": { input_tokens: 1000, output_tokens: 90 },
   "repair-visual-factual-grounding": { input_tokens: 900, output_tokens: 70 },
   "judge-title": { input_tokens: 1300, output_tokens: 300 },
-  "judge-evidence": { input_tokens: 1500, output_tokens: 400 }
+  "judge-evidence": { input_tokens: 1500, output_tokens: 400 },
+  "judge-contradictions": { input_tokens: 1800, output_tokens: 500 }
 };
 
 const callLog = [];
