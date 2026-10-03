@@ -16,6 +16,16 @@ import {
   validateTruthReport
 } from "../agents/truth.js";
 
+import { evaluateSourceHierarchy } from "../utils/source-policy.js";
+
+import {
+  decomposeTitle,
+  runTitleJudge,
+  titleJudgeInputSha256,
+  validateJudgeResponse,
+  validatedFacts
+} from "../utils/title-validation.js";
+
 import {
   runVisualDirector
 } from "../agents/visual-director.js";
@@ -539,6 +549,11 @@ const production = resumed ? resumed.production : {
   // Hiérarchie des sources (R20.4, phase B) : bloquante pour les nouvelles
   // productions. Une production historique, sans ce champ, reste en rapport.
   source_hierarchy_enforcement: "block",
+  // Validation du titre (R20.4, phase A) : juge appelé pour toute nouvelle
+  // production ; un titre non démontré bloque en mode full. Le mode test
+  // (fixtures, dossier minimal) signale seulement. Une production
+  // historique, sans ce champ, n'appelle pas le juge et reste en rapport.
+  title_validation_enforcement: mode === "full" ? "block" : "report",
   duration_profile: durationProfile.name,
   narrated_frame: narratedFrame,
 
@@ -926,6 +941,8 @@ if (dryRun) {
     console.log("");
     console.log("[truth] Truth Report");
 
+    const previousTitleJudge = production.truth?.title_judge ?? null;
+
     production.truth = {
       status: "running",
       started_at: new Date().toISOString(),
@@ -934,10 +951,50 @@ if (dryRun) {
     };
     saveProduction();
 
+    const hierarchyEnforcement = production.source_hierarchy_enforcement === "block" ? "block" : "report";
+    let titleJudge = null;
+    let titleSkipReason = null;
+
+    // Juge du titre : nouvelles productions seulement, et seulement si la
+    // hiérarchie des sources ne met pas déjà la production en pause.
+    if (typeof production.title_validation_enforcement !== "string") {
+      titleSkipReason = "production historique, aucun appel";
+    } else if (hierarchyEnforcement === "block" && evaluateSourceHierarchy(persistedResearch.data).status !== "compliant") {
+      titleSkipReason = "hiérarchie des sources à résoudre d'abord";
+    } else {
+      const judgeInput = {
+        title: production.input.title,
+        assertions: decomposeTitle(production.input.title),
+        facts: validatedFacts(persistedResearch.data, evaluateSourceHierarchy(persistedResearch.data)),
+        research: persistedResearch.data
+      };
+      const inputSha256 = titleJudgeInputSha256(judgeInput);
+
+      // Reprise : même entrée → réponse déjà validée réutilisée, sans appel
+      // (revalidée par le code, fail-closed).
+      if (
+        previousTitleJudge?.input_sha256 === inputSha256 &&
+        validateJudgeResponse(previousTitleJudge.response, judgeInput).length === 0
+      ) {
+        titleJudge = previousTitleJudge.response;
+        production.truth.title_judge = previousTitleJudge;
+        console.log("    ↺ juge du titre RÉUTILISÉ — mêmes entrées, aucun appel");
+      } else {
+        const judged = await runTitleJudge(judgeInput);
+
+        titleJudge = judged.response;
+        production.truth.title_judge = { input_sha256: inputSha256, response: judged.response, attempts: judged.attempts, usage: judged.usage };
+        console.log(`    ✓ juge du titre (${judged.attempts} appel${judged.attempts > 1 ? "s" : ""})`);
+      }
+    }
+
     const truthData = buildTruthReport({
       research: persistedResearch.data,
       title: production.input.title,
-      enforcement: production.source_hierarchy_enforcement === "block" ? "block" : "report"
+      enforcement: hierarchyEnforcement,
+      titleEnforcement: production.title_validation_enforcement === "block" ? "block" : "report",
+      titleJudge,
+      titleSkipReason
     });
     const truthValidation = validateTruthReport(truthData, persistedResearch.data);
 
@@ -980,10 +1037,22 @@ if (dryRun) {
       );
     }
 
-    if (truthData.stop.stopped && truthData.stop.kind === "review_required") {
-      production.truth.status = "review_required";
+    if (truthData.stop.stopped && ["review_required", "title_review"].includes(truthData.stop.kind)) {
+      const titleReview = truthData.stop.kind === "title_review";
+
+      production.truth.status = truthData.stop.kind;
       production.truth.completed_at = new Date().toISOString();
       production.truth.review = truthData.stop.review;
+
+      if (titleReview) {
+        production.truth.title_review = {
+          verdict: truthData.title.verdict,
+          reasons: truthData.title.reasons,
+          alternative_titles: truthData.alternative_titles,
+          actions: truthData.stop.actions
+        };
+      }
+
       production.status = "paused";
       production.paused_after = "truth";
       production.paused_at = new Date().toISOString();
@@ -991,9 +1060,18 @@ if (dryRun) {
 
       console.log("");
       console.log("==============================================");
-      console.log(" RESULTAT : PAUSE — REVUE REQUISE (hiérarchie des sources)");
+      console.log(titleReview
+        ? " RESULTAT : PAUSE — TITRE À REVOIR (non démontré par les faits validés)"
+        : " RESULTAT : PAUSE — REVUE REQUISE (hiérarchie des sources)");
       for (const reason of truthData.stop.reasons) console.log(` ${reason}`);
-      console.log(` Action : ${truthData.stop.review[0].action}`);
+
+      if (titleReview) {
+        for (const item of truthData.alternative_titles) console.log(` Titre alternatif vérifié : ${item.title}`);
+        for (const action of truthData.stop.actions) console.log(` Action possible : ${action}`);
+      } else {
+        console.log(` Action : ${truthData.stop.review[0].action}`);
+      }
+
       console.log(` Relecture : projects/${production.id}/truth-report.md`);
       console.log(` Reprise : node src/orchestrator/mvp.js --research-script --resume=${production.id}`);
       console.log("==============================================");
@@ -1004,6 +1082,7 @@ if (dryRun) {
     production.truth.status = "completed";
     production.truth.completed_at = new Date().toISOString();
     delete production.truth.review;
+    delete production.truth.title_review;
     saveProduction();
 
     const persistedTruth = readJsonArtifact(productionDir, "truth.json");

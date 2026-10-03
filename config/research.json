@@ -108,5 +108,17 @@
         { "prefix": "blog.", "category": "blog" }
       ]
     }
+  },
+  "title_validation": {
+    "alternative_titles_count": 3,
+    "approximate_figure_tolerance": 0.1,
+    "approximation_window_words": 2,
+    "markers": {
+      "approximation": ["presque", "environ", "près de", "quasi", "quasiment", "pratiquement", "à peu près", "autour de", "plus de", "moins de"],
+      "journalistic": ["vide", "secret", "secrets", "incroyable", "mystère", "mystérieux", "caché", "cachée", "choquant", "fou", "folle", "impossible", "vérité"],
+      "hypothesis": ["et si", "peut-être", "pourrait", "pourraient", "serait", "seraient", "probablement", "sans doute"],
+      "causality": ["pourquoi", "parce que", "à cause de", "explique", "expliquent", "comment", "raison", "raisons"],
+      "generalization": ["tous", "toutes", "toujours", "jamais", "aucun", "aucune", "personne", "seul", "seule", "le plus", "la plus", "les plus", "entièrement", "totalement", "chaque"]
+    }
   }
 }

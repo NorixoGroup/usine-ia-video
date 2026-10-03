@@ -1004,8 +1004,46 @@ const RESOLVERS = {
   "validate-script-claim-coverage-batch": resolveCoverageBatchJudge,
   "validate-visual-factual-grounding": resolveGroundingJudge,
   "repair-script-claim-coverage": resolveCoverageRepair,
-  "repair-visual-factual-grounding": resolveGroundingRepair
+  "repair-visual-factual-grounding": resolveGroundingRepair,
+  "judge-title": resolveTitleJudge
 };
+
+// Juge du titre (R20.4, phase A) : fonction pure de son entrée. Chaque
+// affirmation est soutenue par tous les faits validés, ou non soutenue
+// s'il n'y en a aucun ; un titre alternatif est proposé par fait validé.
+function resolveTitleJudge(fixtureId, scenario, userMessage) {
+  const [, dataText] = matchOrFail(
+    fixtureId,
+    userMessage,
+    /\nDONNÉES :\n(\{[\s\S]+\})$/
+  );
+  const data = parseJsonOrFail(fixtureId, dataText, "données");
+
+  if (!data || !Array.isArray(data.assertions) || !Array.isArray(data.facts) || !Number.isInteger(data.alternative_titles_count)) {
+    fail(fixtureId, "données du juge du titre invalides.");
+  }
+
+  const validated = data.facts.filter(fact => fact?.validated === true).map(fact => fact.index);
+
+  return json({
+    assertions: data.assertions.map(assertion => ({
+      id: assertion.id,
+      status: validated.length > 0 ? "supported" : "not_supported",
+      facts: validated,
+      explanation: validated.length > 0
+        ? "Affirmation soutenue par les faits validés du dossier."
+        : "Aucun fait validé du dossier ne soutient cette affirmation."
+    })),
+    alternative_titles: data.facts
+      .filter(fact => fact?.validated === true)
+      .slice(0, data.alternative_titles_count)
+      .map(fact => ({
+        title: fact.claim,
+        facts: [fact.index],
+        explanation: "Reprend un fait validé du dossier."
+      }))
+  });
+}
 
 export function resolveFixtureText({
   fixtureId,

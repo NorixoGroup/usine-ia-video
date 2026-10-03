@@ -645,6 +645,61 @@ try {
     assert(rejected.blocked === 0, "réseau");
   });
 
+  // Validation du titre (R20.4, phase A). Le titre canonique des fixtures
+  // (« 95 % ») n'est soutenu par aucun fait validé du dossier minimal.
+  await test("nouvelle production de test : juge du titre appelé (fixture), verdict signalé sans pause (mode report)", () => {
+    const production = readProduction(truthPause.productionId);
+    assert(production.title_validation_enforcement === "report", `repère ${production.title_validation_enforcement}`);
+    const truth = readEnvelope(truthPause.productionId, "truth").data;
+    assert(truth.title.judged === true && truth.title.verdict === "not_demonstrated" && truth.stop.stopped === false, JSON.stringify(truth.title.verdict));
+    assert(truth.title.reasons.some(reason => reason.includes("Chiffre « 95 % » absent des faits validés")), truth.title.reasons.join(" | "));
+  });
+
+  const titleRun = run(["--research-script", "--stop-after=research"], fixtures());
+  {
+    const production = readProduction(titleRun.productionId);
+    production.title_validation_enforcement = "block";
+    writeProduction(titleRun.productionId, production);
+  }
+  const titlePause = run(["--research-script", `--resume=${titleRun.productionId}`], fixtures());
+
+  await test("titre non démontré en mode block : pause « titre à revoir », ni rejet ni échec, Script non lancé", () => {
+    assert(titlePause.status === 0, `exit ${titlePause.status}\n${titlePause.stderr}`);
+    assert(/TITRE À REVOIR/.test(titlePause.stdout) && /Chiffre « 95 % » absent des faits validés/.test(titlePause.stdout) && /Action possible/.test(titlePause.stdout), titlePause.stdout.slice(-900));
+    const production = readProduction(titleRun.productionId);
+    assert(production.status === "paused" && production.paused_after === "truth" && production.truth.status === "title_review", `${production.status} ${production.truth.status}`);
+    assert(production.truth.title_review.verdict === "not_demonstrated" && production.truth.title_review.actions.length === 3, JSON.stringify(production.truth.title_review));
+    assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
+    const md = fs.readFileSync(path.join(PROJECTS, titleRun.productionId, "truth-report.md"), "utf8");
+    assert(md.includes("Pause — titre à revoir") && md.includes("Actions possibles :") && md.includes("Justifications :"), "rapport");
+    assert(titlePause.blocked === 0, "réseau");
+  });
+
+  await test("reprise d'un titre à revoir sans changement : Truth Report recalculé, même pause, aucun réseau", () => {
+    const again = run(["--research-script", `--resume=${titleRun.productionId}`], fixtures());
+    assert(again.status === 0 && /Research RÉUTILISÉ/.test(again.stdout) && /TITRE À REVOIR/.test(again.stdout), `exit ${again.status}\n${again.stderr}`);
+    assert(/juge du titre RÉUTILISÉ — mêmes entrées, aucun appel/.test(again.stdout), "juge rappelé au lieu d'être réutilisé");
+    assert(readProduction(titleRun.productionId).truth.status === "title_review", "statut");
+    assert(again.blocked === 0, "réseau");
+  });
+
+  const historicalTitleRun = run(["--research-script", "--stop-after=research"], fixtures());
+  {
+    const production = readProduction(historicalTitleRun.productionId);
+    delete production.title_validation_enforcement;
+    writeProduction(historicalTitleRun.productionId, production);
+  }
+  const historicalTitle = run(["--research-script", `--resume=${historicalTitleRun.productionId}`], fixtures());
+
+  await test("production historique (sans repère titre) : aucun juge appelé, verdict des chiffres signalé, production terminée", () => {
+    assert(historicalTitle.status === 0, `exit ${historicalTitle.status}\n${historicalTitle.stderr}`);
+    assert(!/juge du titre/.test(historicalTitle.stdout) && !/TITRE À REVOIR/.test(historicalTitle.stdout), "juge appelé ou pause");
+    const production = readProduction(historicalTitleRun.productionId);
+    assert(production.status === FINAL_STATUS && !("title_judge" in production.truth), production.status);
+    const truth = readEnvelope(historicalTitleRun.productionId, "truth").data;
+    assert(truth.title.judged === false && truth.title.judge_skipped_reason === "production historique, aucun appel" && truth.title.verdict === "not_demonstrated", JSON.stringify(truth.title.judge_skipped_reason));
+  });
+
   await test("--regenerate=script avec --stop-after=truth → refus avant toute production", () => {
     expectRefusal(
       run(

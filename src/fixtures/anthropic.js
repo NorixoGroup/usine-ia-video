@@ -25,7 +25,9 @@ const SIGNATURES = {
   "repair-script-claim-coverage":
     "Tu es un réparateur strict de couverture factuelle pour une voix-off documentaire.",
   "repair-visual-factual-grounding":
-    "Tu es un réparateur strict de grounding factuel pour un shot de plan visuel documentaire."
+    "Tu es un réparateur strict de grounding factuel pour un shot de plan visuel documentaire.",
+  "judge-title":
+    "Tu es le juge du titre de la chaîne YouTube \"Les Découvertes du Nomade\"."
 };
 
 export const FIXTURE_IDS = Object.keys(SIGNATURES);
@@ -39,7 +41,8 @@ const SYNTHETIC_USAGE = {
   "validate-script-claim-coverage-batch": { input_tokens: 1400, output_tokens: 120 },
   "validate-visual-factual-grounding": { input_tokens: 1100, output_tokens: 80 },
   "repair-script-claim-coverage": { input_tokens: 1000, output_tokens: 90 },
-  "repair-visual-factual-grounding": { input_tokens: 900, output_tokens: 70 }
+  "repair-visual-factual-grounding": { input_tokens: 900, output_tokens: 70 },
+  "judge-title": { input_tokens: 1300, output_tokens: 300 }
 };
 
 const callLog = [];

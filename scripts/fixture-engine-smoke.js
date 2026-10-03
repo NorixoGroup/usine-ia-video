@@ -86,7 +86,9 @@ const PROMPT_FILES = {
   "repair-script-claim-coverage":
     "src/utils/repair-script-claim-coverage.js",
   "repair-visual-factual-grounding":
-    "src/utils/repair-visual-factual-grounding.js"
+    "src/utils/repair-visual-factual-grounding.js",
+  "judge-title":
+    "src/utils/title-validation.js"
 };
 
 const META_KEYS = [

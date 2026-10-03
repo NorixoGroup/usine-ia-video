@@ -6,6 +6,7 @@ import {
   evaluateSourceHierarchy,
   evaluateSourcePolicy
 } from "../utils/source-policy.js";
+import { TITLE_VERDICTS, evaluateTitle, kindLabel } from "../utils/title-validation.js";
 
 // Truth Report — référence des faits validés, entre Research et Script.
 //
@@ -28,6 +29,13 @@ import {
 // "report" (productions historiques), il est seulement signalé. Le dossier
 // Research est transmis à l'identique dans research_dossier : la requête du
 // Script, et donc son cache, ne change pas.
+//
+// Phase A : la rubrique title est remplie par evaluateTitle (chiffres
+// contrôlés par le code, sens jugé par le modèle quand titleJudge est
+// fourni). En titleEnforcement "block", un titre non démontré met la
+// production en pause (stop.kind "title_review"), avec ses justifications,
+// les titres alternatifs vérifiés et les actions possibles. Une pause de la
+// hiérarchie des sources reste prioritaire.
 
 export const TRUTH_SCHEMA = "truth.v1";
 
@@ -74,9 +82,37 @@ function buildStop(hierarchy, enforcement) {
   return { stopped: false, reasons: [] };
 }
 
-export function buildTruthReport({ research, title, policy = SOURCE_POLICY, enforcement = "report" }) {
+export const TITLE_REVIEW_ACTIONS = [
+  "Choisir un titre alternatif vérifié (ou un autre titre soutenu par les faits validés), puis lancer une nouvelle production avec ce titre : Research est refait (≈ 0,25 à 0,35 $).",
+  "La production en pause est conservée : elle n'est ni rejetée ni en échec, et reste reprenable. Une reprise sans changement de titre recalcule le Truth Report sans appel (juge servi par le cache) et aboutit au même verdict.",
+  "L'adoption d'un titre alternatif dans la production en cours relèvera de la phase d'adoption des titres (à venir)."
+];
+
+function buildTitleStop(titleCheck) {
+  return {
+    stopped: true,
+    kind: "title_review",
+    reasons: titleCheck.reasons,
+    review: [],
+    actions: TITLE_REVIEW_ACTIONS
+  };
+}
+
+export function buildTruthReport({
+  research,
+  title,
+  policy = SOURCE_POLICY,
+  enforcement = "report",
+  titleEnforcement = "report",
+  titleJudge = null,
+  titleSkipReason = null
+}) {
   if (!ENFORCEMENT_MODES.includes(enforcement)) {
     throw new Error(`Truth Report : enforcement invalide "${enforcement}".`);
+  }
+
+  if (!ENFORCEMENT_MODES.includes(titleEnforcement)) {
+    throw new Error(`Truth Report : titleEnforcement invalide "${titleEnforcement}".`);
   }
 
   const keyFacts = Array.isArray(research?.key_facts) ? research.key_facts : [];
@@ -115,9 +151,24 @@ export function buildTruthReport({ research, title, policy = SOURCE_POLICY, enfo
     fact.hierarchy_status = hierarchy.facts[index].status;
   });
 
+  const titleCheck = evaluateTitle({ title, research, hierarchy, judge: titleJudge, skipReason: titleSkipReason, policy });
+  const hierarchyStop = buildStop(hierarchy, enforcement);
+  const stop = hierarchyStop.stopped || titleEnforcement !== "block" || titleCheck.verdict !== "not_demonstrated"
+    ? hierarchyStop
+    : buildTitleStop(titleCheck);
+
   return {
     schema: TRUTH_SCHEMA,
-    title: { text: title ?? null, verdict: NOT_EVALUATED },
+    title: {
+      text: titleCheck.text,
+      verdict: titleCheck.verdict,
+      enforcement: titleEnforcement,
+      judged: titleCheck.judged,
+      judge_skipped_reason: titleCheck.judge_skipped_reason,
+      assertions: titleCheck.assertions,
+      reasons: titleCheck.reasons,
+      rejected_alternatives: titleCheck.alternatives.rejected
+    },
     thesis: { text: research?.central_question ?? null, verdict: NOT_EVALUATED },
     facts,
     rejected_count: 0,
@@ -125,8 +176,8 @@ export function buildTruthReport({ research, title, policy = SOURCE_POLICY, enfo
     contradictions: { status: NOT_EVALUATED, items: [] },
     policy_checks: evaluateSourcePolicy(research, policy),
     source_hierarchy: { enforcement, ...hierarchy },
-    stop: buildStop(hierarchy, enforcement),
-    alternative_titles: [],
+    stop,
+    alternative_titles: titleCheck.alternatives.accepted,
     research_dossier: structuredClone(research)
   };
 }
@@ -168,8 +219,18 @@ export function validateTruthReport(truth, research) {
     errors.push("source_hierarchy.enforcement invalide");
   }
 
-  if (truth.stop?.stopped && truth.source_hierarchy?.enforcement !== "block") {
+  if (truth.stop?.stopped && truth.stop.kind !== "title_review" && truth.source_hierarchy?.enforcement !== "block") {
     errors.push("arrêt impossible hors mode block");
+  }
+
+  if (!TITLE_VERDICTS.includes(truth.title?.verdict)) {
+    errors.push("title.verdict invalide");
+  } else if (!Array.isArray(truth.title.reasons) || truth.title.reasons.length === 0 || !truth.title.reasons.every(reason => typeof reason === "string" && reason.trim())) {
+    errors.push("title : verdict sans justification");
+  }
+
+  if (truth.stop?.kind === "title_review" && (truth.title?.enforcement !== "block" || truth.title?.verdict !== "not_demonstrated")) {
+    errors.push("pause titre incohérente avec le verdict ou le mode");
   }
 
   if (truth.rejected_count !== (truth.facts ?? []).filter(fact => fact?.truth_status === "rejected").length) {
@@ -182,6 +243,13 @@ export function validateTruthReport(truth, research) {
 const LABELS = {
   not_evaluated: "non encore contrôlé",
   review_required: "revue requise",
+  demonstrated: "démontré",
+  partially_demonstrated: "partiellement démontré",
+  not_demonstrated: "non démontré",
+  supported: "soutenue",
+  partially_supported: "partiellement soutenue",
+  not_supported: "non soutenue",
+  not_judged: "non jugée",
   compliant: "conforme",
   warning: "avertissement",
   non_compliant: "non conforme",
@@ -213,8 +281,28 @@ export function renderTruthMarkdown(truth) {
   lines.push("");
   lines.push("## Verdict du titre");
   lines.push("");
+  const titleMode = truth.title.enforcement === "block"
+    ? "bloquant (nouvelle production)"
+    : "rapport seulement";
+
   lines.push(`- Titre : ${truth.title.text ?? "—"}`);
-  lines.push(`- Verdict : ${label(truth.title.verdict)} (validation du titre : phase à venir)`);
+  lines.push(`- Verdict : **${label(truth.title.verdict)}** — mode ${titleMode}${truth.title.judged ? ", sens jugé par le modèle et contrôlé par le code" : `, sens non jugé (${truth.title.judge_skipped_reason ?? "juge non appelé"})`}.`);
+  lines.push("");
+  lines.push("Justifications :");
+  lines.push("");
+
+  for (const reason of truth.title.reasons) {
+    lines.push(`- ${reason}`);
+  }
+
+  lines.push("");
+  lines.push("Affirmations du titre :");
+  lines.push("");
+
+  for (const assertion of truth.title.assertions) {
+    const facts = assertion.facts.length > 0 ? ` — faits ${assertion.facts.map(index => index + 1).join(", ")}` : "";
+    lines.push(`- ${kindLabel(assertion.kind)} « ${assertion.text} » : ${label(assertion.status)}${facts}`);
+  }
   lines.push("");
   lines.push("## Verdict de la thèse");
   lines.push("");
@@ -286,7 +374,9 @@ export function renderTruthMarkdown(truth) {
   } else {
     lines.push(truth.stop.kind === "review_required"
       ? "Pause — revue requise : ce n'est ni un rejet ni un échec. La production reprendra après votre décision."
-      : "Arrêt : la hiérarchie des sources n'est pas respectée.");
+      : truth.stop.kind === "title_review"
+        ? "Pause — titre à revoir : le titre n'est pas démontré par les faits validés. Ce n'est ni un rejet ni un échec."
+        : "Arrêt : la hiérarchie des sources n'est pas respectée.");
     lines.push("");
     lines.push(truth.stop.reasons.map(reason => `- ${reason}`).join("\n"));
 
@@ -294,11 +384,40 @@ export function renderTruthMarkdown(truth) {
       lines.push("");
       lines.push(`Action attendue : ${truth.stop.review[0].action}`);
     }
+
+    if (truth.stop.actions?.length > 0) {
+      lines.push("");
+      lines.push("Actions possibles :");
+      lines.push("");
+      truth.stop.actions.forEach((action, index) => lines.push(`${index + 1}. ${action}`));
+    }
   }
   lines.push("");
   lines.push("## Titres alternatifs");
   lines.push("");
-  lines.push(truth.alternative_titles.length === 0 ? "Aucune proposition (proposées uniquement lorsque le titre est refusé)." : truth.alternative_titles.map(item => `- ${item}`).join("\n"));
+  if (truth.alternative_titles.length === 0) {
+    lines.push(truth.title.verdict === "not_demonstrated"
+      ? (truth.title.judged ? "Aucun titre alternatif n'a passé les contrôles du code." : "Aucune proposition : le juge du titre n'a pas été appelé.")
+      : "Aucune proposition (proposées uniquement lorsque le titre est non démontré).");
+  } else {
+    lines.push("Titres vérifiés par le code (chiffres présents dans les faits validés cités) :");
+    lines.push("");
+
+    for (const item of truth.alternative_titles) {
+      lines.push(`- **${item.title}** — faits ${item.facts.map(index => index + 1).join(", ")} — ${item.explanation}`);
+    }
+  }
+
+  if (truth.title.rejected_alternatives.length > 0) {
+    lines.push("");
+    lines.push("Propositions écartées par le code :");
+    lines.push("");
+
+    for (const item of truth.title.rejected_alternatives) {
+      lines.push(`- ${item.title} — ${item.reasons.join(" ; ")}`);
+    }
+  }
+
   lines.push("");
 
   return lines.join("\n");
