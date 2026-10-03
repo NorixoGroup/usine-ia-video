@@ -7,6 +7,7 @@ import {
   evaluateSourcePolicy
 } from "../utils/source-policy.js";
 import { TITLE_VERDICTS, evaluateTitle, kindLabel } from "../utils/title-validation.js";
+import { EDITORIAL_STATUSES, EVIDENCE_REVIEW_ACTIONS, evaluateFactEvidence, technicalLabel } from "../utils/fact-evidence.js";
 
 // Truth Report — référence des faits validés, entre Research et Script.
 //
@@ -36,11 +37,21 @@ import { TITLE_VERDICTS, evaluateTitle, kindLabel } from "../utils/title-validat
 // production en pause (stop.kind "title_review"), avec ses justifications,
 // les titres alternatifs vérifiés et les actions possibles. Une pause de la
 // hiérarchie des sources reste prioritaire.
+//
+// Phase E : chaque fait reçoit evidence (statut éditorial et statut
+// technique, distincts), calculé par evaluateFactEvidence à partir des
+// preuves enregistrées. Un fait au statut éditorial « rejected » devient
+// truth_status « rejected », à son indice d'origine ; research_dossier reste
+// identique. En evidenceEnforcement "block", un fait HIGH rejeté met la
+// production en pause (stop.kind "evidence_review"), un fait HIGH non
+// vérifiable aussi (stop.kind "evidence_unverifiable"). Ordre de priorité
+// des pauses : hiérarchie des sources, preuves, titre.
 
 export const TRUTH_SCHEMA = "truth.v1";
 
 const NOT_EVALUATED = "not_evaluated";
 const RETAINED = "retained";
+const REJECTED = "rejected";
 
 function domainOf(url) {
   try {
@@ -88,6 +99,23 @@ export const TITLE_REVIEW_ACTIONS = [
   "L'adoption d'un titre alternatif dans la production en cours relèvera de la phase d'adoption des titres (à venir)."
 ];
 
+function buildEvidenceStop(factEvidence, keyFacts) {
+  const high = factEvidence.facts.filter(fact => keyFacts[fact.index]?.importance === "high");
+  const rejected = high.filter(fact => fact.editorial_status === "rejected");
+  const unverifiable = high.filter(fact => fact.editorial_status === "unverifiable");
+  const describe = fact => `Fait ${fact.index + 1} : ${fact.reasons.join(" ")}`;
+
+  if (rejected.length > 0) {
+    return { stopped: true, kind: "evidence_review", reasons: [...rejected, ...unverifiable].map(describe), review: [], actions: EVIDENCE_REVIEW_ACTIONS };
+  }
+
+  if (unverifiable.length > 0) {
+    return { stopped: true, kind: "evidence_unverifiable", reasons: unverifiable.map(describe), review: [], actions: EVIDENCE_REVIEW_ACTIONS };
+  }
+
+  return { stopped: false, reasons: [] };
+}
+
 function buildTitleStop(titleCheck) {
   return {
     stopped: true,
@@ -105,7 +133,9 @@ export function buildTruthReport({
   enforcement = "report",
   titleEnforcement = "report",
   titleJudge = null,
-  titleSkipReason = null
+  titleSkipReason = null,
+  evidenceEnforcement = "report",
+  factEvidence = null
 }) {
   if (!ENFORCEMENT_MODES.includes(enforcement)) {
     throw new Error(`Truth Report : enforcement invalide "${enforcement}".`);
@@ -114,6 +144,12 @@ export function buildTruthReport({
   if (!ENFORCEMENT_MODES.includes(titleEnforcement)) {
     throw new Error(`Truth Report : titleEnforcement invalide "${titleEnforcement}".`);
   }
+
+  if (!ENFORCEMENT_MODES.includes(evidenceEnforcement)) {
+    throw new Error(`Truth Report : evidenceEnforcement invalide "${evidenceEnforcement}".`);
+  }
+
+  const evidenceCheck = factEvidence ?? evaluateFactEvidence({ research, skipReason: "preuves non lues" });
 
   const keyFacts = Array.isArray(research?.key_facts) ? research.key_facts : [];
   const sources = new Map();
@@ -147,15 +183,27 @@ export function buildTruthReport({
   const hierarchy = evaluateSourceHierarchy(research, policy);
 
   facts.forEach((fact, index) => {
+    const { editorial_status, technical_status, sources: evidenceSources, elements, quote, reasons } = evidenceCheck.facts[index];
+
     fact.best_rank = hierarchy.facts[index].best_rank;
     fact.hierarchy_status = hierarchy.facts[index].status;
+    fact.evidence = { editorial_status, technical_status, sources: evidenceSources, elements, quote, reasons };
+
+    if (editorial_status === "rejected") fact.truth_status = REJECTED;
   });
 
-  const titleCheck = evaluateTitle({ title, research, hierarchy, judge: titleJudge, skipReason: titleSkipReason, policy });
+  const titleCheck = evaluateTitle({ title, research, hierarchy, factEvidence: evidenceCheck, judge: titleJudge, skipReason: titleSkipReason, policy });
   const hierarchyStop = buildStop(hierarchy, enforcement);
-  const stop = hierarchyStop.stopped || titleEnforcement !== "block" || titleCheck.verdict !== "not_demonstrated"
+  const evidenceStop = evidenceEnforcement === "block" && evidenceCheck.checked
+    ? buildEvidenceStop(evidenceCheck, keyFacts)
+    : { stopped: false, reasons: [] };
+  const stop = hierarchyStop.stopped
     ? hierarchyStop
-    : buildTitleStop(titleCheck);
+    : evidenceStop.stopped
+      ? evidenceStop
+      : titleEnforcement === "block" && titleCheck.verdict === "not_demonstrated"
+        ? buildTitleStop(titleCheck)
+        : hierarchyStop;
 
   return {
     schema: TRUTH_SCHEMA,
@@ -171,11 +219,18 @@ export function buildTruthReport({
     },
     thesis: { text: research?.central_question ?? null, verdict: NOT_EVALUATED },
     facts,
-    rejected_count: 0,
+    rejected_count: facts.filter(fact => fact.truth_status === REJECTED).length,
     sources: [...sources.values()],
     contradictions: { status: NOT_EVALUATED, items: [] },
     policy_checks: evaluateSourcePolicy(research, policy),
     source_hierarchy: { enforcement, ...hierarchy },
+    fact_evidence: {
+      enforcement: evidenceEnforcement,
+      checked: evidenceCheck.checked,
+      skip_reason: evidenceCheck.skip_reason,
+      counts: evidenceCheck.counts,
+      offline_checks: evidenceCheck.offline_checks
+    },
     stop,
     alternative_titles: titleCheck.alternatives.accepted,
     research_dossier: structuredClone(research)
@@ -219,9 +274,28 @@ export function validateTruthReport(truth, research) {
     errors.push("source_hierarchy.enforcement invalide");
   }
 
-  if (truth.stop?.stopped && truth.stop.kind !== "title_review" && truth.source_hierarchy?.enforcement !== "block") {
+  const stopMode = {
+    review_required: truth.source_hierarchy?.enforcement,
+    rejected: truth.source_hierarchy?.enforcement,
+    evidence_review: truth.fact_evidence?.enforcement,
+    evidence_unverifiable: truth.fact_evidence?.enforcement,
+    title_review: truth.title?.enforcement
+  };
+
+  if (truth.stop?.stopped && stopMode[truth.stop.kind] !== "block") {
     errors.push("arrêt impossible hors mode block");
   }
+
+  if (!ENFORCEMENT_MODES.includes(truth.fact_evidence?.enforcement)) {
+    errors.push("fact_evidence.enforcement invalide");
+  }
+
+  (truth.facts ?? []).forEach((fact, index) => {
+    if (!EDITORIAL_STATUSES.includes(fact?.evidence?.editorial_status)) errors.push(`facts[${index}] : statut éditorial invalide`);
+    if (typeof fact?.evidence?.technical_status !== "string") errors.push(`facts[${index}] : statut technique absent`);
+    if ((fact?.truth_status === REJECTED) !== (fact?.evidence?.editorial_status === "rejected")) errors.push(`facts[${index}] : truth_status incohérent avec la preuve`);
+    if (fact?.evidence?.editorial_status !== "not_checked" && !(fact?.evidence?.reasons?.length > 0)) errors.push(`facts[${index}] : statut de preuve sans justification`);
+  });
 
   if (!TITLE_VERDICTS.includes(truth.title?.verdict)) {
     errors.push("title.verdict invalide");
@@ -250,6 +324,9 @@ const LABELS = {
   partially_supported: "partiellement soutenue",
   not_supported: "non soutenue",
   not_judged: "non jugée",
+  rejected: "rejeté",
+  unverifiable: "non vérifiable",
+  not_checked: "non contrôlé",
   compliant: "conforme",
   warning: "avertissement",
   non_compliant: "non conforme",
@@ -263,6 +340,11 @@ const TIER_LABELS = [
   ["tier_1", "Tier 1"], ["tier_2", "Tier 2"], ["tier_3", "Tier 3"], ["tier_4", "Tier 4"],
   ["tier_5", "Tier 5"], ["tier_6", "Tier 6"], ["unknown", "Unknown"], ["invalid_url", "URL invalide"]
 ];
+
+function evidenceTechnical(fact) {
+  const details = fact.evidence.sources.map(source => technicalLabel(source.technical_status));
+  return details.length === 0 ? "aucune source" : [...new Set(details)].join(", ");
+}
 
 function rankLabel(source) {
   if (source.category === "unknown") return "Unknown — review required";
@@ -314,13 +396,15 @@ export function renderTruthMarkdown(truth) {
 
   for (const fact of retained) {
     const domains = fact.sources.map(source => source.domain ?? "source sans URL").join(", ") || "aucune source";
-    lines.push(`${fact.index + 1}. ${fact.claim} — importance ${fact.importance ?? "—"}, ${fact.verification_status ?? "—"} — sources : ${domains}`);
+    lines.push(`${fact.index + 1}. ${fact.claim} — importance ${fact.importance ?? "—"}, ${fact.verification_status ?? "—"} — sources : ${domains} — preuve : ${label(fact.evidence.editorial_status)} (${evidenceTechnical(fact)})`);
   }
 
   lines.push("");
   lines.push(`## Faits rejetés (${rejected.length})`);
   lines.push("");
-  lines.push(rejected.length === 0 ? "Aucun fait rejeté : aucune règle de rejet n'est encore appliquée." : rejected.map(fact => `${fact.index + 1}. ${fact.claim}`).join("\n"));
+  lines.push(rejected.length === 0
+    ? (truth.fact_evidence.checked ? "Aucun fait rejeté par le contrôle des preuves." : "Aucun fait rejeté : les preuves n'ont pas été lues pour cette production.")
+    : rejected.map(fact => `${fact.index + 1}. ${fact.claim} — ${fact.evidence.reasons.join(" ")}`).join("\n"));
   lines.push("");
   lines.push("## Hiérarchie des sources");
   lines.push("");
@@ -363,6 +447,30 @@ export function renderTruthMarkdown(truth) {
   }
 
   lines.push("");
+  lines.push("## Preuves des faits (Fact ↔ Evidence)");
+  lines.push("");
+  const evidence = truth.fact_evidence;
+  lines.push(evidence.checked
+    ? `Preuves lues et enregistrées localement — mode ${evidence.enforcement === "block" ? "bloquant (nouvelle production)" : "rapport seulement"}. Statuts éditoriaux : ${EDITORIAL_STATUSES.map(status => `${label(status)} ${evidence.counts[status]}`).join(", ")}.`
+    : `Preuves non lues : ${evidence.skip_reason ?? "—"}. Seuls les contrôles hors réseau sont présentés.`);
+  lines.push("");
+
+  for (const fact of truth.facts.filter(item => item.evidence.editorial_status !== "not_checked" || evidence.checked)) {
+    if (fact.verification_status !== "verified") continue;
+    lines.push(`- Fait ${fact.index + 1} — éditorial : **${label(fact.evidence.editorial_status)}** — technique : ${evidenceTechnical(fact)}`);
+    for (const element of fact.evidence.elements) lines.push(`  - ${element.kind === "quote" ? "Citation" : element.kind === "date" ? "Date" : "Chiffre"} « ${element.text} » : ${element.status === "found" ? `trouvé — « ${element.excerpt} »` : "absent des preuves lues"}`);
+    if (fact.evidence.quote) lines.push(`  - Passage cité : « ${fact.evidence.quote.text} » (${fact.evidence.quote.source})`);
+    for (const reason of fact.evidence.reasons) lines.push(`  - ${reason}`);
+  }
+
+  if (evidence.offline_checks.length > 0) {
+    lines.push("");
+    lines.push("Contrôles hors réseau :");
+    lines.push("");
+    for (const check of evidence.offline_checks) lines.push(`- Fait ${check.fact + 1} — ${check.check === "provenance" ? "provenance" : "cohérence interne"} : ${check.status === "ok" ? "conforme" : "avertissement"} — ${check.reason}`);
+  }
+
+  lines.push("");
   lines.push("## Contradictions détectées");
   lines.push("");
   lines.push(`Contrôle : ${label(truth.contradictions.status)} (phase contradictions à venir).`);
@@ -376,7 +484,11 @@ export function renderTruthMarkdown(truth) {
       ? "Pause — revue requise : ce n'est ni un rejet ni un échec. La production reprendra après votre décision."
       : truth.stop.kind === "title_review"
         ? "Pause — titre à revoir : le titre n'est pas démontré par les faits validés. Ce n'est ni un rejet ni un échec."
-        : "Arrêt : la hiérarchie des sources n'est pas respectée.");
+        : truth.stop.kind === "evidence_review"
+          ? "Pause — preuve à revoir : un fait HIGH n'est pas soutenu par sa preuve. La production est conservée et reste reprenable."
+          : truth.stop.kind === "evidence_unverifiable"
+            ? "Pause — revue requise : la preuve d'un fait HIGH est illisible. Ce n'est ni un rejet ni un échec."
+            : "Arrêt : la hiérarchie des sources n'est pas respectée.");
     lines.push("");
     lines.push(truth.stop.reasons.map(reason => `- ${reason}`).join("\n"));
 

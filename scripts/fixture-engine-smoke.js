@@ -88,7 +88,9 @@ const PROMPT_FILES = {
   "repair-visual-factual-grounding":
     "src/utils/repair-visual-factual-grounding.js",
   "judge-title":
-    "src/utils/title-validation.js"
+    "src/utils/title-validation.js",
+  "judge-evidence":
+    "src/utils/fact-evidence.js"
 };
 
 const META_KEYS = [

@@ -1005,7 +1005,8 @@ const RESOLVERS = {
   "validate-visual-factual-grounding": resolveGroundingJudge,
   "repair-script-claim-coverage": resolveCoverageRepair,
   "repair-visual-factual-grounding": resolveGroundingRepair,
-  "judge-title": resolveTitleJudge
+  "judge-title": resolveTitleJudge,
+  "judge-evidence": resolveEvidenceJudge
 };
 
 // Juge du titre (R20.4, phase A) : fonction pure de son entrée. Chaque
@@ -1042,6 +1043,32 @@ function resolveTitleJudge(fixtureId, scenario, userMessage) {
         facts: [fact.index],
         explanation: "Reprend un fait validé du dossier."
       }))
+  });
+}
+
+// Juge des preuves (R20.4, phase E) : fonction pure de son entrée. Un fait
+// avec au moins un extrait est soutenu par son premier extrait, cité mot
+// pour mot ; sans extrait, il n'est pas soutenu.
+function resolveEvidenceJudge(fixtureId, scenario, userMessage) {
+  const [, dataText] = matchOrFail(
+    fixtureId,
+    userMessage,
+    /\nDONNÉES :\n(\[[\s\S]+\])$/
+  );
+  const items = parseJsonOrFail(fixtureId, dataText, "données");
+
+  if (!Array.isArray(items) || !items.every(item => typeof item?.id === "string" && Array.isArray(item?.excerpts))) {
+    fail(fixtureId, "données du juge des preuves invalides.");
+  }
+
+  return json({
+    facts: items.map(item => {
+      const excerpt = item.excerpts[0];
+
+      return excerpt
+        ? { id: item.id, status: "supported", source: excerpt.id, quote: excerpt.text, explanation: "L'extrait cité établit l'affirmation." }
+        : { id: item.id, status: "not_supported", source: "", quote: "", explanation: "Aucun extrait ne soutient l'affirmation." };
+    })
   });
 }
 

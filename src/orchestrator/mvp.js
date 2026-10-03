@@ -19,6 +19,21 @@ import {
 import { evaluateSourceHierarchy } from "../utils/source-policy.js";
 
 import {
+  buildEvidenceJudgeItems,
+  collectEvidence,
+  evaluateFactEvidence,
+  evidenceJudgeInputSha256,
+  evidenceUrls,
+  judgeBatches,
+  loadEvidenceTexts,
+  offlineChecks,
+  researchSearchUrls,
+  runEvidenceJudgeBatch,
+  validateEvidenceArtifact,
+  validateEvidenceJudgeResponse
+} from "../utils/fact-evidence.js";
+
+import {
   decomposeTitle,
   runTitleJudge,
   titleJudgeInputSha256,
@@ -554,6 +569,10 @@ const production = resumed ? resumed.production : {
   // (fixtures, dossier minimal) signale seulement. Une production
   // historique, sans ce champ, n'appelle pas le juge et reste en rapport.
   title_validation_enforcement: mode === "full" ? "block" : "report",
+  // Fact ↔ Evidence (R20.4, phase E) : preuves lues localement et juge pour
+  // toute nouvelle production ; bloquant en mode full seulement. Une
+  // production historique, sans ce champ, n'accède pas au réseau.
+  fact_evidence_enforcement: mode === "full" ? "block" : "report",
   duration_profile: durationProfile.name,
   narrated_frame: narratedFrame,
 
@@ -942,6 +961,7 @@ if (dryRun) {
     console.log("[truth] Truth Report");
 
     const previousTitleJudge = production.truth?.title_judge ?? null;
+    const previousEvidenceJudge = production.truth?.evidence_judge ?? [];
 
     production.truth = {
       status: "running",
@@ -952,20 +972,97 @@ if (dryRun) {
     saveProduction();
 
     const hierarchyEnforcement = production.source_hierarchy_enforcement === "block" ? "block" : "report";
+    const hierarchyBlocks = hierarchyEnforcement === "block" && evaluateSourceHierarchy(persistedResearch.data).status !== "compliant";
     let titleJudge = null;
     let titleSkipReason = null;
+
+    // Fact ↔ Evidence : preuves lues une seule fois, enregistrées et
+    // scellées (evidence.json + evidence/<sha256>.txt), puis relues sur le
+    // disque à chaque reprise, sans réseau. Production historique : aucun
+    // accès réseau, aucun juge, contrôles hors réseau seulement.
+    const offline = offlineChecks(persistedResearch.data, { searchUrls: researchSearchUrls(productionDir) });
+    let factEvidence;
+
+    if (typeof production.fact_evidence_enforcement !== "string") {
+      factEvidence = evaluateFactEvidence({ research: persistedResearch.data, skipReason: "production historique, aucun accès réseau", offline });
+    } else {
+      const evidenceFile = path.join(productionDir, "evidence.json");
+      let evidence = null;
+
+      if (fs.existsSync(evidenceFile)) {
+        const content = fs.readFileSync(evidenceFile, "utf8");
+
+        if (crypto.createHash("sha256").update(content).digest("hex") !== production.artifact_sha256?.["evidence.json"]) {
+          throw new Error("Preuves : scellé de evidence.json absent ou différent — artefact refusé.");
+        }
+
+        evidence = JSON.parse(content);
+
+        if (validateEvidenceArtifact(evidence, persistedResearch.data).length > 0) {
+          // Dossier Research changé (régénération) : les preuves sont relues.
+          evidence = null;
+        } else {
+          console.log("    ↺ preuves RÉUTILISÉES — evidence.json scellé, aucun accès réseau");
+        }
+      }
+
+      if (!evidence && evidenceUrls(persistedResearch.data).length > 0) {
+        evidence = await collectEvidence({ research: persistedResearch.data, productionDir });
+        sealAndWriteArtifact({ productionDir, production, filename: "evidence.json", data: evidence, save: saveProduction });
+        console.log(`    ✓ preuves lues localement (${evidence.sources.filter(record => record.technical_status === "fetched").length}/${evidence.sources.length} pages)`);
+      }
+
+      evidence ??= { schema: "evidence.v1", sources: [] };
+
+      const texts = loadEvidenceTexts({ evidence, productionDir });
+      const pending = evaluateFactEvidence({ research: persistedResearch.data, evidence, texts, skipReason: "en attente du juge", offline });
+      const judgements = new Map();
+      let evidenceSkipReason = null;
+
+      if (hierarchyBlocks) {
+        evidenceSkipReason = "hiérarchie des sources à résoudre d'abord";
+      } else {
+        const toJudge = buildEvidenceJudgeItems({ research: persistedResearch.data, evidence, texts })
+          .filter(item => item.excerpts.length > 0 && pending.facts[item.index].awaiting_judge === true);
+        const reused = [];
+
+        for (const batch of judgeBatches(toJudge)) {
+          const inputSha256 = evidenceJudgeInputSha256(batch);
+          const previous = previousEvidenceJudge.find(entry => entry.input_sha256 === inputSha256);
+          let response;
+
+          if (previous && validateEvidenceJudgeResponse(previous.response, batch).length === 0) {
+            response = previous.response;
+            reused.push(previous);
+            console.log("    ↺ juge des preuves RÉUTILISÉ — mêmes entrées, aucun appel");
+          } else {
+            const judged = await runEvidenceJudgeBatch(batch);
+
+            response = judged.response;
+            reused.push({ input_sha256: inputSha256, response, attempts: judged.attempts, usage: judged.usage });
+            console.log(`    ✓ juge des preuves (${batch.length} fait${batch.length > 1 ? "s" : ""}, ${judged.attempts} appel${judged.attempts > 1 ? "s" : ""})`);
+          }
+
+          for (const item of response.facts) judgements.set(item.id, item);
+        }
+
+        production.truth.evidence_judge = reused;
+      }
+
+      factEvidence = evaluateFactEvidence({ research: persistedResearch.data, evidence, texts, judgements, skipReason: evidenceSkipReason, offline });
+    }
 
     // Juge du titre : nouvelles productions seulement, et seulement si la
     // hiérarchie des sources ne met pas déjà la production en pause.
     if (typeof production.title_validation_enforcement !== "string") {
       titleSkipReason = "production historique, aucun appel";
-    } else if (hierarchyEnforcement === "block" && evaluateSourceHierarchy(persistedResearch.data).status !== "compliant") {
+    } else if (hierarchyBlocks) {
       titleSkipReason = "hiérarchie des sources à résoudre d'abord";
     } else {
       const judgeInput = {
         title: production.input.title,
         assertions: decomposeTitle(production.input.title),
-        facts: validatedFacts(persistedResearch.data, evaluateSourceHierarchy(persistedResearch.data)),
+        facts: validatedFacts(persistedResearch.data, evaluateSourceHierarchy(persistedResearch.data), undefined, factEvidence),
         research: persistedResearch.data
       };
       const inputSha256 = titleJudgeInputSha256(judgeInput);
@@ -994,7 +1091,9 @@ if (dryRun) {
       enforcement: hierarchyEnforcement,
       titleEnforcement: production.title_validation_enforcement === "block" ? "block" : "report",
       titleJudge,
-      titleSkipReason
+      titleSkipReason,
+      evidenceEnforcement: production.fact_evidence_enforcement === "block" ? "block" : "report",
+      factEvidence
     });
     const truthValidation = validateTruthReport(truthData, persistedResearch.data);
 
@@ -1037,12 +1136,22 @@ if (dryRun) {
       );
     }
 
-    if (truthData.stop.stopped && ["review_required", "title_review"].includes(truthData.stop.kind)) {
+    if (truthData.stop.stopped && ["review_required", "title_review", "evidence_review", "evidence_unverifiable"].includes(truthData.stop.kind)) {
       const titleReview = truthData.stop.kind === "title_review";
+      const evidenceReview = truthData.stop.kind.startsWith("evidence_");
 
       production.truth.status = truthData.stop.kind;
       production.truth.completed_at = new Date().toISOString();
       production.truth.review = truthData.stop.review;
+
+      if (evidenceReview) {
+        production.truth.evidence_review = {
+          kind: truthData.stop.kind,
+          reasons: truthData.stop.reasons,
+          rejected_facts: truthData.facts.filter(fact => fact.truth_status === "rejected").map(fact => fact.index),
+          actions: truthData.stop.actions
+        };
+      }
 
       if (titleReview) {
         production.truth.title_review = {
@@ -1062,10 +1171,16 @@ if (dryRun) {
       console.log("==============================================");
       console.log(titleReview
         ? " RESULTAT : PAUSE — TITRE À REVOIR (non démontré par les faits validés)"
-        : " RESULTAT : PAUSE — REVUE REQUISE (hiérarchie des sources)");
+        : truthData.stop.kind === "evidence_review"
+          ? " RESULTAT : PAUSE — PREUVE À REVOIR (fait HIGH non soutenu par sa preuve)"
+          : truthData.stop.kind === "evidence_unverifiable"
+            ? " RESULTAT : PAUSE — REVUE REQUISE (preuve illisible d'un fait HIGH)"
+            : " RESULTAT : PAUSE — REVUE REQUISE (hiérarchie des sources)");
       for (const reason of truthData.stop.reasons) console.log(` ${reason}`);
 
-      if (titleReview) {
+      if (evidenceReview) {
+        for (const action of truthData.stop.actions) console.log(` Action possible : ${action}`);
+      } else if (titleReview) {
         for (const item of truthData.alternative_titles) console.log(` Titre alternatif vérifié : ${item.title}`);
         for (const action of truthData.stop.actions) console.log(` Action possible : ${action}`);
       } else {
@@ -1083,6 +1198,7 @@ if (dryRun) {
     production.truth.completed_at = new Date().toISOString();
     delete production.truth.review;
     delete production.truth.title_review;
+    delete production.truth.evidence_review;
     saveProduction();
 
     const persistedTruth = readJsonArtifact(productionDir, "truth.json");

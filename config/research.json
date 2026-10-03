@@ -120,5 +120,15 @@
       "causality": ["pourquoi", "parce que", "à cause de", "explique", "expliquent", "comment", "raison", "raisons"],
       "generalization": ["tous", "toutes", "toujours", "jamais", "aucun", "aucune", "personne", "seul", "seule", "le plus", "la plus", "les plus", "entièrement", "totalement", "chaque"]
     }
+  },
+  "fact_evidence": {
+    "fetch_timeout_ms": 15000,
+    "max_bytes": 2000000,
+    "user_agent": "NomadStudio-EvidenceReader/1.0 (lecture locale des preuves citées)",
+    "min_text_length": 200,
+    "accepted_content_types": ["text/html", "application/xhtml+xml", "text/plain"],
+    "excerpt_chars": 400,
+    "max_excerpts_per_source": 3,
+    "judge_batch_size": 8
   }
 }

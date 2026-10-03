@@ -700,6 +700,101 @@ try {
     assert(truth.title.judged === false && truth.title.judge_skipped_reason === "production historique, aucun appel" && truth.title.verdict === "not_demonstrated", JSON.stringify(truth.title.judge_skipped_reason));
   });
 
+  // Fact ↔ Evidence (R20.4, phase E). Les pages sont servies par un jeu
+  // local (EVIDENCE_FIXTURE_DIR, actif seulement sous NO_API=1) : aucune
+  // sortie réseau. Les sources sont de rang ≤ 2 pour que la hiérarchie des
+  // sources (phase B) ne mette pas la production en pause avant les preuves.
+  const evidencePages = fs.mkdtempSync(path.join(os.tmpdir(), "resume-smoke-evidence-"));
+  const evidenceFiller = "Texte documentaire de remplissage sans chiffre particulier. ".repeat(6);
+  const evidencePage = (url, page) => fs.writeFileSync(path.join(evidencePages, `${crypto.createHash("sha256").update(url).digest("hex")}.json`), JSON.stringify(page));
+  evidencePage("https://www.larousse.fr/smoke-e", { status: 200, content_type: "text/html", body: `<html><body><p>Environ 90 % de la population vit sur les bandes littorales. ${evidenceFiller}</p></body></html>` });
+  evidencePage("https://www.bom.gov.au/smoke-e", { status: 200, content_type: "text/html", body: `<html><body><p>Plus de 80 % du territoire reçoit moins de 600 mm de pluie par an. ${evidenceFiller}</p></body></html>` });
+  evidencePage("https://www.abs.gov.au/smoke-e-403", { status: 403, content_type: "text/html", body: "Forbidden" });
+  const withPages = () => ({ ...fixtures(), EVIDENCE_FIXTURE_DIR: evidencePages });
+  const evidenceFact = (claim, url) => ({ claim, importance: "high", verification_status: "verified", sources: [hierarchySource(9, url)] });
+
+  function evidenceRun(keyFacts, { historical = false } = {}) {
+    const created = run(["--research-script", "--stop-after=research"], fixtures());
+    sealResearch(created.productionId, keyFacts);
+    const production = readProduction(created.productionId);
+    if (historical) delete production.fact_evidence_enforcement; else production.fact_evidence_enforcement = "block";
+    writeProduction(created.productionId, production);
+    return created.productionId;
+  }
+
+  await test("nouvelle production de test : preuves en mode report (repère fact_evidence_enforcement)", () => {
+    assert(readProduction(truthPause.productionId).fact_evidence_enforcement === "report", "repère");
+    assert(!fs.existsSync(path.join(PROJECTS, truthPause.productionId, "evidence.json")), "evidence.json écrit sans URL à lire");
+  });
+
+  const rejectedEvidenceId = evidenceRun([evidenceFact("Environ 90 % de la population vit sur les côtes, dont 70 % à moins de 50 km", "https://www.larousse.fr/smoke-e")]);
+  const rejectedEvidence = run(["--research-script", `--resume=${rejectedEvidenceId}`], withPages());
+
+  await test("fait HIGH non soutenu par sa preuve (block) : rejected, pause « preuve à revoir », Script non lancé", () => {
+    assert(rejectedEvidence.status === 0, `exit ${rejectedEvidence.status}\n${rejectedEvidence.stderr}`);
+    assert(/PREUVE À REVOIR/.test(rejectedEvidence.stdout) && /Chiffre « 70 % » absent/.test(rejectedEvidence.stdout), rejectedEvidence.stdout.slice(-900));
+    const production = readProduction(rejectedEvidenceId);
+    assert(production.status === "paused" && production.truth.status === "evidence_review" && production.truth.evidence_review.rejected_facts.join() === "0", JSON.stringify(production.truth.evidence_review));
+    assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
+    const truth = readEnvelope(rejectedEvidenceId, "truth").data;
+    assert(truth.facts[0].truth_status === "rejected" && truth.rejected_count === 1 && truth.facts[0].evidence.editorial_status === "rejected" && truth.facts[0].evidence.technical_status === "all_read", JSON.stringify(truth.facts[0].evidence));
+    const evidence = readEnvelope(rejectedEvidenceId, "evidence");
+    const record = evidence.sources[0];
+    assert(record.final_url === "https://www.larousse.fr/smoke-e" && record.http_status === 200 && record.content_type === "text/html" && /Z$/.test(record.fetched_at) && record.text_length > 0, JSON.stringify(record));
+    assert(production.artifact_sha256["evidence.json"] && fs.existsSync(path.join(PROJECTS, rejectedEvidenceId, "evidence", `${record.text_sha256}.txt`)), "preuve enregistrée et scellée");
+    assert(rejectedEvidence.blocked === 0, "réseau");
+  });
+
+  await test("reprise sans jeu de pages : preuves relues sur le disque, aucun accès réseau, même pause", () => {
+    const again = run(["--research-script", `--resume=${rejectedEvidenceId}`], fixtures());
+    assert(again.status === 0 && /preuves RÉUTILISÉES/.test(again.stdout) && /PREUVE À REVOIR/.test(again.stdout), `exit ${again.status}\n${again.stdout.slice(-600)}\n${again.stderr}`);
+    assert(again.blocked === 0, "réseau");
+  });
+
+  await test("preuve enregistrée modifiée : reprise refusée (fail-closed), production reprenable", () => {
+    const record = readEnvelope(rejectedEvidenceId, "evidence").sources[0];
+    const file = path.join(PROJECTS, rejectedEvidenceId, "evidence", `${record.text_sha256}.txt`);
+    const original = fs.readFileSync(file, "utf8");
+    fs.writeFileSync(file, `${original} altéré`);
+    const tampered = run(["--research-script", `--resume=${rejectedEvidenceId}`], fixtures());
+    fs.writeFileSync(file, original);
+    assert(tampered.status === 1 && /texte enregistré modifié/.test(tampered.stderr), `exit ${tampered.status}\n${tampered.stderr.slice(-400)}`);
+    assert(readProduction(rejectedEvidenceId).truth.status === "failed", "statut");
+  });
+
+  const unreadableId = evidenceRun([evidenceFact("La population dépasse 27 millions d'habitants", "https://www.abs.gov.au/smoke-e-403")]);
+  const unreadable = run(["--research-script", `--resume=${unreadableId}`], withPages());
+
+  await test("preuve illisible d'un fait HIGH (HTTP 403) : pause « revue requise », statuts technique et éditorial distincts", () => {
+    assert(unreadable.status === 0 && /REVUE REQUISE \(preuve illisible/.test(unreadable.stdout), `exit ${unreadable.status}\n${unreadable.stdout.slice(-600)}`);
+    const fact = readEnvelope(unreadableId, "truth").data.facts[0];
+    assert(fact.evidence.editorial_status === "unverifiable" && fact.evidence.technical_status === "unreadable" && fact.evidence.sources[0].technical_status === "http_error" && fact.truth_status === "retained", JSON.stringify(fact.evidence));
+    assert(readProduction(unreadableId).truth.status === "evidence_unverifiable", "statut");
+  });
+
+  const supportedId = evidenceRun([evidenceFact("Plus de 80 % du territoire reçoit moins de 600 mm de pluie par an", "https://www.bom.gov.au/smoke-e")]);
+  const supported = run(["--research-script", `--resume=${supportedId}`, "--stop-after=truth"], withPages());
+
+  await test("fait soutenu : juge des preuves appelé (fixture), citation retrouvée dans la preuve, aucune pause de preuve", () => {
+    assert(supported.status === 0 && /juge des preuves \(1 fait, 1 appel\)/.test(supported.stdout) && !/PREUVE À REVOIR/.test(supported.stdout), `exit ${supported.status}\n${supported.stdout.slice(-600)}\n${supported.stderr}`);
+    const fact = readEnvelope(supportedId, "truth").data.facts[0];
+    assert(fact.evidence.editorial_status === "supported" && fact.evidence.quote?.source === "https://www.bom.gov.au/smoke-e" && fact.truth_status === "retained", JSON.stringify(fact.evidence));
+    const again = run(["--research-script", `--resume=${supportedId}`, "--stop-after=truth"], fixtures());
+    assert(again.status === 0 && /preuves RÉUTILISÉES/.test(again.stdout) && /juge des preuves RÉUTILISÉ/.test(again.stdout), again.stdout.slice(-600));
+  });
+
+  const historicalEvidenceId = evidenceRun([evidenceFact("Environ 90 % de la population vit sur les côtes, dont 70 % à moins de 50 km", "https://www.larousse.fr/smoke-e")], { historical: true });
+  const historicalEvidence = run(["--research-script", `--resume=${historicalEvidenceId}`, "--stop-after=truth"], withPages());
+
+  await test("production historique (sans repère) : aucune lecture, aucun juge, aucun rejet ni pause de preuve", () => {
+    assert(historicalEvidence.status === 0 && !/preuves lues/.test(historicalEvidence.stdout) && !/PREUVE À REVOIR/.test(historicalEvidence.stdout), historicalEvidence.stdout.slice(-600));
+    assert(!fs.existsSync(path.join(PROJECTS, historicalEvidenceId, "evidence.json")), "evidence.json écrit");
+    const truth = readEnvelope(historicalEvidenceId, "truth").data;
+    assert(truth.fact_evidence.checked === false && truth.facts[0].evidence.editorial_status === "not_checked" && truth.facts[0].evidence.technical_status === "not_fetched" && truth.rejected_count === 0, JSON.stringify(truth.fact_evidence));
+  });
+
+  fs.rmSync(evidencePages, { recursive: true, force: true });
+
   await test("--regenerate=script avec --stop-after=truth → refus avant toute production", () => {
     expectRefusal(
       run(

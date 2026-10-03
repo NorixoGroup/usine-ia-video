@@ -129,6 +129,50 @@ await test("block sans écart (dossier des fixtures) : aucun arrêt ; contrat re
   assert(refused, "mode inconnu accepté");
 });
 
+// Phase E : statuts de preuve, rejet à l'indice d'origine, priorité des pauses.
+const evidenceFor = (dossier, statuses) => ({
+  checked: true,
+  skip_reason: null,
+  counts: {},
+  offline_checks: [],
+  facts: dossier.key_facts.map((_, index) => ({
+    index,
+    editorial_status: statuses[index] ?? "not_checked",
+    technical_status: "all_read",
+    sources: [{ url: "https://www.bom.gov.au/x", technical_status: "fetched", http_status: 200, detail: null }],
+    elements: [],
+    quote: null,
+    reasons: [`raison ${index}`]
+  }))
+});
+const govDossier = withFacts([
+  { claim: "g", importance: "high", verification_status: "verified", sources: [src("https://www.bom.gov.au/g")] },
+  { claim: "m", importance: "medium", verification_status: "verified", sources: [src("https://www.bom.gov.au/m")] }
+]);
+
+await test("preuves : fait rejeté à son indice (dossier inchangé), pause en block sur un fait HIGH seulement, signalé en report", () => {
+  const block = buildTruthReport({ research: govDossier, title: CANONICAL_TITLE, enforcement: "block", evidenceEnforcement: "block", factEvidence: evidenceFor(govDossier, ["rejected", "supported"]) });
+  assert(block.facts[0].truth_status === "rejected" && block.rejected_count === 1 && block.stop.kind === "evidence_review", `${block.stop.kind} ${block.rejected_count}`);
+  assert(isDeepStrictEqual(block.research_dossier, govDossier) && validateTruthReport(block, govDossier).valid, validateTruthReport(block, govDossier).errors.join());
+  assert(renderTruthMarkdown(block).includes("## Faits rejetés (1)") && renderTruthMarkdown(block).includes("Pause — preuve à revoir"), "Markdown");
+  const medium = buildTruthReport({ research: govDossier, title: CANONICAL_TITLE, enforcement: "block", evidenceEnforcement: "block", factEvidence: evidenceFor(govDossier, ["supported", "rejected"]) });
+  assert(medium.stop.stopped === false && medium.rejected_count === 1, "un fait MEDIUM rejeté ne bloque pas");
+  const unverifiable = buildTruthReport({ research: govDossier, title: CANONICAL_TITLE, enforcement: "block", evidenceEnforcement: "block", factEvidence: evidenceFor(govDossier, ["unverifiable", "supported"]) });
+  assert(unverifiable.stop.kind === "evidence_unverifiable" && unverifiable.rejected_count === 0, unverifiable.stop.kind);
+  const report = buildTruthReport({ research: govDossier, title: CANONICAL_TITLE, enforcement: "block", evidenceEnforcement: "report", factEvidence: evidenceFor(govDossier, ["rejected", "supported"]) });
+  assert(report.stop.stopped === false && report.rejected_count === 1, "mode rapport");
+});
+
+await test("preuves : priorité hiérarchie > preuves > titre ; contrat refuse un rejet incohérent", () => {
+  const both = buildTruthReport({ research: rejectedDossier, title: CANONICAL_TITLE, enforcement: "block", evidenceEnforcement: "block", factEvidence: evidenceFor(rejectedDossier, ["rejected"]) });
+  assert(both.stop.kind === "rejected", both.stop.kind);
+  const evidenceFirst = buildTruthReport({ research: govDossier, title: CANONICAL_TITLE, enforcement: "block", evidenceEnforcement: "block", titleEnforcement: "block", factEvidence: evidenceFor(govDossier, ["rejected", "supported"]) });
+  assert(evidenceFirst.stop.kind === "evidence_review" && evidenceFirst.title.verdict === "not_demonstrated", evidenceFirst.stop.kind);
+  const forged = structuredClone(evidenceFirst);
+  forged.facts[0].truth_status = "retained";
+  assert(/truth_status incohérent avec la preuve/.test(validateTruthReport(forged, govDossier).errors.join()), "rejet incohérent accepté");
+});
+
 assert(networkGuard.attempts().length === 0, `NETWORK ATTEMPTS = ${networkGuard.attempts().length}`);
 console.log(`NETWORK ATTEMPTS = 0\nTests : ${passed} PASS / ${failed} FAIL`);
 process.exit(failed === 0 ? 0 : 1);
