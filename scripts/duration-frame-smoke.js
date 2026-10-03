@@ -1110,7 +1110,7 @@ await test("cadre narré : le hook et la conclusion traversent Visual, Asset, Vo
   );
   assert(
     JSON.stringify(Object.keys(result.read("production").artifact_sha256).sort()) ===
-      '["research.json","script.json","visual.json"]',
+      '["research.json","script.json","truth.json","visual.json"]',
     "scellés"
   );
 });

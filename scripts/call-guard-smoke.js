@@ -30,7 +30,8 @@ import {
   resetCallGuard,
   getCallGuardStatus,
   requestSha256,
-  redactSecrets
+  redactSecrets,
+  setCacheBypass
 } from "../src/services/call-guard.js";
 
 import { runResearchAgent } from "../src/agents/research.js";
@@ -1020,6 +1021,31 @@ await test("--real-calls-cap sans --mode=full, --accept-unresolved-calls sans re
   );
 });
 
+await test("--regenerate (D′1) : exige --resume et --mode=full, un seul agent, identifiants de --stop-after → refus avant toute production", () => {
+  expectGateRefusal(
+    runMvp(["--research-script", "--mode=full", "--real-calls-cap=3", "--regenerate=script"], ACK),
+    /--regenerate exige --resume et --mode=full/
+  );
+  expectGateRefusal(
+    runMvp(["--research-script", "--resume=prod-2026-01-01T00-00-00-000Z-aaaaaa", "--regenerate=script"], ACK),
+    /--regenerate exige --resume et --mode=full/
+  );
+  for (const value of ["visual", "asset", "quality", ""]) {
+    expectGateRefusal(
+      runMvp(["--research-script", "--resume=prod-2026-01-01T00-00-00-000Z-aaaaaa", "--mode=full", "--real-calls-cap=3", `--regenerate=${value}`], ACK),
+      /--regenerate invalide/
+    );
+  }
+  expectGateRefusal(
+    runMvp(["--research-script", "--resume=prod-2026-01-01T00-00-00-000Z-aaaaaa", "--mode=full", "--real-calls-cap=3", "--regenerate=script", "--regenerate=research"], ACK),
+    /un seul agent/
+  );
+  expectGateRefusal(
+    runMvp(["--research-script", "--resume=prod-2026-01-01T00-00-00-000Z-aaaaaa", "--mode=full", "--real-calls-cap=3", "--regenerate=script", "--stop-after=research"], ACK),
+    /arrêterait la production avant l'agent régénéré/
+  );
+});
+
 await test("mode test sans fixtures : aucun appel réel implicite, même avec une clé", () => {
   // Clé factice + ni fixtures ni NO_API : l'ancien code aurait tenté un
   // appel réel. La garde le refuse avant le SDK.
@@ -1092,6 +1118,39 @@ await test("--mode=full autorisé mais sous fixtures : échec fail-closed, aucun
 
 console.log("");
 console.log("--- 9. Garantie zéro API ---");
+
+await test("régénération (D′1) : cache contourné, appel compté, cache_bypass, ancienne entrée archivée ; puis cache normal", async () => {
+  await withGuard({ cap: 3, handler: (request, n) => okResponse(`réponse ${n}`) }, async ({ directory, calls }) => {
+    const first = await ask("question régénérée");
+    assert(calls.length === 1 && first.response.content[0].text === "réponse 1", "premier appel");
+
+    setCacheBypass(true);
+    let second;
+    try {
+      second = await ask("question régénérée");
+    } finally {
+      setCacheBypass(false);
+    }
+    assert(calls.length === 2 && second.response.content[0].text === "réponse 2", "le cache aurait dû être contourné");
+    assert(getCallGuardStatus().used === 2 && getCallGuardStatus().cache_hits === 0, JSON.stringify(getCallGuardStatus()));
+
+    const entries = readJournal(directory).entries;
+    assert(entries[0].status === "succeeded" && !("cache_bypass" in entries[0]), "appel ordinaire marqué");
+    assert(entries[1].status === "succeeded" && entries[1].cache_bypass === true, "cache_bypass absent du journal");
+
+    const hash = entries[1].request_sha256;
+    const archived = listFiles(path.join(directory, CACHE_DIR, "superseded"));
+    assert(archived.length === 1 && archived[0].endsWith(`${hash}.json`), `archive : ${archived}`);
+    assert(JSON.parse(fs.readFileSync(archived[0], "utf8")).result.response.content[0].text === "réponse 1", "ancienne réponse non conservée");
+    assert(JSON.parse(fs.readFileSync(path.join(directory, CACHE_DIR, `${hash}.json`), "utf8")).result.response.content[0].text === "réponse 2", "nouvelle réponse non mise en cache");
+
+    const third = await ask("question régénérée");
+    assert(calls.length === 2 && third.response.content[0].text === "réponse 2", "après l'exception, le cache doit servir la nouvelle réponse");
+    assert(readJournal(directory).entries[2].status === "cache_hit" && getCallGuardStatus().used === 2, "cache_hit attendu");
+  });
+
+  expectThrow(() => setCacheBypass(true), /aucune autorisation/);
+});
 
 await test("aucune sortie réseau ni appel SDK réel pendant le smoke", () => {
   assert(

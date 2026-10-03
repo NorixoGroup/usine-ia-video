@@ -11,6 +11,12 @@ import {
 } from "../agents/script.js";
 
 import {
+  buildTruthReport,
+  renderTruthMarkdown,
+  validateTruthReport
+} from "../agents/truth.js";
+
+import {
   runVisualDirector
 } from "../agents/visual-director.js";
 
@@ -75,7 +81,8 @@ import {
   createRealNarrationCallGuard,
   reconcileNarrationJournal,
   getCallGuardStatus,
-  redactSecrets
+  redactSecrets,
+  setCacheBypass
 } from "../services/call-guard.js";
 
 import {
@@ -88,12 +95,16 @@ import {
 } from "../utils/validate-script.js";
 
 import {
+  REUSABLE_AGENTS,
   STOP_AFTER_VALUES,
   acquireProductionLock,
   applyResume,
+  archiveRegeneratedArtifacts,
   describeMediaNeeds,
+  rollbackRegenerationCache,
   loadResumableProduction,
   planReuse,
+  planRegeneration,
   productionMode,
   sealAndWriteArtifact
 } from "./resume.js";
@@ -342,6 +353,84 @@ if (stopAfterRequested) {
   }
 }
 
+// Régénération volontaire d'un agent (D′1) : reprise en mode complet
+// uniquement, un seul agent, mêmes identifiants que --stop-after.
+const regenerateArgs = args.filter((value) => value.startsWith("--regenerate"));
+const regenerate = getArgument("regenerate");
+
+if (regenerateArgs.length > 0) {
+  if (regenerateArgs.length > 1) {
+    throw new Error("Orchestrateur : --regenerate n'accepte qu'un seul agent par exécution.");
+  }
+
+  if (!(resumeRequested && mode === "full")) {
+    throw new Error("Orchestrateur : --regenerate exige --resume et --mode=full.");
+  }
+
+  if (!REUSABLE_AGENTS.includes(regenerate)) {
+    throw new Error(
+      `Orchestrateur : --regenerate invalide "${regenerate ?? ""}". ` +
+      `Valeurs admises : ${REUSABLE_AGENTS.join(", ")}.`
+    );
+  }
+
+  if (stopAfter && STOP_AFTER_VALUES.indexOf(stopAfter) < STOP_AFTER_VALUES.indexOf(regenerate)) {
+    throw new Error(
+      `Orchestrateur : --stop-after=${stopAfter} arrêterait la production avant l'agent régénéré (${regenerate}).`
+    );
+  }
+}
+
+// Régénération transactionnelle : seul l'agent régénéré contourne le cache,
+// et seulement pendant son exécution. Son résultat est un candidat : il n'est
+// promu (archivage de la version active, puis écriture par l'appelant)
+// qu'après avoir passé tous ses gates. En cas de rejet, la version active,
+// ses scellés et son cache restent la référence.
+async function runAgent(agentId, run) {
+  if (regenerate !== agentId) {
+    return run();
+  }
+
+  const journalFile = path.join(productionDir, "calls.json");
+  const journalSeq = () => (fs.existsSync(journalFile) ? JSON.parse(fs.readFileSync(journalFile, "utf8")).entries : []);
+  const startSeq = journalSeq().length;
+  const history = production.resume_history.at(-1);
+  let candidate;
+
+  setCacheBypass(true);
+
+  try {
+    candidate = await run();
+  } catch (error) {
+    setCacheBypass(false);
+
+    const cache = rollbackRegenerationCache({
+      productionDir,
+      hashes: journalSeq().filter(entry => entry.seq > startSeq && entry.cache_bypass).map(entry => entry.request_sha256),
+      timestamp: regeneration.timestamp
+    });
+
+    Object.assign(production, structuredClone(regenerationSnapshot));
+    history.outcome = "rejected";
+    history.archived_artifacts = 0;
+    history.rejected_error = redactSecrets(error instanceof Error ? error.message : String(error)).slice(0, 500);
+    history.rejected_cache = cache.rejected;
+    regenerationRejected = true;
+
+    throw error;
+  } finally {
+    setCacheBypass(false);
+  }
+
+  history.outcome = "promoted";
+  history.archive = archiveRegeneratedArtifacts({ productionDir, production, regeneration });
+  console.log(
+    `    ✓ Régénération promue : ${regeneration.archived_artifacts} artefact(s) archivé(s) dans ${history.archive}`
+  );
+
+  return candidate;
+}
+
 // Profil de durée (R14A) et cadre narré (R14B). Sans option : profil
 // standard (25-30 min) et script historique, comme avant.
 const durationProfileRequested = args.some(
@@ -447,6 +536,9 @@ const production = resumed ? resumed.production : {
   created_at: new Date().toISOString(),
   status: "created",
   mode,
+  // Hiérarchie des sources (R20.4, phase B) : bloquante pour les nouvelles
+  // productions. Une production historique, sans ce champ, reste en rapport.
+  source_hierarchy_enforcement: "block",
   duration_profile: durationProfile.name,
   narrated_frame: narratedFrame,
 
@@ -576,6 +668,9 @@ if (!dryRun && !researchScriptMode) {
 // Verrou, garde des appels réels et état de reprise (mode
 // research-script uniquement).
 let reuse = {};
+let regeneration = null;
+let regenerationSnapshot = null;
+let regenerationRejected = false;
 
 function pauseIfRequested(agentId) {
   if (stopAfter !== agentId) {
@@ -591,6 +686,10 @@ function pauseIfRequested(agentId) {
   console.log("==============================================");
   console.log(` RESULTAT : PAUSE — après ${agentId}`);
   console.log(` État : projects/${production.id}/production.json`);
+
+  if (agentId === "truth") {
+    console.log(` Relecture : projects/${production.id}/truth-report.md`);
+  }
 
   if (["asset", "voice", "assembly"].includes(agentId)) {
     const needs = describeMediaNeeds({
@@ -622,6 +721,10 @@ if (researchScriptMode) {
 
   if (resumed) {
     reuse = planReuse({ productionDir, production });
+
+    if (regenerate) {
+      regeneration = planRegeneration({ reuse, regenerate });
+    }
   }
 
   // Une reprise real-narration peut avoir publié un MP3 validé juste avant
@@ -663,12 +766,31 @@ if (researchScriptMode) {
   }
 
   if (resumed) {
+    // État de référence restauré si la régénération est rejetée.
+    if (regeneration) {
+      regenerationSnapshot = structuredClone({
+        agents: production.agents,
+        status: production.status,
+        input: production.input,
+        ...(production.render ? { render: production.render } : {}),
+        ...(production.completed_at ? { completed_at: production.completed_at } : {}),
+        ...(production.paused_after ? { paused_after: production.paused_after, paused_at: production.paused_at } : {})
+      });
+    }
+
     applyResume({
       production,
       reuse,
       mediaDir,
-      render: renderBlock
+      render: renderBlock,
+      regeneration
     });
+
+    if (regeneration) {
+      console.log(
+        `Régénération : ${regeneration.agents.join(", ")} — version active conservée jusqu'à validation du candidat`
+      );
+    }
   }
 
   // Registre des scellés SHA-256 : présent dès le départ, y compris
@@ -757,12 +879,12 @@ if (dryRun) {
       researchState.started_at = new Date().toISOString();
       saveProduction();
 
-      const researchResult = await runResearchAgent({
+      const researchResult = await runAgent("research", () => runResearchAgent({
         title: production.input.title,
         prompt: production.input.prompt,
         testMode,
         durationProfile
-      });
+      }));
 
       sealAndWriteArtifact({
         productionDir,
@@ -798,6 +920,102 @@ if (dryRun) {
 
     pauseIfRequested("research");
 
+    // Truth Report : étape technique déterministe, recalculée à chaque
+    // exécution depuis le dossier Research scellé. Le Script ne lit plus
+    // research.json : il reçoit le dossier transmis par truth.json.
+    console.log("");
+    console.log("[truth] Truth Report");
+
+    production.truth = {
+      status: "running",
+      started_at: new Date().toISOString(),
+      completed_at: null,
+      error: null
+    };
+    saveProduction();
+
+    const truthData = buildTruthReport({
+      research: persistedResearch.data,
+      title: production.input.title,
+      enforcement: production.source_hierarchy_enforcement === "block" ? "block" : "report"
+    });
+    const truthValidation = validateTruthReport(truthData, persistedResearch.data);
+
+    if (!truthValidation.valid) {
+      throw new Error(
+        "Truth Report : contrat invalide. " +
+        truthValidation.errors.join(" | ")
+      );
+    }
+
+    sealAndWriteArtifact({
+      productionDir,
+      production,
+      filename: "truth.json",
+      data: {
+        agent: "truth",
+        mode,
+        data: truthData,
+        validation: truthValidation
+      },
+      save: saveProduction
+    });
+
+    fs.writeFileSync(
+      path.join(productionDir, "truth-report.md"),
+      renderTruthMarkdown(truthData)
+    );
+
+    console.log("    ✓ truth.json écrit (scellé)");
+    console.log("    ✓ truth-report.md écrit");
+
+    // Hiérarchie des sources en mode block : un rejet arrête la production
+    // (échec) ; un domaine inconnu la met en pause pour revue humaine. Après
+    // ajout d'une règle, la reprise recalcule le Truth Report sans appel.
+    if (truthData.stop.stopped && truthData.stop.kind === "rejected") {
+      throw new Error(
+        "Truth Report : hiérarchie des sources non respectée. " +
+        truthData.stop.reasons.join(" | ") +
+        ` Détail : projects/${production.id}/truth-report.md`
+      );
+    }
+
+    if (truthData.stop.stopped && truthData.stop.kind === "review_required") {
+      production.truth.status = "review_required";
+      production.truth.completed_at = new Date().toISOString();
+      production.truth.review = truthData.stop.review;
+      production.status = "paused";
+      production.paused_after = "truth";
+      production.paused_at = new Date().toISOString();
+      saveProduction();
+
+      console.log("");
+      console.log("==============================================");
+      console.log(" RESULTAT : PAUSE — REVUE REQUISE (hiérarchie des sources)");
+      for (const reason of truthData.stop.reasons) console.log(` ${reason}`);
+      console.log(` Action : ${truthData.stop.review[0].action}`);
+      console.log(` Relecture : projects/${production.id}/truth-report.md`);
+      console.log(` Reprise : node src/orchestrator/mvp.js --research-script --resume=${production.id}`);
+      console.log("==============================================");
+
+      process.exit(0);
+    }
+
+    production.truth.status = "completed";
+    production.truth.completed_at = new Date().toISOString();
+    delete production.truth.review;
+    saveProduction();
+
+    const persistedTruth = readJsonArtifact(productionDir, "truth.json");
+
+    if (!persistedTruth?.data?.research_dossier) {
+      throw new Error(
+        "Orchestrateur : truth.json ne contient pas research_dossier."
+      );
+    }
+
+    pauseIfRequested("truth");
+
     console.log("");
     console.log(
       `[${scriptState.order}/${production.agents.length}] script`
@@ -808,13 +1026,13 @@ if (dryRun) {
       scriptState.started_at = new Date().toISOString();
       saveProduction();
 
-      const scriptResult = await runScriptAgent({
-        research: persistedResearch.data,
+      const scriptResult = await runAgent("script", () => runScriptAgent({
+        research: persistedTruth.data.research_dossier,
         title: production.input.title,
         testMode,
         durationProfile,
         narratedFrame
-      });
+      }));
 
       sealAndWriteArtifact({
         productionDir,
@@ -882,11 +1100,11 @@ if (dryRun) {
       visualDirectorState.started_at = new Date().toISOString();
       saveProduction();
 
-      const visualResult = await runVisualDirector({
+      const visualResult = await runAgent("visual_director", () => runVisualDirector({
         script: persistedScript.data,
         testMode,
         durationProfile
-      });
+      }));
 
       sealAndWriteArtifact({
         productionDir,
@@ -1296,6 +1514,27 @@ if (dryRun) {
         ? error.message
         : String(error)
     );
+
+    // Régénération rejetée : la production est restaurée telle qu'elle était
+    // avant la tentative (statuts, scellés, cache) ; rien n'est dégradé.
+    if (regenerationRejected) {
+      saveProduction();
+
+      console.error("");
+      console.error("==============================================");
+      console.error(" RESULTAT : RÉGÉNÉRATION REJETÉE — version active conservée");
+      console.error(failureMessage);
+      console.error(` Candidat rejeté (cache) : ${production.resume_history.at(-1).rejected_cache ?? "aucun"}`);
+      console.error("==============================================");
+
+      process.exit(1);
+    }
+
+    if (production.truth?.status === "running") {
+      production.truth.status = "failed";
+      production.truth.completed_at = new Date().toISOString();
+      production.truth.error = failureMessage;
+    }
 
     if (production.render?.status === "running") {
       production.render.status = "failed";

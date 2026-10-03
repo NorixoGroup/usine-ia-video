@@ -306,6 +306,8 @@ function assertCommon(run) {
   // Aucun média, aucun fichier hors artefacts JSON attendus.
   const allowedFiles = [
     "production.json",
+    "truth.json",
+    "truth-report.md",
     ...PIPELINE.map(([, artifact]) => `${artifact}.json`)
   ];
 

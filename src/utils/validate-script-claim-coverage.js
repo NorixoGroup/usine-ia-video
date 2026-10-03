@@ -499,9 +499,11 @@ export async function validateScriptClaimCoverage(script) {
   // En mode complet, le garde est déjà configuré avant l'agent Script.
   // En mode fixture/local il est absent : l'estimation reste observable mais
   // ne consomme rien et ne requiert aucune autorisation.
+  // Seuls les lots sont réservés : les réparations éventuelles restent
+  // bornées appel par appel par le garde, et reprises depuis le cache.
   if (getCallGuardStatus().configured) {
     assertRealCallBudget({
-      calls: estimate.total_calls_max,
+      calls: estimate.batch_count,
       label: "validation batchée des claims"
     });
   }

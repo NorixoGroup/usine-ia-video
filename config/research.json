@@ -25,6 +25,88 @@
     "minimum_sources": 5,
     "target_sources": 8,
     "maximum_sources": 15,
-    "max_sources_per_fact": 2
+    "max_sources_per_fact": 2,
+    "source_tiers": {
+      "minimum_rank_for_high_facts": 2,
+      "categories": {
+        "government": { "tier": 1, "label": "Gouvernement" },
+        "official_body": { "tier": 1, "label": "Organisme officiel" },
+        "university": { "tier": 1, "label": "Université" },
+        "research_institute": { "tier": 1, "label": "Institut de recherche" },
+        "scientific_publication": { "tier": 1, "label": "Publication scientifique" },
+        "reference_media": { "tier": 2, "label": "Média de référence" },
+        "editorial_encyclopedia": { "tier": 2, "label": "Encyclopédie éditoriale" },
+        "official_technical_documentation": { "tier": 2, "label": "Documentation technique officielle" },
+        "company": { "tier": 3, "label": "Entreprise" },
+        "commercial_documentation": { "tier": 3, "label": "Documentation commerciale" },
+        "research_firm": { "tier": 3, "label": "Cabinet d'étude identifié" },
+        "sponsored_content": { "tier": 3, "label": "Contenu sponsorisé identifié" },
+        "wikipedia": { "tier": 4, "label": "Wikipédia" },
+        "blog": { "tier": 5, "label": "Blog" },
+        "personal_site": { "tier": 5, "label": "Site personnel" },
+        "popular_science": { "tier": 5, "label": "Vulgarisation" },
+        "forum": { "tier": 6, "label": "Forum" }
+      },
+      "path_rules": [
+        { "contains": "partner-content", "category": "sponsored_content" },
+        { "contains": "sponsored", "category": "sponsored_content" },
+        { "contains": "publi-redactionnel", "category": "sponsored_content" },
+        { "contains": "contenu-sponsorise", "category": "sponsored_content" }
+      ],
+      "domain_exceptions": {
+        "insee.fr": "official_body",
+        "un.org": "official_body",
+        "oecd.org": "official_body",
+        "worldbank.org": "official_body",
+        "cnrs.fr": "research_institute",
+        "ird.fr": "research_institute",
+        "csiro.au": "research_institute",
+        "doi.org": "scientific_publication",
+        "nature.com": "scientific_publication",
+        "science.org": "scientific_publication",
+        "britannica.com": "editorial_encyclopedia",
+        "universalis.fr": "editorial_encyclopedia",
+        "larousse.fr": "editorial_encyclopedia",
+        "bbc.com": "reference_media",
+        "bbc.co.uk": "reference_media",
+        "abc.net.au": "reference_media",
+        "lemonde.fr": "reference_media",
+        "nationalgeographic.com": "reference_media",
+        "nationalgeographic.fr": "reference_media",
+        "wikipedia.org": "wikipedia",
+        "wikimedia.org": "wikipedia",
+        "medium.com": "blog",
+        "substack.com": "blog",
+        "reddit.com": "forum",
+        "quora.com": "forum"
+      },
+      "excluded_suffixes": [
+        ".act.edu.au",
+        ".nsw.edu.au",
+        ".nt.edu.au",
+        ".qld.edu.au",
+        ".sa.edu.au",
+        ".tas.edu.au",
+        ".vic.edu.au",
+        ".wa.edu.au"
+      ],
+      "suffix_rules": [
+        { "suffix": ".gouv.fr", "category": "government" },
+        { "suffix": ".gov", "category": "government" },
+        { "suffix": ".gov.au", "category": "government" },
+        { "suffix": ".gov.uk", "category": "government" },
+        { "suffix": ".gc.ca", "category": "government" },
+        { "suffix": ".europa.eu", "category": "official_body" },
+        { "suffix": ".int", "category": "official_body" },
+        { "suffix": ".edu", "category": "university" },
+        { "suffix": ".edu.au", "category": "university" },
+        { "suffix": ".ac.uk", "category": "university" }
+      ],
+      "prefix_rules": [
+        { "prefix": "forum.", "category": "forum" },
+        { "prefix": "forums.", "category": "forum" },
+        { "prefix": "blog.", "category": "blog" }
+      ]
+    }
   }
 }

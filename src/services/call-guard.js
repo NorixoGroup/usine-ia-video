@@ -389,6 +389,23 @@ export function resetCallGuard() {
   state = null;
 }
 
+// Régénération volontaire (--regenerate) : le temps d'un seul agent, le
+// cache n'est pas lu. Chaque appel part réellement, compte dans le plafond,
+// est marqué cache_bypass dans le journal ; l'ancienne entrée de cache est
+// archivée dans call-cache/superseded/<horodatage>/, jamais écrasée.
+export function setCacheBypass(enabled) {
+  if (!state) {
+    throw new Error(
+      "Régénération : aucune autorisation d'appels réels configurée."
+    );
+  }
+
+  state.cacheBypass = enabled === true;
+  state.supersededStamp = state.cacheBypass
+    ? new Date().toISOString().replace(/[:.]/g, "-")
+    : null;
+}
+
 export function getCallGuardStatus() {
   return state
     ? {
@@ -503,7 +520,7 @@ export function beginRealCall(request) {
   assertAckSet();
 
   const hash = requestSha256(request);
-  const cached = readCache(hash);
+  const cached = state.cacheBypass ? null : readCache(hash);
 
   if (cached) {
     const seq = state.journal.entries.length + 1;
@@ -558,7 +575,8 @@ export function beginRealCall(request) {
       : 0,
     has_tools: Array.isArray(request.tools) && request.tools.length > 0,
     started_at: new Date().toISOString(),
-    ended_at: null
+    ended_at: null,
+    ...(state.cacheBypass ? { cache_bypass: true } : {})
   };
 
   state.used += 1;
@@ -609,6 +627,18 @@ export function endRealCall(reservation, result) {
   fs.mkdirSync(path.join(state.productionDir, CACHE_DIR), {
     recursive: true
   });
+
+  if (reservation.entry.cache_bypass && fs.existsSync(cacheFile(reservation.hash))) {
+    const archive = path.join(
+      state.productionDir, CACHE_DIR, "superseded", state.supersededStamp
+    );
+
+    fs.mkdirSync(archive, { recursive: true });
+    fs.renameSync(
+      cacheFile(reservation.hash),
+      path.join(archive, `${reservation.hash}.json`)
+    );
+  }
 
   atomicWrite(
     cacheFile(reservation.hash),

@@ -16,6 +16,7 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 import { writeJsonArtifact } from "./artifacts.js";
+import { CACHE_DIR } from "../services/call-guard.js";
 
 export const AGENT_ORDER = [
   "research",
@@ -27,8 +28,10 @@ export const AGENT_ORDER = [
   "quality"
 ];
 
-// Agents qu'on peut arrêter avec --stop-after (Quality est la fin).
-export const STOP_AFTER_VALUES = AGENT_ORDER.slice(0, 6);
+// Étapes après lesquelles on peut s'arrêter avec --stop-after (Quality est
+// la fin). « truth » est l'étape technique du Truth Report, entre Research
+// et Script ; ce n'est pas un agent (AGENT_ORDER inchangé).
+export const STOP_AFTER_VALUES = ["research", "truth", ...AGENT_ORDER.slice(1, 6)];
 
 // Agents dont l'artefact est scellé et réutilisable.
 export const REUSABLE_AGENTS = ["research", "script", "visual_director"];
@@ -250,9 +253,116 @@ export function planReuse({ productionDir, production }) {
   return reuse;
 }
 
+// Régénération volontaire (--regenerate=<agent>), transactionnelle : la
+// version active reste en place pendant la tentative ; le candidat n'est
+// promu (archivage de l'ancienne version) qu'après validation complète.
+// L'agent visé et les agents réutilisables suivants sont recalculés. Calcul
+// pur, sans écriture : l'agent doit avoir un artefact scellé valide.
+export function planRegeneration({ reuse, regenerate }) {
+  const index = REUSABLE_AGENTS.indexOf(regenerate);
+
+  if (index === -1) {
+    fail(
+      `--regenerate inconnu "${regenerate}". ` +
+      `Valeurs admises : ${REUSABLE_AGENTS.join(", ")}.`
+    );
+  }
+
+  if (reuse[regenerate] !== true) {
+    fail(
+      `--regenerate=${regenerate} : aucun artefact scellé valide à régénérer.`
+    );
+  }
+
+  const agents = REUSABLE_AGENTS.slice(index).filter(id => reuse[id] === true);
+
+  for (const id of agents) {
+    reuse[id] = false;
+  }
+
+  return {
+    regenerated: regenerate,
+    reason: "manual_regenerate",
+    agents,
+    files: agents.map(id => ARTIFACT_OF[id]),
+    archived_artifacts: agents.length,
+    timestamp: new Date().toISOString()
+  };
+}
+
+// Promotion : appelée seulement quand le candidat a passé tous ses gates.
+// Archive les artefacts remplacés dans superseded/<horodatage>/ avec leurs
+// scellés ; rien n'est supprimé. Les scellés sont retirés du registre.
+export function archiveRegeneratedArtifacts({ productionDir, production, regeneration }) {
+  const archive = path.join(
+    productionDir,
+    "superseded",
+    regeneration.timestamp.replace(/[:.]/g, "-")
+  );
+  const seals = {};
+
+  fs.mkdirSync(archive, { recursive: true });
+
+  for (const filename of regeneration.files) {
+    seals[filename] = production.artifact_sha256[filename];
+    fs.renameSync(path.join(productionDir, filename), path.join(archive, filename));
+    delete production.artifact_sha256[filename];
+  }
+
+  fs.writeFileSync(
+    path.join(archive, "artifact_sha256.json"),
+    JSON.stringify(seals, null, 2) + "\n"
+  );
+
+  return path.relative(productionDir, archive);
+}
+
+// Rejet : les entrées de cache écrites par la tentative (appels marqués
+// cache_bypass) sont déplacées dans call-cache/rejected/<horodatage>/ pour
+// diagnostic ; les entrées qu'elles avaient remplacées reprennent leur
+// place. Le cache redevient celui de la version active.
+export function rollbackRegenerationCache({ productionDir, hashes, timestamp }) {
+  const cacheDir = path.join(productionDir, CACHE_DIR);
+  const rejected = path.join(cacheDir, "rejected", timestamp.replace(/[:.]/g, "-"));
+  const supersededRoot = path.join(cacheDir, "superseded");
+  const restored = [];
+
+  for (const hash of new Set(hashes)) {
+    const active = path.join(cacheDir, `${hash}.json`);
+
+    if (fs.existsSync(active)) {
+      fs.mkdirSync(rejected, { recursive: true });
+      fs.renameSync(active, path.join(rejected, `${hash}.json`));
+    }
+
+    // Seules les archives créées pendant cette tentative sont considérées ;
+    // l'entrée remplacée est la plus récente d'entre elles.
+    const since = timestamp.replace(/[:.]/g, "-");
+    const previous = (fs.existsSync(supersededRoot) ? fs.readdirSync(supersededRoot).filter(dir => dir >= since).sort().reverse() : [])
+      .map(dir => path.join(supersededRoot, dir, `${hash}.json`))
+      .find(file => fs.existsSync(file));
+
+    if (previous) {
+      fs.renameSync(previous, active);
+      restored.push(hash);
+
+      const dir = path.dirname(previous);
+
+      if (fs.readdirSync(dir).length === 0) {
+        fs.rmdirSync(dir);
+      }
+    }
+  }
+
+  return {
+    rejected: fs.existsSync(rejected) ? path.relative(productionDir, rejected) : null,
+    restored
+  };
+}
+
 // Applique la reprise à l'état en mémoire (saveProduction est laissé à
 // l'appelant). Lève AVANT toute mutation si la reprise est incohérente.
-export function applyResume({ production, reuse, mediaDir, render }) {
+export function applyResume({ production, reuse, mediaDir, render, regeneration = null }) {
   if (production.render && !render) {
     fail(
       "la production a été créée avec --render : reprendre avec --render."
@@ -312,6 +422,13 @@ export function applyResume({ production, reuse, mediaDir, render }) {
 
   if (render) {
     production.render = render;
+  }
+
+  if (regeneration) {
+    history.regenerated = regeneration.regenerated;
+    history.reason = regeneration.reason;
+    history.archived_artifacts = regeneration.archived_artifacts;
+    history.timestamp = regeneration.timestamp;
   }
 
   production.resume_history ??= [];

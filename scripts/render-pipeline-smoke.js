@@ -362,6 +362,8 @@ try {
         "render.json",
         "research.json",
         "script.json",
+        "truth-report.md",
+        "truth.json",
         "visual.json",
         "voice.json"
       ]),

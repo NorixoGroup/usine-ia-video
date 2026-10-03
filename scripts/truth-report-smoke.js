@@ -86,6 +86,44 @@ await test("Markdown : toutes les rubriques de relecture, contrôles à venir si
   assert(md.includes("Politique des sources : non conforme (rapport seulement") && md.includes("- minimum_sources : non conforme — 0 source(s) distincte(s), minimum 5"), "politique des sources");
 });
 
+// Phase B : hiérarchie des sources, rapport (historique) ou block (nouvelle).
+const src = url => ({ title: "t", url, publisher: "p", source_type: "secondary", supports_claim: "c" });
+const withFacts = keyFacts => ({ ...structuredClone(research), key_facts: keyFacts });
+const unknownDossier = withFacts([{ claim: "u", importance: "high", verification_status: "verified", sources: [src("https://inconnu.example/u")] }]);
+const rejectedDossier = withFacts([{ claim: "w", importance: "high", verification_status: "verified", sources: [src("https://fr.wikipedia.org/wiki/W")] }]);
+
+await test("hiérarchie : rang et règle par source, meilleur rang par fait, mode report par défaut", () => {
+  const report = buildTruthReport({ research: rejectedDossier, title: CANONICAL_TITLE });
+  assert(report.source_hierarchy.enforcement === "report" && report.stop.stopped === false, "mode par défaut");
+  assert(report.sources[0].tier === 4 && report.sources[0].category === "wikipedia" && /wikipedia.org/.test(report.sources[0].matched_rule), JSON.stringify(report.sources[0]));
+  assert(report.facts[0].best_rank === 4 && report.facts[0].hierarchy_status === "non_compliant", JSON.stringify(report.facts[0]));
+  assert(isDeepStrictEqual(report.research_dossier, rejectedDossier), "dossier modifié");
+  assert(validateTruthReport(report, rejectedDossier).valid, "contrat");
+});
+
+await test("block : domaine inconnu → pause revue requise (domaine, raison, action) ; Wikipédia seule → rejet", () => {
+  const review = buildTruthReport({ research: unknownDossier, title: CANONICAL_TITLE, enforcement: "block" });
+  assert(review.stop.stopped && review.stop.kind === "review_required" && review.rejected_count === 0, JSON.stringify(review.stop));
+  assert(review.stop.review[0].domains.join() === "inconnu.example" && review.stop.review[0].reason && review.stop.review[0].action, "détail de revue");
+  const md = renderTruthMarkdown(review);
+  assert(md.includes("**Unknown — review required** : inconnu.example") && md.includes("Pause — revue requise") && md.includes("Action attendue"), "Markdown revue");
+  const rejectedReport = buildTruthReport({ research: rejectedDossier, title: CANONICAL_TITLE, enforcement: "block" });
+  assert(rejectedReport.stop.stopped && rejectedReport.stop.kind === "rejected" && /rang ≤ 2/.test(rejectedReport.stop.reasons[0]), JSON.stringify(rejectedReport.stop));
+  assert(renderTruthMarkdown(rejectedReport).includes("Arrêt : la hiérarchie des sources n'est pas respectée."), "Markdown rejet");
+  for (const item of [review, rejectedReport]) assert(validateTruthReport(item, item.research_dossier).valid, "contrat block");
+});
+
+await test("block sans écart (dossier des fixtures) : aucun arrêt ; contrat refuse un arrêt hors block", () => {
+  const block = buildTruthReport({ research, title: CANONICAL_TITLE, enforcement: "block" });
+  assert(block.stop.stopped === false && block.source_hierarchy.status === "compliant", JSON.stringify(block.source_hierarchy.status));
+  const forged = structuredClone(buildTruthReport({ research: unknownDossier, title: CANONICAL_TITLE, enforcement: "block" }));
+  forged.source_hierarchy.enforcement = "report";
+  assert(/arrêt impossible hors mode block/.test(validateTruthReport(forged, unknownDossier).errors.join()), "arrêt hors block accepté");
+  let refused = false;
+  try { buildTruthReport({ research, title: CANONICAL_TITLE, enforcement: "strict" }); } catch { refused = true; }
+  assert(refused, "mode inconnu accepté");
+});
+
 assert(networkGuard.attempts().length === 0, `NETWORK ATTEMPTS = ${networkGuard.attempts().length}`);
 console.log(`NETWORK ATTEMPTS = 0\nTests : ${passed} PASS / ${failed} FAIL`);
 process.exit(failed === 0 ? 0 : 1);

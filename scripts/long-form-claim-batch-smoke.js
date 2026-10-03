@@ -15,6 +15,11 @@ import {
   getCallGuardStatus,
   resetCallGuard
 } from "../src/services/call-guard.js";
+import Anthropic from "@anthropic-ai/sdk";
+import { getAnthropicFixture } from "../src/fixtures/anthropic.js";
+import { CANONICAL_PROMPT, CANONICAL_TITLE } from "../src/fixtures/anthropic-dataset.js";
+import { runResearchAgent } from "../src/agents/research.js";
+import { runScriptAgent } from "../src/agents/script.js";
 
 if (process.env.NO_API !== "1") throw new Error("NO_API=1 obligatoire.");
 
@@ -102,6 +107,87 @@ await test("budget suffisant + fixtures → PASS logique, 48 résultats stables"
   assert(result.valid && result.segments.length === 48, JSON.stringify(result.errors));
   assert(result.estimate.batch_count === 2 && result.estimate.total_calls_max === 98, JSON.stringify(result.estimate));
   assert(result.segments.map(item => item.label).at(-1) === "sections[5].segments[7]", "ordre source instable");
+});
+
+// R20.4 D1 — réservation progressive : seuls les lots sont réservés ; les
+// réparations sont bornées appel par appel par le garde et reprises depuis
+// le cache. Le SDK est simulé en mémoire (réponses des fixtures) pour que
+// chaque appel traverse le vrai garde et le vrai cache, sans réseau.
+async function withRealGuard(scenario, productionDir, cap, fn) {
+  const previous = { ...process.env };
+  const sdkCalls = [];
+  try {
+    delete process.env.NO_API;
+    delete process.env.ANTHROPIC_FIXTURES;
+    process.env.PIPELINE_REAL_CALLS_ACK = "1";
+    process.env.ANTHROPIC_FIXTURE_SCENARIO = scenario;
+    process.env.ANTHROPIC_API_KEY ??= `sk-ant-test-${"x".repeat(60)}`;
+    Anthropic.Messages.prototype.create = async function (request) {
+      process.env.ANTHROPIC_FIXTURES = "1";
+      try {
+        sdkCalls.push(request.system.slice(0, 40));
+        return getAnthropicFixture({ system: request.system, messages: request.messages, tools: request.tools }).response;
+      } finally {
+        delete process.env.ANTHROPIC_FIXTURES;
+      }
+    };
+    configureCallGuard({ productionDir, cap });
+    return await fn(sdkCalls);
+  } finally {
+    Anthropic.Messages.prototype.create = networkGuard.sdkMessagesCreate;
+    resetCallGuard();
+    for (const key of Object.keys(process.env)) if (!(key in previous)) delete process.env[key];
+    Object.assign(process.env, previous);
+  }
+}
+
+const journal = dir => JSON.parse(fs.readFileSync(path.join(dir, "calls.json"), "utf8")).entries;
+const countStatus = (dir, status) => journal(dir).filter(entry => entry.status === status).length;
+
+process.env.ANTHROPIC_FIXTURES = "1";
+const fixtureResearch = (await runResearchAgent({ title: CANONICAL_TITLE, prompt: CANONICAL_PROMPT, testMode: true })).data;
+delete process.env.ANTHROPIC_FIXTURES;
+
+await test("D1 : plafond égal aux appels nécessaires (génération + 1 lot) → PASS sans réparation", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r20-d1-happy-"));
+  try {
+    await withRealGuard("happy", dir, 2, async sdkCalls => {
+      const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
+      const estimate = result.claim_coverage_validation.estimate;
+      assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
+      assert(estimate.batch_count === 1 && estimate.total_calls_max > 2, `estimate conservé : ${JSON.stringify(estimate)}`);
+      assert(getCallGuardStatus().used === 2 && sdkCalls.length === 2, `appels : ${getCallGuardStatus().used}`);
+      assert(countStatus(dir, "succeeded") === 2 && countStatus(dir, "cache_hit") === 0, JSON.stringify(journal(dir)));
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("D1 : plafond atteint pendant une réparation → arrêt propre, jamais au-delà du plafond", async () => {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r20-d1-stop-"));
+  try {
+    await withRealGuard("script-coverage-repair", dir, 3, async sdkCalls => {
+      let error;
+      try { await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true }); } catch (caught) { error = caught; }
+      assert(error && /Plafond d'appels réels atteint \(3\)/.test(error.message), error?.message);
+      assert(getCallGuardStatus().used === 3 && sdkCalls.length === 3, `appels : ${getCallGuardStatus().used} / SDK ${sdkCalls.length}`);
+      assert(countStatus(dir, "succeeded") === 3 && countStatus(dir, "started") === 0, JSON.stringify(journal(dir)));
+    });
+
+    await test("D1 : reprise → génération, lot et réparation servis par le cache, seul le recontrôle part", async () => {
+      await withRealGuard("script-coverage-repair", dir, 1, async sdkCalls => {
+        const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
+        assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
+        assert(result.claim_coverage_validation.segments[0].repaired === true, "réparation attendue");
+        assert(getCallGuardStatus().used === 1 && getCallGuardStatus().cache_hits === 3, JSON.stringify(getCallGuardStatus()));
+        assert(sdkCalls.length === 1, `SDK appelé ${sdkCalls.length} fois`);
+        assert(countStatus(dir, "cache_hit") === 3 && countStatus(dir, "succeeded") === 4, JSON.stringify(journal(dir)));
+      });
+    });
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
 });
 
 assert(networkGuard.attempts().length === 0, `NETWORK ATTEMPTS = ${networkGuard.attempts().length}`);

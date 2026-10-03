@@ -17,6 +17,15 @@ import crypto from "node:crypto";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
+import os from "node:os";
+import {
+  applyResume,
+  archiveRegeneratedArtifacts,
+  planRegeneration,
+  planReuse,
+  rollbackRegenerationCache,
+  sealAndWriteArtifact
+} from "../src/orchestrator/resume.js";
 import {
   createMediaFixtureRoot,
   generateCanonicalMediaSet,
@@ -249,7 +258,7 @@ try {
         JSON.stringify([
           "assembly.json", "assets.json", "production.json",
           "quality.json", "research.json", "script.json",
-          "visual.json", "voice.json"
+          "truth-report.md", "truth.json", "visual.json", "voice.json"
         ]),
       "fichiers inattendus"
     );
@@ -266,7 +275,7 @@ try {
 
     assert(
       JSON.stringify(Object.keys(seals).sort()) ===
-        JSON.stringify(["research.json", "script.json", "visual.json"]),
+        JSON.stringify(["research.json", "script.json", "truth.json", "visual.json"]),
       `scellés : ${Object.keys(seals)}`
     );
 
@@ -331,7 +340,7 @@ try {
       JSON.stringify(Object.keys(pausedBefore).sort()) ===
         JSON.stringify([
           "assets.json", "production.json", "research.json",
-          "script.json", "visual.json", "voice.json"
+          "script.json", "truth-report.md", "truth.json", "visual.json", "voice.json"
         ]),
       `fichiers : ${Object.keys(pausedBefore)}`
     );
@@ -443,7 +452,7 @@ try {
         JSON.stringify([
           "assembly.json", "assets.json", "production.json",
           "quality.json", "render.json", "research.json",
-          "script.json", "visual.json", "voice.json"
+          "script.json", "truth-report.md", "truth.json", "visual.json", "voice.json"
         ]),
       `fichiers : ${listDirectory(directory)}`
     );
@@ -492,7 +501,7 @@ try {
     assert(production.agents.find(a => a.id === "script").status === "failed", "script");
     assert(!("script.json" in failedBefore), "script.json écrit pour un échec");
     assert(
-      Object.keys(production.artifact_sha256).join() === "research.json",
+      Object.keys(production.artifact_sha256).join() === "research.json,truth.json",
       `scellés : ${Object.keys(production.artifact_sha256)}`
     );
   });
@@ -531,6 +540,119 @@ try {
   await test("--stop-after=script : pause après le Script", () => {
     assert(base.status === 0, `exit ${base.status}`);
     assert(readProduction(base.productionId).paused_after === "script", "paused_after");
+  });
+
+  const truthPause = run(["--research-script", "--stop-after=truth"], fixtures());
+
+  await test("--stop-after=truth : pause après le Truth Report, Script non lancé, rapport indiqué", () => {
+    assert(truthPause.status === 0, `exit ${truthPause.status}\n${truthPause.stderr}`);
+    const production = readProduction(truthPause.productionId);
+    assert(production.status === "paused" && production.paused_after === "truth", `${production.status} ${production.paused_after}`);
+    assert(production.truth?.status === "completed", JSON.stringify(production.truth));
+    assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
+    assert(
+      JSON.stringify(listDirectory(path.join(PROJECTS, truthPause.productionId))) ===
+        JSON.stringify(["production.json", "research.json", "truth-report.md", "truth.json"]),
+      listDirectory(path.join(PROJECTS, truthPause.productionId)).join()
+    );
+    assert(truthPause.stdout.includes("truth-report.md"), "rapport non indiqué");
+  });
+
+  await test("reprise après --stop-after=truth : Research réutilisé, Truth recalculé à l'identique, production terminée", () => {
+    const truthFile = path.join(PROJECTS, truthPause.productionId, "truth.json");
+    const before = sha256(truthFile);
+    const resumed = run(["--research-script", `--resume=${truthPause.productionId}`], fixtures());
+    assert(resumed.status === 0, `exit ${resumed.status}\n${resumed.stderr}`);
+    assert(/Research RÉUTILISÉ/.test(resumed.stdout), "Research non réutilisé");
+    assert(sha256(truthFile) === before, "truth.json non déterministe");
+    const production = readProduction(truthPause.productionId);
+    assert(production.status === FINAL_STATUS, production.status);
+    assert(production.artifact_sha256["truth.json"] === before, "scellé truth.json");
+  });
+
+  // Hiérarchie des sources (R20.4, phase B) : bloquante pour les nouvelles
+  // productions, rapport seulement pour les productions historiques.
+  await test("nouvelle production : marquée source_hierarchy_enforcement = block", () => {
+    assert(readProduction(truthPause.productionId).source_hierarchy_enforcement === "block", "repère absent");
+  });
+
+  // Remplace le dossier Research d'une production en pause après Research
+  // par un dossier contrôlé, avec un scellé valide (même sérialisation).
+  function sealResearch(productionId, keyFacts, { historical = false } = {}) {
+    const envelope = readEnvelope(productionId, "research");
+    envelope.data = { ...envelope.data, key_facts: keyFacts };
+    const content = JSON.stringify(envelope, null, 2) + "\n";
+    fs.writeFileSync(path.join(PROJECTS, productionId, "research.json"), content);
+    const production = readProduction(productionId);
+    production.artifact_sha256["research.json"] = crypto.createHash("sha256").update(content).digest("hex");
+    if (historical) delete production.source_hierarchy_enforcement;
+    writeProduction(productionId, production);
+  }
+
+  const hierarchySource = (n, url) => ({ title: `Source ${n}`, url, publisher: `Éditeur ${n}`, source_type: "secondary", supports_claim: `Confirme ${n}` });
+  const unknownFact = { claim: "Fait HIGH appuyé par un domaine non reconnu", importance: "high", verification_status: "verified", sources: [hierarchySource(1, "https://domaine-inconnu-smoke.example/page")] };
+  const wikipediaFact = { claim: "Fait HIGH appuyé seulement par Wikipédia", importance: "high", verification_status: "verified", sources: [hierarchySource(2, "https://fr.wikipedia.org/wiki/Smoke")] };
+
+  const reviewRun = run(["--research-script", "--stop-after=research"], fixtures());
+  sealResearch(reviewRun.productionId, [unknownFact]);
+  const reviewPause = run(["--research-script", `--resume=${reviewRun.productionId}`], fixtures());
+
+  await test("nouvelle production, domaine inconnu sur un fait HIGH : pause « revue requise », ni rejet ni échec, Script non lancé", () => {
+    assert(reviewPause.status === 0, `exit ${reviewPause.status}\n${reviewPause.stderr}`);
+    assert(/REVUE REQUISE/.test(reviewPause.stdout) && reviewPause.stdout.includes("domaine-inconnu-smoke.example"), reviewPause.stdout.slice(-800));
+    const production = readProduction(reviewRun.productionId);
+    assert(production.status === "paused" && production.paused_after === "truth", `${production.status} ${production.paused_after}`);
+    assert(production.truth.status === "review_required" && production.truth.review[0].domains.join() === "domaine-inconnu-smoke.example", JSON.stringify(production.truth));
+    assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
+    const truth = readEnvelope(reviewRun.productionId, "truth").data;
+    assert(truth.stop.stopped && truth.stop.kind === "review_required", JSON.stringify(truth.stop));
+    const md = fs.readFileSync(path.join(PROJECTS, reviewRun.productionId, "truth-report.md"), "utf8");
+    assert(md.includes("**Unknown — review required** : domaine-inconnu-smoke.example") && md.includes("Action :"), "rapport");
+    assert(reviewPause.blocked === 0, "réseau");
+  });
+
+  await test("reprise d'une revue sans décision : Truth Report recalculé sans appel, toujours en pause", () => {
+    const again = run(["--research-script", `--resume=${reviewRun.productionId}`], fixtures());
+    assert(again.status === 0 && /Research RÉUTILISÉ/.test(again.stdout) && /REVUE REQUISE/.test(again.stdout), `exit ${again.status}\n${again.stderr}`);
+    assert(readProduction(reviewRun.productionId).truth.status === "review_required", "statut");
+    assert(again.blocked === 0, "réseau");
+  });
+
+  const historicalRun = run(["--research-script", "--stop-after=research"], fixtures());
+  sealResearch(historicalRun.productionId, [unknownFact, wikipediaFact], { historical: true });
+  const historicalTruth = run(["--research-script", `--resume=${historicalRun.productionId}`, "--stop-after=truth"], fixtures());
+
+  await test("production historique (sans repère) : écarts seulement signalés, aucune pause ni échec", () => {
+    assert(historicalTruth.status === 0, `exit ${historicalTruth.status}\n${historicalTruth.stderr}`);
+    assert(!/REVUE REQUISE/.test(historicalTruth.stdout), "pause de revue sur une production historique");
+    const production = readProduction(historicalRun.productionId);
+    assert(production.truth.status === "completed" && production.paused_after === "truth", JSON.stringify(production.truth));
+    const truth = readEnvelope(historicalRun.productionId, "truth").data;
+    assert(truth.source_hierarchy.enforcement === "report" && truth.source_hierarchy.status === "non_compliant" && truth.stop.stopped === false, JSON.stringify(truth.source_hierarchy.status));
+  });
+
+  const rejectRun = run(["--research-script", "--stop-after=research"], fixtures());
+  sealResearch(rejectRun.productionId, [wikipediaFact]);
+  const rejected = run(["--research-script", `--resume=${rejectRun.productionId}`], fixtures());
+
+  await test("nouvelle production, fait HIGH sans source de rang ≤ 2 ni domaine inconnu : échec au Truth Report, Script non lancé", () => {
+    assert(rejected.status === 1, `exit ${rejected.status}`);
+    assert(/hiérarchie des sources non respectée/.test(rejected.stderr), rejected.stderr.slice(-600));
+    const production = readProduction(rejectRun.productionId);
+    assert(production.status === "failed" && production.truth.status === "failed", `${production.status} ${production.truth.status}`);
+    assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
+    assert(fs.existsSync(path.join(PROJECTS, rejectRun.productionId, "truth-report.md")), "rapport absent");
+    assert(rejected.blocked === 0, "réseau");
+  });
+
+  await test("--regenerate=script avec --stop-after=truth → refus avant toute production", () => {
+    expectRefusal(
+      run(
+        ["--research-script", "--resume=prod-2099-01-01T00-00-00-000Z-abcdef", "--mode=full", "--real-calls-cap=3", "--regenerate=script", "--stop-after=truth"],
+        ACK
+      ),
+      /arrêterait la production avant l'agent régénéré/
+    );
   });
 
   await test("identifiant inconnu, invalide ou hors projects/ → refus", () => {
@@ -922,6 +1044,121 @@ try {
       !listDirectory(path.join(PROJECTS, fullFailed.productionId)).includes(".lock"),
       "verrou laissé"
     );
+  });
+
+  // ----------------------------------------------------------------
+  console.log("");
+  console.log("--- 6b. Régénération volontaire (D′1) ---");
+
+  // Production complète simulée en mémoire : agents 1-3 scellés, puis
+  // régénération, archivage et reprise ordinaire. Aucun appel, aucun réseau.
+  function sealedProduction() {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d1-regenerate-"));
+    const production = {
+      id: "prod-2026-01-01T00-00-00-000Z-aaaaaa",
+      mode: "full",
+      status: "paused",
+      input: { title: "Titre", prompt: "Consigne" },
+      artifact_sha256: {},
+      agents: AGENTS.map(id => ({ id, status: "pending", started_at: null, completed_at: null, error: null }))
+    };
+    const save = () => fs.writeFileSync(path.join(dir, "production.json"), JSON.stringify(production, null, 2) + "\n");
+    for (const [agent, filename] of [["research", "research.json"], ["script", "script.json"], ["visual_director", "visual.json"]]) {
+      sealAndWriteArtifact({ productionDir: dir, production, filename, save, data: { agent, mode: "full", data: { version: 1 }, validation: { valid: true } } });
+      production.agents.find(a => a.id === agent).status = "completed";
+    }
+    save();
+    return { dir, production };
+  }
+
+  for (const [target, expected] of [
+    ["research", ["research", "script", "visual_director"]],
+    ["script", ["script", "visual_director"]],
+    ["visual_director", ["visual_director"]]
+  ]) {
+    await test(`--regenerate=${target} : agents recalculés ${expected.join(", ")}, amont réutilisé, artefacts archivés, resume_history`, () => {
+      const { dir, production } = sealedProduction();
+      try {
+        const reuse = planReuse({ productionDir: dir, production });
+        const regeneration = planRegeneration({ reuse, regenerate: target });
+        assert(JSON.stringify(regeneration.agents) === JSON.stringify(expected), JSON.stringify(regeneration));
+        assert(regeneration.reason === "manual_regenerate" && regeneration.archived_artifacts === expected.length && typeof regeneration.timestamp === "string", JSON.stringify(regeneration));
+        applyResume({ production, reuse, mediaDir: null, render: null, regeneration });
+        const archive = archiveRegeneratedArtifacts({ productionDir: dir, production, regeneration });
+        const history = production.resume_history.at(-1);
+        assert(history.regenerated === target && history.reason === "manual_regenerate" && history.archived_artifacts === expected.length && history.timestamp === regeneration.timestamp, JSON.stringify(history));
+        assert(JSON.stringify(history.recomputed.slice(0, expected.length)) === JSON.stringify(expected), JSON.stringify(history));
+        const archived = listDirectory(path.join(dir, archive));
+        for (const filename of regeneration.files) {
+          assert(archived.includes(filename) && !fs.existsSync(path.join(dir, filename)), `${filename} non archivé`);
+          assert(!(filename in production.artifact_sha256), `scellé ${filename} conservé`);
+        }
+        const seals = JSON.parse(fs.readFileSync(path.join(dir, archive, "artifact_sha256.json"), "utf8"));
+        assert(Object.keys(seals).length === expected.length, "scellés archivés");
+        for (const id of ["research", "script", "visual_director"].filter(id => !expected.includes(id))) {
+          assert(production.agents.find(a => a.id === id).status === "completed", `${id} devait rester réutilisé`);
+        }
+        // Reprise suivante : planReuse accepte l'état, l'amont est réutilisé.
+        const next = planReuse({ productionDir: dir, production });
+        for (const id of expected) assert(next[id] === false, `${id} devait être relancé`);
+        // Le nouvel artefact, une fois écrit et scellé, est réutilisé par une reprise ordinaire.
+        const filename = regeneration.files[0];
+        sealAndWriteArtifact({ productionDir: dir, production, filename, save: () => {}, data: { agent: target, mode: "full", data: { version: 2 }, validation: { valid: true } } });
+        production.agents.find(a => a.id === target).status = "completed";
+        assert(planReuse({ productionDir: dir, production })[target] === true, "nouvel artefact non réutilisé");
+      } finally {
+        fs.rmSync(dir, { recursive: true, force: true });
+      }
+    });
+  }
+
+  await test("régénération rejetée : entrées de la tentative déplacées dans rejected/, entrées remplacées restaurées, archives antérieures ignorées", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "d1-rollback-"));
+    const cache = path.join(dir, "call-cache");
+    const write = (file, text) => { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, text); };
+    try {
+      const timestamp = "2026-10-03T12:00:00.000Z";
+      // h1 : remplacé pendant la tentative (archive datée après le début).
+      write(path.join(cache, "h1.json"), "candidat-h1");
+      write(path.join(cache, "superseded", "2026-10-03T12-00-01-000Z", "h1.json"), "actif-h1");
+      // h2 : nouvelle requête de la tentative, sans entrée antérieure ; une
+      // archive plus ancienne que la tentative ne doit pas être restaurée.
+      write(path.join(cache, "h2.json"), "candidat-h2");
+      write(path.join(cache, "superseded", "2026-10-01T00-00-00-000Z", "h2.json"), "ancien-h2");
+      // h3 : non concerné par la tentative.
+      write(path.join(cache, "h3.json"), "intact-h3");
+
+      const result = rollbackRegenerationCache({ productionDir: dir, hashes: ["h1", "h2", "h1"], timestamp });
+
+      assert(fs.readFileSync(path.join(cache, "h1.json"), "utf8") === "actif-h1", "h1 non restauré");
+      assert(!fs.existsSync(path.join(cache, "h2.json")), "h2 candidat resté actif");
+      assert(fs.readFileSync(path.join(cache, "h3.json"), "utf8") === "intact-h3", "h3 modifié");
+      assert(fs.readFileSync(path.join(cache, "superseded", "2026-10-01T00-00-00-000Z", "h2.json"), "utf8") === "ancien-h2", "archive antérieure déplacée");
+      assert(!fs.existsSync(path.join(cache, "superseded", "2026-10-03T12-00-01-000Z")), "dossier d'archive vidé non retiré");
+      const rejected = path.join(dir, result.rejected);
+      assert(listDirectory(rejected).join() === "h1.json,h2.json", listDirectory(rejected).join());
+      assert(fs.readFileSync(path.join(rejected, "h1.json"), "utf8") === "candidat-h1", "candidat rejeté non conservé");
+      assert(JSON.stringify(result.restored) === JSON.stringify(["h1"]), JSON.stringify(result));
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  await test("--regenerate : agent sans artefact scellé ou inconnu → refus avant toute écriture", () => {
+    const { dir, production } = sealedProduction();
+    try {
+      const reuse = planReuse({ productionDir: dir, production });
+      reuse.visual_director = false;
+      let error;
+      try { planRegeneration({ reuse, regenerate: "visual_director" }); } catch (caught) { error = caught; }
+      assert(error && /aucun artefact scellé valide/.test(error.message), error?.message);
+      error = null;
+      try { planRegeneration({ reuse, regenerate: "visual" }); } catch (caught) { error = caught; }
+      assert(error && /--regenerate inconnu/.test(error.message), error?.message);
+      assert(listDirectory(dir).join() === "production.json,research.json,script.json,visual.json", listDirectory(dir).join());
+    } finally {
+      fs.rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   // ----------------------------------------------------------------

@@ -25,6 +25,9 @@ import { resolveDurationProfile } from "../src/utils/duration-profile.js";
 import {
   SOURCE_POLICY,
   applySourcePolicyPrompt,
+  classifySource,
+  effectiveRank,
+  evaluateSourceHierarchy,
   evaluateSourcePolicy,
   loadSourcePolicy,
   renderSourcePolicyPrompt,
@@ -452,6 +455,123 @@ await test("Truth Report (E1) : la politique est rapportée, jamais bloquante ; 
   assert(truth.facts.every(fact => fact.truth_status === "retained"), "fait rejeté");
   assert(isDeepStrictEqual(truth.research_dossier, fixtureDossier), "dossier modifié");
   assert(renderTruthMarkdown(truth).includes("Politique des sources : non conforme (rapport seulement"), "Markdown");
+});
+
+// ---------------------------------------------------------------------
+// Phase B — hiérarchie des sources
+// ---------------------------------------------------------------------
+
+// Les 13 sources réelles du dossier Australie (03/10) et les cas pièges.
+const RANK_CASES = [
+  ["https://www.universalis.fr/donnees-pays/indicateur/densite/australie/", 2, "editorial_encyclopedia"],
+  ["https://www.larousse.fr/encyclopedie/divers/Australie_population/187017", 2, "editorial_encyclopedia"],
+  ["https://www.superprof.com.au/blog/australia-population-distribution/", "unknown", "unknown"],
+  ["https://www.australia-australie.com/articles/les-visages-de-laustralie-de-linterieur-loutback/", "unknown", "unknown"],
+  ["https://fr.wikipedia.org/wiki/Climat_de_l'Australie", 4, "wikipedia"],
+  ["https://scienceinsights.org/is-australia-dry-facts-about-its-arid-climate/", "unknown", "unknown"],
+  ["https://fr.wikipedia.org/wiki/D%C3%A9sert_australien", 4, "wikipedia"],
+  ["https://australie-voyage.fr/culture-et-sport-en-australie/geographie-et-demographie-australie/", "unknown", "unknown"],
+  ["https://www.nationalgeographic.com/environment/article/partner-content-australia-water-problem", 3, "sponsored_content"],
+  ["https://www.laburnumps.vic.edu.au/uploaded_files/media/arid_climate_zone_of_australia_1.pdf", "unknown", "unknown"],
+  // Pièges et règles générales.
+  ["https://www.nationalgeographic.com/environment/article/australia-outback", 2, "reference_media"],
+  ["https://www.abs.gov.au/statistics/people/population", 1, "government"],
+  ["https://www.insee.fr/fr/statistiques", 1, "official_body"],
+  ["https://www.who.int/data", 1, "official_body"],
+  ["https://www.unimelb.edu.au/research", 1, "university"],
+  ["https://www.stanford.edu/", 1, "university"],
+  ["https://doi.org/10.1000/xyz", 1, "scientific_publication"],
+  ["https://WWW.BBC.COM/news/world-australia", 2, "reference_media"],
+  ["https://www.reddit.com/r/australia/", 6, "forum"],
+  ["https://fr.quora.com/question", 6, "forum"],
+  ["https://forum.example.org/topic", 6, "forum"],
+  ["https://blog.example.org/post", 5, "blog"],
+  ["https://example.medium.com/post", 5, "blog"],
+  ["https://example.org/a", "unknown", "unknown"],
+  ["https://notwikipedia.org/a", "unknown", "unknown"],
+  ["https://www.lemonde.fr/publi-redactionnel/article", 3, "sponsored_content"],
+  ["pas une url", null, "invalid_url"],
+  ["ftp://ftp.example.org/a", null, "invalid_url"]
+];
+
+await test(`classement : ${RANK_CASES.length} URL (dont les 13 sources réelles du 03/10) au rang et à la catégorie attendus`, () => {
+  for (const [url, tier, category] of RANK_CASES) {
+    const result = classifySource(url);
+    assert(result.tier === tier && result.category === category, `${url} : ${result.tier}/${result.category} (${result.matched_rule}) au lieu de ${tier}/${category}`);
+    assert(typeof result.matched_rule === "string" && result.matched_rule.length > 0, `${url} : règle absente`);
+    assert(Array.isArray(result.signals) && result.signals.length === 0, `${url} : signals réservé`);
+  }
+});
+
+await test("rang effectif : fonction unique, égale au rang (aucune pondération), null pour unknown et URL invalide", () => {
+  for (const [url, tier] of RANK_CASES) {
+    assert(effectiveRank(classifySource(url)) === (typeof tier === "number" ? tier : null), url);
+  }
+  // Les gates passent par effectiveRank : une pondération future ne modifiera que cette fonction.
+  const source = fs.readFileSync(new URL("../src/utils/source-policy.js", import.meta.url), "utf8");
+  const gate = source.slice(source.indexOf("export function evaluateSourceHierarchy"));
+  assert(gate.includes("classifications.map(effectiveRank)") && !/\.tier\b/.test(gate), "le gate lit tier directement");
+  const truthSource = fs.readFileSync(new URL("../src/agents/truth.js", import.meta.url), "utf8");
+  assert(!/\.tier\s*(<|<=|>|>=|===)/.test(truthSource), "truth.js compare tier directement");
+});
+
+await test("règle Q-B2 sur faits HIGH vérifiés : conforme (rang ≤ 2), revue (unknown), non conforme, hors champ", () => {
+  const src = url => ({ title: "t", url, publisher: "p", source_type: "secondary", supports_claim: "c" });
+  const report = evaluateSourceHierarchy({ key_facts: [
+    { claim: "a", importance: "high", verification_status: "verified", sources: [src("https://fr.wikipedia.org/wiki/A"), src("https://www.larousse.fr/a")] },
+    { claim: "b", importance: "high", verification_status: "verified", sources: [src("https://fr.wikipedia.org/wiki/B"), src("https://inconnu.example/b")] },
+    { claim: "c", importance: "high", verification_status: "verified", sources: [src("https://www.reddit.com/r/c")] },
+    { claim: "d", importance: "medium", verification_status: "verified", sources: [src("https://www.reddit.com/r/d")] },
+    { claim: "e", importance: "high", verification_status: "needs_verification", sources: [] }
+  ] });
+  assert(report.facts.map(fact => fact.status).join() === "compliant,review_required,non_compliant,not_applicable,not_applicable", report.facts.map(fact => fact.status).join());
+  assert(report.facts.map(fact => fact.best_rank).join() === "2,4,6,6,", report.facts.map(fact => fact.best_rank).join());
+  assert(report.review.length === 1 && report.review[0].domains.join() === "inconnu.example" && /domain_exceptions/.test(report.review[0].action), JSON.stringify(report.review));
+  assert(report.violations.length === 1 && report.violations[0].fact === 2 && report.status === "non_compliant", JSON.stringify(report.violations));
+  // Après ajout d'une exception par l'opérateur, le même dossier devient conforme.
+  const decided = structuredClone(SOURCE_POLICY);
+  decided.source_tiers.domain_exceptions["inconnu.example"] = "reference_media";
+  const after = evaluateSourceHierarchy({ key_facts: [{ claim: "b", importance: "high", verification_status: "verified", sources: [src("https://inconnu.example/b")] }] }, loadSourcePolicy({ source_policy: decided }));
+  assert(after.status === "compliant" && after.review.length === 0, JSON.stringify(after));
+});
+
+await test("évaluation du dossier réel du 03/10 (réplique des URL) : 4 Tier 2, 1 Tier 3, 2 Tier 4, 6 Unknown", () => {
+  const urls = RANK_CASES.slice(0, 10).map(([url]) => url);
+  const perFact = [[0, 1], [2, 1], [3], [4, 5], [6], [5], [1], [7], [8], [9]];
+  const importance = ["high", "high", "high", "high", "high", "high", "medium", "medium", "high", "medium"];
+  const src = url => ({ title: "t", url, publisher: "p", source_type: "secondary", supports_claim: "c" });
+  const dossier = { key_facts: perFact.map((list, index) => ({ claim: `${index}`, importance: importance[index], verification_status: "verified", sources: list.map(i => src(urls[i])) })) };
+  const report = evaluateSourceHierarchy(dossier);
+  const d = report.distribution;
+  assert(d.tier_1 === 0 && d.tier_2 === 4 && d.tier_3 === 1 && d.tier_4 === 2 && d.unknown === 6, JSON.stringify(d));
+  assert(report.facts.map(fact => fact.status).join() === "compliant,compliant,review_required,review_required,non_compliant,review_required,not_applicable,not_applicable,non_compliant,not_applicable", report.facts.map(fact => fact.status).join());
+});
+
+await test("configuration de la hiérarchie : chargée strictement, toute erreur refusée", () => {
+  const base = researchConfig.source_policy;
+  const variant = mutate => { const copy = structuredClone(base); mutate(copy.source_tiers); return copy; };
+  const cases = [
+    [variant(t => { t.inconnue = 1; }), /source_tiers : clé inconnue inconnue/],
+    [variant(t => { t.minimum_rank_for_high_facts = 7; }), /minimum_rank_for_high_facts/],
+    [variant(t => { t.categories.blog.tier = 0; }), /catégorie blog : tier/],
+    [variant(t => { t.categories.blog.label = ""; }), /catégorie blog : label/],
+    [variant(t => { t.domain_exceptions["exemple.org"] = "inexistante"; }), /catégorie inconnue inexistante/],
+    [variant(t => { t.domain_exceptions["www.exemple.org"] = "blog"; }), /domaine invalide www.exemple.org/],
+    [variant(t => { t.suffix_rules.push({ suffix: ".gov", category: "government" }); }), /doublon .gov/],
+    [variant(t => { t.suffix_rules.push({ suffix: "gov", category: "government" }); }), /suffix invalide/],
+    [variant(t => { t.path_rules.push({ contains: "x", category: "blog" }); }), /contains invalide/],
+    [variant(t => { t.prefix_rules.push({ prefix: "blog", category: "blog" }); }), /prefix invalide/],
+    [variant(t => { t.excluded_suffixes.push(".vic.edu.au"); }), /excluded_suffixes/],
+    [variant(t => { delete t.categories; }), /categories doit être un objet/],
+    [{ ...base, source_tiers: undefined }, /source_tiers absent/]
+  ];
+  for (const [policy, pattern] of cases) {
+    let message = "";
+    try { loadSourcePolicy({ source_policy: policy }); } catch (error) { message = error.message; }
+    assert(pattern.test(message), `${pattern} : « ${message} »`);
+  }
+  // Petite liste d'exceptions (Q-B7) : aucune énorme liste blanche.
+  assert(Object.keys(base.source_tiers.domain_exceptions).length <= 40, "liste d'exceptions trop longue");
 });
 
 assert(networkGuard.attempts().length === 0, `NETWORK ATTEMPTS = ${networkGuard.attempts().length}`);
