@@ -6,14 +6,25 @@
     "max_uses": 5
   },
   "source_policy": {
-    "prefer_primary_sources": true,
+    "allowed_source_types": ["primary", "secondary"],
+    "preferred_source_types": ["primary"],
+    "source_types": {
+      "primary": {
+        "label": "source primaire",
+        "plural_label": "sources primaires",
+        "examples": "organismes publics, instituts statistiques, universités, publications scientifiques et institutions officielles"
+      },
+      "secondary": {
+        "label": "source secondaire",
+        "plural_label": "sources secondaires"
+      }
+    },
     "require_sources_for_key_facts": true,
     "allow_unsourced_claims": false,
-    "mark_unverified_claims": true
-  },
-  "research_limits": {
+    "mark_unverified_claims": true,
     "minimum_sources": 5,
     "target_sources": 8,
-    "maximum_sources": 15
+    "maximum_sources": 15,
+    "max_sources_per_fact": 2
   }
 }

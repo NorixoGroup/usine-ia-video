@@ -1,3 +1,9 @@
+import { SOURCE_POLICY } from "./source-policy.js";
+
+// Types de sources autorisés et règle « verified exige une source » : lus
+// depuis la politique des sources (config/research.json → source_policy).
+// Les contrôles de structure (titre, URL, éditeur) restent ici.
+
 function isNonEmptyString(value) {
   return typeof value === "string" && value.trim().length > 0;
 }
@@ -30,7 +36,7 @@ function isValidHttpUrl(value) {
   }
 }
 
-function validateSource(source) {
+export function validateSource(source, policy = SOURCE_POLICY) {
   const errors = [];
 
   if (!source || typeof source !== "object") {
@@ -49,7 +55,7 @@ function validateSource(source) {
     errors.push("publisher manquant");
   }
 
-  if (!["primary", "secondary"].includes(source.source_type)) {
+  if (!policy.allowed_source_types.includes(source.source_type)) {
     errors.push("source_type invalide");
   }
 
@@ -60,7 +66,7 @@ function validateSource(source) {
   return errors;
 }
 
-export function validateResearchDossier(data) {
+export function validateResearchDossier(data, policy = SOURCE_POLICY) {
   const errors = [];
   const warnings = [];
 
@@ -102,7 +108,7 @@ export function validateResearchDossier(data) {
       : [];
 
     sources.forEach((source, sourceIndex) => {
-      const sourceErrors = validateSource(source);
+      const sourceErrors = validateSource(source, policy);
 
       for (const error of sourceErrors) {
         errors.push(
@@ -112,6 +118,7 @@ export function validateResearchDossier(data) {
     });
 
     if (
+      policy.require_sources_for_key_facts &&
       fact?.verification_status === "verified" &&
       sources.length === 0
     ) {
@@ -121,11 +128,12 @@ export function validateResearchDossier(data) {
     }
 
     if (
+      policy.require_sources_for_key_facts &&
       fact?.verification_status === "verified" &&
       sources.length > 0
     ) {
       const hasUsableSource = sources.some(
-        (source) => validateSource(source).length === 0
+        (source) => validateSource(source, policy).length === 0
       );
 
       if (!hasUsableSource) {
