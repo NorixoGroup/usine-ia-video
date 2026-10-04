@@ -96,7 +96,7 @@ check("réseau Google : seuls google-oauth.js (échange du code) et channel.js (
   for (const f of files) {
     if (f.rel === "connectors/youtube/auth/google-oauth.js" || f.rel === "connectors/youtube/channel.js") continue;
     // analytics.js ne fait que transmettre fetchImpl à l'enveloppe de channel.js (vérifié plus bas).
-    if (f.rel === "connectors/youtube/analytics.js" && !/fetchImpl\s*\(/.test(f.code)) continue;
+    if (["connectors/youtube/analytics.js", "connectors/youtube/analytics-probe.js", "connectors/youtube/video-analytics.js"].includes(f.rel) && !/fetchImpl\s*\(/.test(f.code)) continue;
     if (/fetchImpl\s*\(|globalThis\.fetch/.test(f.code)) throw new Error(`${f.rel} : appel réseau hors google-oauth.js`);
   }
   const oauth = files.find(f => f.rel === "connectors/youtube/auth/google-oauth.js");
@@ -122,8 +122,37 @@ check("Analytics (R20.5 lot 4A) : un seul endpoint, youtubeanalytics v2/reports,
   if (/method:\s*"(?:POST|PUT|DELETE|PATCH)"/.test(analytics.code) || !/method:\s*"GET"/.test(analytics.code)) throw new Error("analytics.js : méthodes non conformes");
   if (/revenue|\bcpm\b|\brpm\b|monetiz|impression|adRate|grossRevenue|playbackBasedCpm/i.test(analytics.code)) throw new Error("analytics.js : métrique hors périmètre");
   for (const f of files) {
-    if (f.rel !== "connectors/youtube/analytics.js" && /youtubeanalytics\.googleapis/i.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : appel Analytics hors analytics.js`);
+    if (!["connectors/youtube/analytics.js", "connectors/youtube/analytics-probe.js", "connectors/youtube/video-analytics.js"].includes(f.rel) && /youtubeanalytics\.googleapis/i.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : appel Analytics hors analytics.js`);
   }
+});
+
+check("Analytics par vidéo (R20.5 lot 4B) : v2/reports en GET, jamais day,video, miroir en lecture seule, à la demande seulement", () => {
+  const video = files.find(f => f.rel === "connectors/youtube/video-analytics.js");
+  if (!video) throw new Error("video-analytics.js introuvable");
+  const raw = fs.readFileSync(video.file, "utf8");
+  const urls = raw.match(/https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+[^"'`\s]*/g) ?? [];
+  if (urls.join() !== "https://youtubeanalytics.googleapis.com/v2/reports") throw new Error("video-analytics.js : endpoints non conformes");
+  if (/fetchImpl\s*\(/.test(video.code) || /method:\s*"(?:POST|PUT|DELETE|PATCH)"/.test(video.code) || !/method:\s*"GET"/.test(video.code)) throw new Error("video-analytics.js : méthodes non conformes");
+  if (/revenue|\bcpm\b|\brpm\b|monetiz|impression|adRate/i.test(video.code)) throw new Error("video-analytics.js : métrique hors périmètre");
+  if (/writeMirror|writeSyncFailure|acquireSyncLease|mergeVideos|mergeIncrementalVideos/.test(video.code)) throw new Error("video-analytics.js : écriture du miroir");
+  // Test réel 4B.0 : la combinaison jour + vidéo est refusée (HTTP 400) ; elle ne doit plus exister.
+  for (const f of files) if (/day\s*,\s*video|video\s*,\s*day/.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : dimensions jour et vidéo combinées`);
+  for (const f of files) if (!["youtube-analytics-videos-sync.js"].includes(f.rel) && /video-analytics\.js/.test(f.code)) throw new Error(`${f.rel} importe video-analytics.js`);
+});
+
+check("sonde Analytics (R20.5 4B.0) : v2/reports en GET seulement, aucune écriture, aucun import d'écriture, absente du serveur", () => {
+  const probe = files.find(f => f.rel === "connectors/youtube/analytics-probe.js");
+  if (!probe) throw new Error("analytics-probe.js introuvable");
+  const urls = fs.readFileSync(probe.file, "utf8").match(/https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+[^"'`\s]*/g) ?? [];
+  if (urls.join() !== "https://youtubeanalytics.googleapis.com/v2/reports") throw new Error("analytics-probe.js : endpoints non conformes");
+  if (/method:\s*"(?:POST|PUT|DELETE|PATCH)"/.test(probe.code) || !/method:\s*"GET"/.test(probe.code)) throw new Error("analytics-probe.js : méthodes non conformes");
+  if (/revenue|\bcpm\b|\brpm\b|monetiz|impression|adRate/i.test(probe.code)) throw new Error("analytics-probe.js : métrique hors périmètre");
+  for (const rel of ["connectors/youtube/analytics-probe.js", "youtube-analytics-probe.js"]) {
+    const f = files.find(x => x.rel === rel);
+    if (!f) throw new Error(`${rel} introuvable`);
+    if (/atomic-json|journal\.js|videos-registry|writeMirror|writeSyncFailure|acquireSyncLease|appendJsonl|writeJson|acquireLease|node:fs|writeFile/.test(f.code)) throw new Error(`${rel} : écriture possible`);
+  }
+  for (const f of files) if (f.rel !== "youtube-analytics-probe.js" && /analytics-probe\.js/.test(f.code)) throw new Error(`${f.rel} importe la sonde`);
 });
 
 check("adresses Google uniquement dans le connecteur YouTube", () => {

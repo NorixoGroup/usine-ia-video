@@ -9,7 +9,9 @@
     "mvp": "node src/orchestrator/mvp.js",
     "youtube-agent": "node src/youtube-agent/server.js",
     "youtube-sync": "node --env-file=.env.local src/youtube-agent/youtube-sync.js",
-    "youtube-analytics-sync": "node --env-file=.env.local src/youtube-agent/youtube-analytics-sync.js"
+    "youtube-analytics-sync": "node --env-file=.env.local src/youtube-agent/youtube-analytics-sync.js",
+    "youtube-analytics-probe": "node --env-file=.env.local src/youtube-agent/youtube-analytics-probe.js",
+    "youtube-analytics-videos-sync": "node --env-file=.env.local src/youtube-agent/youtube-analytics-videos-sync.js"
   },
   "engines": {
     "node": ">=22"
