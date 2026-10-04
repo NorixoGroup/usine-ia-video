@@ -81,8 +81,10 @@ export async function createMessage({
   // Garde des appels réels : autorisation, plafond, journal, cache.
   const reservation = beginRealCall(request);
 
+  // R23-D : l'empreinte de la requête accompagne la réponse, pour qu'un
+  // appelant puisse écarter du cache une réponse qu'il rejette.
   if (reservation.cached) {
-    return reservation.cached;
+    return { ...reservation.cached, request_sha256: reservation.hash };
   }
 
   const startedAt = Date.now();
@@ -114,7 +116,7 @@ export async function createMessage({
 
   endRealCall(reservation, result);
 
-  return result;
+  return { ...result, request_sha256: reservation.hash };
 }
 
 export function extractText(response) {

@@ -540,7 +540,8 @@ export function beginRealCall(request) {
       cached: {
         response: cached.response,
         meta: { ...cached.meta, duration_ms: 0 }
-      }
+      },
+      hash
     };
   }
 
@@ -652,6 +653,29 @@ export function endRealCall(reservation, result) {
   reservation.entry.stop_reason = record.result.meta.stop_reason;
 
   writeJournal();
+}
+
+// R23-D : une réponse reçue mais rejetée par un contrôle (JSON, structure,
+// validations, grounding) ne doit pas être rejouée par le cache lors d'une
+// reprise. Elle est déplacée dans call-cache/rejected/<horodatage>/ pour
+// diagnostic ; le journal n'est pas modifié. Sans garde configurée, sans
+// empreinte ou sans entrée de cache : aucun effet.
+export function discardCachedResponse(hash) {
+  if (!state || !/^[0-9a-f]{64}$/.test(hash ?? "")) return null;
+
+  const file = cacheFile(hash);
+
+  if (!fs.existsSync(file)) return null;
+
+  const directory = path.join(
+    state.productionDir, CACHE_DIR, "rejected",
+    new Date().toISOString().replace(/[:.]/g, "-")
+  );
+
+  fs.mkdirSync(directory, { recursive: true });
+  fs.renameSync(file, path.join(directory, `${hash}.json`));
+
+  return path.relative(state.productionDir, path.join(directory, `${hash}.json`));
 }
 
 export function failRealCall(reservation, error) {

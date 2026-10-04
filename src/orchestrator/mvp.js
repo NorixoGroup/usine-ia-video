@@ -1293,7 +1293,8 @@ if (dryRun) {
         title: production.input.title,
         testMode,
         durationProfile,
-        narratedFrame
+        narratedFrame,
+        productionDir
       }));
 
       sealAndWriteArtifact({
@@ -1365,7 +1366,8 @@ if (dryRun) {
       const visualResult = await runAgent("visual_director", () => runVisualDirector({
         script: persistedScript.data,
         testMode,
-        durationProfile
+        durationProfile,
+        productionDir
       }));
 
       sealAndWriteArtifact({

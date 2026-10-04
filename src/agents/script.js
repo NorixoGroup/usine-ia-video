@@ -3,6 +3,10 @@ import {
   extractText
 } from "../services/anthropic.js";
 
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
 import {
   validateResearchDossier
 } from "../utils/validate-research.js";
@@ -31,6 +35,10 @@ import {
 import {
   repairVoiceoverClaimCoverage
 } from "../utils/repair-script-claim-coverage.js";
+
+import {
+  discardCachedResponse
+} from "../services/call-guard.js";
 
 const SYSTEM_PROMPT = `
 Tu es le Script Agent de la chaîne YouTube
@@ -181,6 +189,253 @@ const FRAME_REMINDER =
   '(role "hook") et la conclusion le dernier segment de la dernière ' +
   'section (role "conclusion"). Chacun porte ses claims ; les champs ' +
   "hook et conclusion reprennent exactement leur voiceover.";
+
+// R23-A — un chapitre est suffisamment petit pour rester loin des limites de
+// sortie du modèle. Le nombre est déterministe : 10/20/30/45 minutes donnent
+// respectivement 3/5/8/12 checkpoints, avec un minimum de trois chapitres.
+const SEGMENT_SCHEMA = "script-segment.v1";
+const SEGMENT_DIRECTORY = "script-segments";
+const CHAPTER_MINUTES = 4;
+const MIN_CHAPTERS = 3;
+const MAX_CHAPTERS = 12;
+const MIN_SEGMENTS_PER_CHAPTER = 4;
+
+const sha256 = value => crypto.createHash("sha256").update(value).digest("hex");
+const stableJson = value => JSON.stringify(value);
+
+function chapterCount(profile) {
+  return Math.max(
+    MIN_CHAPTERS,
+    Math.min(MAX_CHAPTERS, Math.ceil(profile.target / CHAPTER_MINUTES))
+  );
+}
+
+// R23-D — limite de sortie sûre, calculée de façon déterministe avant chaque
+// chapitre à partir de sa durée visée. Mesure réelle (R22-B) : ~22,9 tokens
+// de sortie par seconde de vidéo, structure JSON et claims compris.
+// - OUTPUT_TOKENS_PER_SECOND : 1,5 × la mesure ;
+// - CHAPTER_DURATION_HEADROOM : un chapitre peut dépasser sa cible de 50 % ;
+// - CHAPTER_OUTPUT_OVERHEAD : titre, objectif, thèse et enveloppe JSON ;
+// - SAFE_OUTPUT_CEILING : sous 21 333 tokens, seuil au-delà duquel le SDK
+//   exige le streaming (requête de plus de 10 minutes) ;
+// - CHAPTER_MIN_OUTPUT_TOKENS : l'ancienne limite reste un plancher.
+const OUTPUT_TOKENS_PER_SECOND = 35;
+const CHAPTER_DURATION_HEADROOM = 1.5;
+const CHAPTER_OUTPUT_OVERHEAD = 1000;
+const CHAPTER_MIN_OUTPUT_TOKENS = 5000;
+export const SAFE_OUTPUT_CEILING = 16000;
+
+export function chapterOutputBudget(expectedSeconds) {
+  return Math.max(
+    CHAPTER_MIN_OUTPUT_TOKENS,
+    Math.ceil(expectedSeconds * CHAPTER_DURATION_HEADROOM * OUTPUT_TOKENS_PER_SECOND + CHAPTER_OUTPUT_OVERHEAD)
+  );
+}
+
+const chapterSeconds = (profile, total) => Math.round((profile.target * 60) / total);
+
+// Nombre de chapitres et limite de sortie, fixés avant le premier appel. Si la
+// limite dépasse le plafond sûr, le documentaire est découpé en chapitres plus
+// nombreux (déterministe) ; au-delà de MAX_CHAPTERS, refus avant tout appel.
+export function chapterPlan(profile) {
+  let total = chapterCount(profile);
+
+  while (chapterOutputBudget(chapterSeconds(profile, total)) > SAFE_OUTPUT_CEILING && total < MAX_CHAPTERS) {
+    total += 1;
+  }
+
+  const maxTokens = chapterOutputBudget(chapterSeconds(profile, total));
+
+  if (maxTokens > SAFE_OUTPUT_CEILING) {
+    throw new Error(
+      `Script Agent : durée ${profile.target} min trop longue pour ${MAX_CHAPTERS} chapitres ` +
+      `(limite de sortie ${maxTokens} > ${SAFE_OUTPUT_CEILING}). Aucun appel effectué.`
+    );
+  }
+
+  return { total, maxTokens, expectedSeconds: chapterSeconds(profile, total) };
+}
+
+// R23-D — validations existantes appliquées à un chapitre seul, avant toute
+// écriture de checkpoint : Script Gate (dossier minimal du chapitre),
+// références Research et Claim Gate. Renvoie la liste des erreurs.
+function chapterErrors({ chapter, index, research, profile }) {
+  if (!validChapter(chapter)) return ["structure du chapitre invalide"];
+  if (index === 0 && (typeof chapter.thesis !== "string" || !chapter.thesis.trim())) return ["thesis manquante"];
+
+  const segments = chapter.segments;
+  const single = { sections: [{ title: chapter.title, purpose: chapter.purpose, segments }] };
+  const dossier = validateScriptDossier({
+    title: chapter.title,
+    hook: segments[0].voiceover,
+    thesis: chapter.thesis ?? chapter.purpose,
+    estimated_duration_minutes: profile.target,
+    ...single,
+    conclusion: segments.at(-1).voiceover
+  }, { durationRange: { min: profile.min, max: profile.max } });
+  const claims = validateScriptClaims(single, research);
+
+  return [
+    ...(dossier.valid ? [] : dossier.errors),
+    ...validateResearchReferences(single, research),
+    ...(claims.valid ? [] : claims.errors)
+  ];
+}
+
+// R23-D — une réponse rejetée n'est jamais rejouée par le cache, et un
+// checkpoint mis en cause est déplacé (jamais supprimé) dans rejected/.
+function quarantineCheckpoint(directory, index) {
+  const file = checkpointFile(directory, index);
+
+  if (!fs.existsSync(file)) return;
+
+  let hash = null;
+
+  try {
+    hash = JSON.parse(fs.readFileSync(file, "utf8")).request_sha256 ?? null;
+  } catch {
+    // checkpoint illisible : déplacé tel quel
+  }
+
+  const rejected = path.join(directory, "rejected", new Date().toISOString().replace(/[:.]/g, "-"));
+
+  fs.mkdirSync(rejected, { recursive: true });
+  fs.renameSync(file, path.join(rejected, path.basename(file)));
+  discardCachedResponse(hash);
+}
+
+// Gates du script complet dont les erreurs désignent un chapitre (section).
+const ATTRIBUTABLE_GATES = ["Script Gate", "références Research invalides", "Claim Gate", "Voiceover Claim Coverage Gate"];
+
+function blamedChapters(message, total) {
+  if (!ATTRIBUTABLE_GATES.some(gate => message.includes(gate))) return [];
+
+  return [...new Set([...message.matchAll(/sections\[(\d+)\]/g)].map(m => Number(m[1])))]
+    .filter(index => index < total)
+    .sort((a, b) => a - b);
+}
+
+function atomicJson(file, data) {
+  const temporary = `${file}.tmp-${process.pid}-${crypto.randomUUID()}`;
+
+  fs.writeFileSync(temporary, JSON.stringify(data, null, 2) + "\n", "utf8");
+  fs.renameSync(temporary, file);
+}
+
+function checkpointFile(directory, index) {
+  return path.join(directory, `segment-${String(index + 1).padStart(3, "0")}.json`);
+}
+
+function validChapter(value) {
+  return value && typeof value === "object" &&
+    typeof value.title === "string" && value.title.trim() &&
+    typeof value.purpose === "string" && value.purpose.trim() &&
+    Array.isArray(value.segments) &&
+    value.segments.length >= MIN_SEGMENTS_PER_CHAPTER &&
+    value.segments.every(segment =>
+      segment && typeof segment.voiceover === "string" && segment.voiceover.trim() &&
+      Number.isFinite(segment.estimated_seconds) && segment.estimated_seconds > 0 &&
+      Array.isArray(segment.research_fact_refs) &&
+      typeof segment.contains_unverified_claim === "boolean" &&
+      Array.isArray(segment.claims) && segment.claims.length > 0
+    );
+}
+
+function readCheckpoint({
+  directory,
+  index,
+  planHash,
+  total,
+  previousContextHash,
+  research,
+  profile
+}) {
+  const file = checkpointFile(directory, index);
+
+  if (!fs.existsSync(file)) return null;
+
+  try {
+    const checkpoint = JSON.parse(fs.readFileSync(file, "utf8"));
+
+    if (
+      checkpoint?.schema !== SEGMENT_SCHEMA ||
+      checkpoint.plan_sha256 !== planHash ||
+      checkpoint.index !== index + 1 ||
+      checkpoint.total !== total ||
+      checkpoint.previous_context_sha256 !== previousContextHash ||
+      !validChapter(checkpoint.chapter) ||
+      chapterErrors({ chapter: checkpoint.chapter, index, research, profile }).length > 0 ||
+      !checkpoint.usage || typeof checkpoint.usage !== "object"
+    ) return null;
+
+    return checkpoint;
+  } catch {
+    return null;
+  }
+}
+
+function chapterContext(chapter) {
+  const last = chapter.segments.at(-1);
+
+  return {
+    title: chapter.title,
+    purpose: chapter.purpose,
+    last_voiceover: last?.voiceover ?? ""
+  };
+}
+
+function buildChapterPrompt({ research, title, profile, narratedFrame, index, total, previous }) {
+  const expectedSeconds = Math.round((profile.target * 60) / total);
+  const first = index === 0;
+  const last = index === total - 1;
+
+  return `
+Rédige le chapitre ${index + 1}/${total} d'un documentaire voix-off.
+
+Titre :
+${title || research.topic}
+
+Durée visée de ce chapitre : environ ${expectedSeconds} secondes.
+
+Chaque chapitre est autonome mais doit rester cohérent avec le précédent.
+Il contient obligatoirement : une introduction locale, un développement,
+des transitions explicites et une conclusion locale qui prépare le chapitre suivant.
+Ne répète pas les faits déjà exposés, sauf rappel strictement nécessaire.
+Découpe-le en au moins ${MIN_SEGMENTS_PER_CHAPTER} segments courts, chacun
+directement exploitable par le Visual Director (environ 20 à 75 secondes).
+
+${first ? "C'est le premier chapitre : produis aussi un champ thesis factuel, soutenu par le dossier." : ""}
+${last ? "C'est le dernier chapitre : termine par une conclusion locale qui clôt le documentaire sans introduire de nouveau fait." : ""}
+${narratedFrame ? `${FRAME_REMINDER}\n` : ""}
+
+Retourne uniquement ce JSON valide :
+{
+  "title": "",
+  "purpose": "",
+  ${first ? '"thesis": "",' : ""}
+  "segments": [
+    {
+      "voiceover": "",
+      "estimated_seconds": 0,
+      "research_fact_refs": [],
+      "contains_unverified_claim": false,
+      "claims": [{ "text": "", "research_fact_ref": 0, "is_unverified": false }]
+    }
+  ]
+}
+
+RÈGLES FACTUELLES : le dossier Research est la seule source ; n'invente aucun fait ;
+chaque affirmation factuelle du voiceover doit avoir un claim atomique ; chaque claim
+doit référencer exactement un key_fact ; les faits non vérifiés sont explicitement
+présentés comme incertains.
+
+CONTEXTE DU CHAPITRE PRÉCÉDENT :
+${previous ? JSON.stringify(previous) : "Aucun : ouverture du documentaire."}
+
+DOSSIER RESEARCH :
+${JSON.stringify(research)}
+`.trim();
+}
 
 // Adapte le prompt au profil de durée et au cadre narré. Avec le profil
 // standard et sans cadre narré, le résultat est strictement le prompt
@@ -442,12 +697,196 @@ async function validateGeneratedScript(data, research, options = {}) {
   };
 }
 
+async function runSegmentedScriptAgent({
+  research,
+  title,
+  profile,
+  narratedFrame,
+  validationOptions,
+  productionDir
+}) {
+  const { total, maxTokens } = chapterPlan(profile);
+  const directory = path.join(productionDir, SEGMENT_DIRECTORY);
+  const planHash = sha256(stableJson({
+    schema: SEGMENT_SCHEMA,
+    title: title || research.topic,
+    research,
+    profile: {
+      target: profile.target,
+      min: profile.min,
+      max: profile.max,
+      sections: profile.sections
+    },
+    narrated_frame: narratedFrame === true,
+    total
+  }));
+
+  fs.mkdirSync(directory, { recursive: true });
+
+  const checkpoints = [];
+  let previous = null;
+  let generated = 0;
+  let reused = 0;
+
+  for (let index = 0; index < total; index += 1) {
+    let checkpoint = readCheckpoint({
+      directory,
+      index,
+      planHash,
+      total,
+      previousContextHash: previous
+        ? sha256(stableJson(previous))
+        : null,
+      research,
+      profile
+    });
+
+    if (checkpoint) {
+      reused += 1;
+    } else {
+      const { response, meta, request_sha256: requestHash } = await createMessage({
+        system: buildSystemPrompt(profile, narratedFrame === true),
+        messages: [{
+          role: "user",
+          content: buildChapterPrompt({
+            research,
+            title,
+            profile,
+            narratedFrame,
+            index,
+            total,
+            previous
+          })
+        }],
+        maxTokens,
+        temperature: 0.2
+      });
+
+      // R23-D : rien n'est écrit tant que le chapitre n'a pas passé toutes
+      // les validations ; une réponse rejetée est écartée du cache.
+      const reject = message => {
+        discardCachedResponse(requestHash);
+        throw new Error(`Script Agent : chapitre ${index + 1}/${total} ${message}`);
+      };
+
+      if (meta.stop_reason === "max_tokens") {
+        reject(
+          "tronqué — stop_reason=max_tokens. " +
+          `Tokens sortie=${meta.output_tokens ?? "inconnu"} (limite ${maxTokens}).`
+        );
+      }
+
+      let chapter;
+
+      try {
+        chapter = parseJson(extractText(response));
+      } catch (error) {
+        reject(`invalide — ${error.message}`);
+      }
+
+      const errors = chapterErrors({ chapter, index, research, profile });
+
+      if (errors.length > 0) {
+        reject(`invalide. ${errors.join(" | ")}`);
+      }
+
+      checkpoint = {
+        schema: SEGMENT_SCHEMA,
+        plan_sha256: planHash,
+        index: index + 1,
+        total,
+        chapter,
+        usage: meta,
+        ...(requestHash ? { request_sha256: requestHash } : {}),
+        previous_context_sha256: previous
+          ? sha256(stableJson(previous))
+          : null,
+        created_at: new Date().toISOString()
+      };
+
+      atomicJson(checkpointFile(directory, index), checkpoint);
+      generated += 1;
+    }
+
+    checkpoints.push(checkpoint);
+    previous = chapterContext(checkpoint.chapter);
+  }
+
+  const sections = checkpoints.map(checkpoint => ({
+    title: checkpoint.chapter.title,
+    purpose: checkpoint.chapter.purpose,
+    segments: checkpoint.chapter.segments.map(segment => ({ ...segment }))
+  }));
+  const firstSegment = sections[0].segments[0];
+  const lastSection = sections.at(-1);
+  const lastSegment = lastSection.segments.at(-1);
+
+  if (narratedFrame) {
+    firstSegment.role = "hook";
+    lastSegment.role = "conclusion";
+  }
+
+  const data = {
+    title: title || research.topic,
+    hook: firstSegment.voiceover,
+    thesis: checkpoints[0].chapter.thesis,
+    estimated_duration_minutes: profile.target,
+    sections,
+    conclusion: lastSegment.voiceover
+  };
+  let gateResult;
+
+  try {
+    gateResult = await validateGeneratedScript(
+      data,
+      research,
+      validationOptions
+    );
+  } catch (error) {
+    // R23-D : un gate du script complet qui désigne des chapitres les écarte
+    // (checkpoint et réponse en cache) ; la reprise les régénère.
+    for (const index of blamedChapters(String(error?.message ?? ""), total)) {
+      quarantineCheckpoint(directory, index);
+    }
+
+    throw error;
+  }
+  const usage = checkpoints.reduce((totalUsage, checkpoint) => ({
+    input_tokens: totalUsage.input_tokens + (checkpoint.usage.input_tokens ?? 0),
+    output_tokens: totalUsage.output_tokens + (checkpoint.usage.output_tokens ?? 0),
+    duration_ms: totalUsage.duration_ms + (checkpoint.usage.duration_ms ?? 0)
+  }), { input_tokens: 0, output_tokens: 0, duration_ms: 0 });
+
+  return {
+    agent: "script",
+    mode: "full",
+    data,
+    ...gateResult,
+    usage: {
+      ...usage,
+      model: "segmented-script",
+      stop_reason: "end_turn",
+      calls: generated,
+      reused_segments: reused
+    },
+    script_generation: {
+      mode: "segmented",
+      total_segments: total,
+      generated_segments: generated,
+      reused_segments: reused,
+      checkpoint_directory: SEGMENT_DIRECTORY,
+      plan_sha256: planHash
+    }
+  };
+}
+
 export async function runScriptAgent({
   research,
   title,
   testMode = false,
   durationProfile,
-  narratedFrame = false
+  narratedFrame = false,
+  productionDir
 }) {
   const profile = agentDurationProfile(durationProfile);
   const validationOptions = {
@@ -463,6 +902,20 @@ export async function runScriptAgent({
       "Script Agent : dossier Research invalide. " +
       researchValidation.errors.join(" | ")
     );
+  }
+
+  // Les tests et les intégrations qui appellent directement l'agent gardent
+  // leur contrat monolithique historique. L'orchestrateur full fournit le
+  // répertoire de production, ce qui active les checkpoints segmentés.
+  if (!testMode && productionDir) {
+    return runSegmentedScriptAgent({
+      research,
+      title,
+      profile,
+      narratedFrame,
+      validationOptions,
+      productionDir
+    });
   }
 
   const userPrompt = testMode
