@@ -1,4 +1,4 @@
-// Chemins de données par chaîne et par partition. Aucune traversée possible :
+// Chemins de données par partition (identifiant de chaîne interne et constant). Aucune traversée possible :
 // chaque segment est validé, puis le chemin résolu est re-vérifié.
 
 import path from "node:path";
@@ -14,7 +14,10 @@ export const PARTITION_NAMES = Object.freeze([
   "learning",
   "comments",
   "prompts",
-  "journal"
+  "journal",
+  "oauth",
+  "quota",
+  "youtube"
 ]);
 
 const FILE_PATTERN = /^[a-z0-9][a-z0-9._-]{0,63}$/;

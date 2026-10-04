@@ -21,12 +21,11 @@ function checklistToText(checklist) {
   return checklist.map(item => `[${item.done ? "x" : " "}] ${item.label}`).join("\n");
 }
 
-function videoForm({ production, entry, token, channelId }) {
+function videoForm({ production, entry, token }) {
   const e = entry ?? {};
   const type = e.type ?? (production.mode === "full" ? "real" : "test");
 
   return `<form class="entry" method="post" action="/videos?t=${encodeURIComponent(token)}">
-<input type="hidden" name="channel_id" value="${escapeHtml(channelId)}">
 <input type="hidden" name="production_id" value="${escapeHtml(production.id)}">
 <label>Type <select name="type">
 <option value="real"${type === "real" ? " selected" : ""}>real</option>
@@ -40,7 +39,39 @@ function videoForm({ production, entry, token, channelId }) {
 </form>`;
 }
 
-export function renderDashboard({ channelId, productions, registry, token, message = null }) {
+const SCOPE_LABELS = {
+  "https://www.googleapis.com/auth/youtube.readonly": "lecture YouTube",
+  "https://www.googleapis.com/auth/yt-analytics.readonly": "lecture des analytiques"
+};
+
+// Bloc « Connexion Google » : état et bouton, jamais aucun secret.
+function youtubeBlock(youtube, token) {
+  if (!youtube) return "";
+
+  if (!youtube.enabled) {
+    const names = [...(youtube.problem?.missing ?? []), ...(youtube.problem?.invalid ?? [])];
+
+    return `<h2>Connexion Google</h2>
+<p class="banner">Connexion Google non configurée.${names.length ? ` Variables à fournir ou à corriger : <code>${escapeHtml(names.join(", "))}</code>.` : ""}</p>`;
+  }
+
+  const c = youtube.connection;
+  const link = `/oauth/youtube/login?t=${encodeURIComponent(token)}`;
+
+  if (c.status === "connected") {
+    const scopes = (c.scopes ?? []).map(s => SCOPE_LABELS[s] ?? "autorisation").join(", ");
+
+    return `<h2>Connexion Google</h2>
+<p>Connectée le ${escapeHtml(c.connected_at)} · accès en ${escapeHtml(scopes)} uniquement. Aucune donnée YouTube n'est encore lue.</p>
+<p><a class="button" href="${escapeHtml(link)}">Se reconnecter à Google</a></p>`;
+  }
+
+  return `<h2>Connexion Google</h2>
+<p>Non connectée.</p>
+<p><a class="button" href="${escapeHtml(link)}">Se connecter à Google</a></p>`;
+}
+
+export function renderDashboard({ productions, registry, token, message = null, youtube = null }) {
   const byProduction = new Map(registry.videos.map(v => [v.production_id, v]));
 
   const rows = productions.shown.map(p => {
@@ -51,14 +82,15 @@ export function renderDashboard({ channelId, productions, registry, token, messa
 <td><span class="tag">${escapeHtml(p.status)}</span> <span class="tag">${escapeHtml(p.mode)}</span>${p.locked ? ' <span class="tag">verrouillée</span>' : ""}
 <br><span class="muted">${agents}</span></td>
 <td>${entry ? `<span class="tag">${escapeHtml(entry.type)}</span> ${escapeHtml(entry.video_id ?? "—")}` : '<span class="muted">non lié</span>'}</td></tr>
-<tr><td colspan="3"><details><summary>Lier / éditer</summary>${p.readable ? videoForm({ production: p, entry, token, channelId }) : "<p>Production illisible.</p>"}</details></td></tr>`;
+<tr><td colspan="3"><details><summary>Lier / éditer</summary>${p.readable ? videoForm({ production: p, entry, token }) : "<p>Production illisible.</p>"}</details></td></tr>`;
   }).join("\n");
 
   const banner = message ? `<p class="banner">${escapeHtml(message)}</p>` : "";
 
   return page("YouTube Agent", token, `<h1>YouTube Agent</h1>
-<p class="muted">Chaîne : <code>${escapeHtml(channelId)}</code> · session locale, aucun appel externe.</p>
+<p class="muted">Session locale, aucun appel externe.</p>
 ${banner}
+${youtubeBlock(youtube, token)}
 <h2>Productions (${productions.shown.length} sur ${productions.total})</h2>
 <table><thead><tr><th>Production</th><th>État</th><th>Vidéo</th></tr></thead><tbody>
 ${rows || '<tr><td colspan="3" class="muted">Aucune production.</td></tr>'}

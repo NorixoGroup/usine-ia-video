@@ -79,6 +79,21 @@ export function withFileLock(file, fn) {
   }
 }
 
+// Suppression d'un fichier sous verrou ; retourne false s'il n'existait pas.
+export function removeFile(file) {
+  return withFileLock(file, () => {
+    try {
+      fs.unlinkSync(file);
+
+      return true;
+    } catch (error) {
+      if (error.code === "ENOENT") return false;
+
+      throw error;
+    }
+  });
+}
+
 // Ajout seul d'une ligne JSON (journal, mémoire historique).
 export function appendJsonl(file, record) {
   const line = `${JSON.stringify(record)}\n`;

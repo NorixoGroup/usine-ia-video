@@ -61,9 +61,5 @@ check("journal : champs libres, imbriqués et valeurs ressemblant à un secret r
   if (fs.readFileSync(file, "utf8") !== before) throw new Error("écriture malgré refus");
 });
 
-check("journal isolé par chaîne", () => {
-  if (readJournal({ root, channelId: "autre" }).length !== 0) throw new Error("fuite");
-});
-
 cleanup(root);
 done("youtube-agent-journal-approvals-smoke");

@@ -3,7 +3,7 @@
 export const LOOPBACK_HOST = "127.0.0.1";
 export const DEFAULT_PORT = 4177;
 
-// Un seul canal par défaut tant qu'aucun autre n'est configuré.
+// Identifiant interne et constant de l'unique chaîne (jamais affiché, jamais fourni par l'extérieur).
 export const DEFAULT_CHANNEL_ID = "nomade";
 export const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9-]{0,39}$/;
 

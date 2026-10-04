@@ -20,7 +20,7 @@ import {
   analyticsView, learningView, journalView, settingsView
 } from "./studio-models.js";
 
-export function createYouTubeAgent({ root, now = () => new Date() }) {
+export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth = null, youtubeChannel = null }) {
   return {
     describe() {
       return {
@@ -89,7 +89,20 @@ export function createYouTubeAgent({ root, now = () => new Date() }) {
     analytics({ channelId }) { assertChannelId(channelId); return analyticsView(); },
     learning({ channelId }) { return learningView({ root, channelId: assertChannelId(channelId) }); },
     journal({ channelId, limit = 50 }) { return journalView({ root, channelId: assertChannelId(channelId), limit }); },
-    settings({ channelId }) { return settingsView({ root, channelId: assertChannelId(channelId) }); },
+    settings({ channelId }) { return settingsView({ root, channelId: assertChannelId(channelId), youtubeChannel: youtubeChannel?.current() ?? null, youtubeVideos: youtubeChannel?.videos() ?? null }); },
+
+    // Connexion YouTube (délégation au connecteur ; aucun secret ne transite par la façade).
+    youtubeStatus() {
+      return youtubeAuth ? youtubeAuth.status() : { enabled: false, problem: null, connection: { status: "not_connected" } };
+    },
+
+    youtubeLogin() {
+      return youtubeAuth.beginLogin();
+    },
+
+    youtubeCallback(query) {
+      return youtubeAuth.completeCallback(query);
+    },
 
     // R18.2 : aucun moteur ne s'exécute. Le refus est motivé et journalisé.
     execute({ channelId, engineId }) {

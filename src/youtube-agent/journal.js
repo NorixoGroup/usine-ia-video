@@ -1,4 +1,4 @@
-// Journal en ajout seul, par chaîne. Schéma fermé : aucun champ libre hors
+// Journal en ajout seul. Schéma fermé : aucun champ libre hors
 // `detail` (court), et toute valeur ressemblant à un secret est refusée.
 
 import { appendJsonl, readJsonl } from "./atomic-json.js";

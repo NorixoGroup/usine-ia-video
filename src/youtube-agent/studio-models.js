@@ -277,7 +277,7 @@ export function journalView({ root, channelId, limit = 50 }) {
   };
 }
 
-export function settingsView({ root, channelId }) {
+export function settingsView({ root, channelId, youtubeChannel = null, youtubeVideos = null }) {
   const pipeline = readPipelineSettings(root);
 
   return {
@@ -292,7 +292,11 @@ export function settingsView({ root, channelId }) {
       approval_required_on: EPISODE_TRANSITIONS.filter(t => t.approval).map(t => `${t.from}→${t.to}`)
     },
     comments: { human_validation_required: true, auto_reply: false, ingestion: "not_connected" },
-    publication: { status: "not_connected", approval_required: true }
+    publication: { status: "not_connected", approval_required: true },
+    // Identité de la chaîne lue sur YouTube (R20.1), dernier résultat connu de l'agent.
+    youtube_channel: youtubeChannel ?? { status: "not_loaded" },
+    // Vidéos de la chaîne (R20.2), dernier résultat connu, 50 au plus.
+    youtube_videos: youtubeVideos ?? { status: "not_loaded" }
   };
 }
 

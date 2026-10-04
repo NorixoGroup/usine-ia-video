@@ -68,10 +68,7 @@ check("commentaires : jamais de texte brut dans une sélection (liste blanche)",
   if (JSON.stringify(out).includes("IGNORE")) throw new Error("injection transmise");
 });
 
-check("isolation stricte entre chaînes", () => {
-  appendMemory({ root, channelId: "autre", partition: "analytics", engine: "analytics", now: t(1), record: { type: "snapshot", data: { secret_marker: 1 } } });
-  if (JSON.stringify(sel()).includes("secret_marker")) throw new Error("fuite autre → nomade");
-  if (sel({ channelId: "autre" }).entries.length !== 1) throw new Error("autre");
+check("identifiant interne : traversée de chemin refusée", () => {
   throwsWith(() => sel({ channelId: "../nomade" }), "channel_id");
 });
 

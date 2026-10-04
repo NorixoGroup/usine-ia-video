@@ -4,7 +4,6 @@
 
 import { allowedHosts } from "./guard.js";
 import { tokensEqual } from "./session.js";
-import { isValidChannelId } from "./channels.js";
 import { DEFAULT_CHANNEL_ID } from "./config.js";
 import { BRIDGE_CONTRACT, BRIDGE_TOKEN_HEADER, BRIDGE_API_PREFIX } from "./bridge-config.js";
 
@@ -29,7 +28,8 @@ const ROUTES = Object.freeze({
   analytics: ({ agent, channelId }) => agent.analytics({ channelId }),
   learning: ({ agent, channelId }) => agent.learning({ channelId }),
   journal: ({ agent, channelId, query }) => agent.journal({ channelId, limit: Number(query.get("limit")) || 50 }),
-  settings: ({ agent, channelId }) => agent.settings({ channelId })
+  settings: ({ agent, channelId }) => agent.settings({ channelId }),
+  youtube_login: ({ agent }) => agent.youtubeLogin()
 });
 
 export const BRIDGE_ROUTES = Object.freeze(Object.keys(ROUTES));
@@ -60,15 +60,14 @@ export function createBridgeHandler({ agent, port, token, now = () => new Date()
     if (provided === undefined) return fail(401, "token_missing");
     if (!tokensEqual(token, provided)) return fail(401, "token_invalid");
 
-    const requested = url.searchParams.get("channel");
-
-    if (requested !== null && !isValidChannelId(requested)) return fail(400, "invalid_channel");
+    // Une seule chaîne : aucun paramètre de chaîne n'est accepté.
+    if (url.searchParams.has("channel")) return fail(400, "unsupported_parameter");
 
     const productionId = url.searchParams.get("production_id");
 
     if (productionId !== null && !PRODUCTION_ID.test(productionId)) return fail(400, "invalid_production_id");
 
-    const channelId = requested ?? DEFAULT_CHANNEL_ID;
+    const channelId = DEFAULT_CHANNEL_ID;
 
     try {
       const data = ROUTES[name]({ agent, channelId, query: url.searchParams });

@@ -12,13 +12,14 @@ import {
   DEFAULT_CHANNEL_ID,
   MAX_BODY_BYTES
 } from "./config.js";
-import { isValidChannelId } from "./channels.js";
-import { checkRequest } from "./guard.js";
+import { checkRequest, allowedHosts } from "./guard.js";
 import { createSession } from "./session.js";
 import { createYouTubeAgent } from "./agent.js";
 import { createBridgeHandler } from "./agent-api.js";
 import { readBridgeToken, BRIDGE_API_PREFIX } from "./bridge-config.js";
 import { renderDashboard, renderError } from "./views.js";
+import { createYoutubeAuthService } from "./connectors/youtube/auth/service.js";
+import { createYoutubeChannel } from "./connectors/youtube/channel.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..");
@@ -37,6 +38,13 @@ function html(status, body) {
   return { status, headers: { ...BASE_HEADERS, "content-type": "text/html; charset=utf-8" }, body };
 }
 
+const OAUTH_LOGIN_PATH = "/oauth/youtube/login";
+const OAUTH_CALLBACK_PATH = "/oauth/youtube/callback";
+
+function redirect(location) {
+  return { status: 303, headers: { ...BASE_HEADERS, location }, body: "" };
+}
+
 function parseChecklist(text) {
   return String(text ?? "")
     .split("\n")
@@ -49,14 +57,37 @@ function parseChecklist(text) {
     });
 }
 
-// Gestionnaire pur : { method, url, headers, body } → { status, headers, body }.
-export function createHandler({ root = ROOT, port, token }) {
-  const agent = createYouTubeAgent({ root });
+// Gestionnaire : { method, url, headers, body } → { status, headers, body }.
+// Seul le callback OAuth répond par une promesse (échange du code) ; le reste est synchrone.
+export function createHandler({ root = ROOT, port, token, youtubeAuth = null, youtubeChannel = null }) {
+  const agent = createYouTubeAgent({ root, youtubeAuth, youtubeChannel });
 
   return function handle(req) {
     const url = new URL(req.url, `http://${LOOPBACK_HOST}:${port}`);
     const method = String(req.method ?? "GET").toUpperCase();
     const headers = req.headers ?? {};
+
+    // Callback OAuth : appelé par le navigateur au retour de Google (donc sans jeton de session).
+    // Protégé par le Host exact puis par l'état à usage unique, vérifié avant tout échange.
+    if (url.pathname === OAUTH_CALLBACK_PATH) {
+      if (method !== "GET") return html(405, renderError({ title: "Méthode refusée", message: "Méthode non autorisée." }));
+      if (!allowedHosts(port).has(String(headers.host ?? "").toLowerCase())) return html(403, renderError({ title: "Accès refusé", message: "Requête non autorisée." }));
+      // Sans configuration, aucune URL de retour n'est connue.
+      if (!youtubeAuth?.enabled) return html(503, renderError({ title: "Connexion Google indisponible", message: "La configuration de la connexion Google est incomplète." }));
+
+      return agent
+        .youtubeCallback({
+          code: url.searchParams.get("code") ?? undefined,
+          state: url.searchParams.get("state") ?? undefined,
+          error: url.searchParams.get("error") ?? undefined
+        })
+        .then(async result => {
+          // Connexion réussie : l'identité de la chaîne est relue avant le retour vers Nomad Studio.
+          if (result.ok && youtubeChannel) await youtubeChannel.refresh();
+
+          return redirect(youtubeAuth.returnUrl);
+        });
+    }
 
     const verdict = checkRequest({ headers, searchParams: url.searchParams, port, token, method });
 
@@ -64,17 +95,24 @@ export function createHandler({ root = ROOT, port, token }) {
       return html(verdict.status, renderError({ title: "Accès refusé", message: "Requête non autorisée." }));
     }
 
-    const requested = url.searchParams.get("channel");
-    const channelId = requested && isValidChannelId(requested) ? requested : DEFAULT_CHANNEL_ID;
+    const channelId = DEFAULT_CHANNEL_ID;
 
     if (url.pathname === "/style.css" && method === "GET") {
       return { status: 200, headers: { ...BASE_HEADERS, "content-type": "text/css; charset=utf-8" }, body: STYLE };
     }
 
+    if (url.pathname === OAUTH_LOGIN_PATH && method === "GET") {
+      try {
+        return redirect(agent.youtubeLogin().authorizeUrl);
+      } catch {
+        return html(503, renderError({ title: "Connexion Google indisponible", message: "La configuration de la connexion Google est incomplète.", token }));
+      }
+    }
+
     if (url.pathname === "/" && method === "GET") {
       const { productions, registry } = agent.status({ channelId });
 
-      return html(200, renderDashboard({ channelId, productions, registry, token }));
+      return html(200, renderDashboard({ productions, registry, token, youtube: agent.youtubeStatus() }));
     }
 
     if (url.pathname === "/videos" && method === "POST") {
@@ -90,12 +128,10 @@ export function createHandler({ root = ROOT, port, token }) {
       }
 
       const form = new URLSearchParams(raw);
-      const formChannel = form.get("channel_id");
-      const targetChannel = formChannel && isValidChannelId(formChannel) ? formChannel : DEFAULT_CHANNEL_ID;
 
       try {
         agent.linkVideo({
-          channelId: targetChannel,
+          channelId,
           entry: {
             production_id: form.get("production_id"),
             type: form.get("type"),
@@ -116,7 +152,7 @@ export function createHandler({ root = ROOT, port, token }) {
       };
     }
 
-    const known = url.pathname === "/" || url.pathname === "/style.css" || url.pathname === "/videos";
+    const known = ["/", "/style.css", "/videos", OAUTH_LOGIN_PATH].includes(url.pathname);
 
     return known
       ? html(405, renderError({ title: "Méthode refusée", message: "Méthode non autorisée.", token }))
@@ -126,12 +162,13 @@ export function createHandler({ root = ROOT, port, token }) {
 
 export function startServer({ root = ROOT, port = DEFAULT_PORT, bridgeToken = readBridgeToken() } = {}) {
   const session = createSession();
-  const agent = createYouTubeAgent({ root });
+  let youtubeAuth = null;
+  let youtubeChannel = null;
 
   const server = http.createServer((req, res) => {
     // Pont JSON en lecture seule pour Norixo : garde propre (Host, jeton du pont).
     if ((req.url ?? "").startsWith(BRIDGE_API_PREFIX)) {
-      const out = createBridgeHandler({ agent, port: server.address().port, token: bridgeToken })({ method: req.method, url: req.url, headers: req.headers });
+      const out = createBridgeHandler({ agent: createYouTubeAgent({ root, youtubeAuth, youtubeChannel }), port: server.address().port, token: bridgeToken })({ method: req.method, url: req.url, headers: req.headers });
 
       res.writeHead(out.status, out.headers).end(out.body);
       req.resume();
@@ -161,15 +198,16 @@ export function startServer({ root = ROOT, port = DEFAULT_PORT, bridgeToken = re
       if (rejected) return;
 
       try {
-        const handle = createHandler({ root, port: server.address().port, token: session.token });
-        const out = handle({
+        const handle = createHandler({ root, port: server.address().port, token: session.token, youtubeAuth, youtubeChannel });
+
+        Promise.resolve(handle({
           method: req.method,
           url: req.url,
           headers: req.headers,
           body: Buffer.concat(chunks).toString("utf8")
-        });
-
-        res.writeHead(out.status, out.headers).end(out.body);
+        }))
+          .then(out => res.writeHead(out.status, out.headers).end(out.body))
+          .catch(() => res.writeHead(500, { ...BASE_HEADERS, "content-type": "text/plain; charset=utf-8" }).end("Erreur interne"));
       } catch {
         res.writeHead(500, { ...BASE_HEADERS, "content-type": "text/plain; charset=utf-8" }).end("Erreur interne");
       }
@@ -180,7 +218,12 @@ export function startServer({ root = ROOT, port = DEFAULT_PORT, bridgeToken = re
     server.listen(port, LOOPBACK_HOST, () => {
       const actual = server.address().port;
 
-      resolve({ server, port: actual, token: session.token, bridgeEnabled: Boolean(bridgeToken), url: `http://${LOOPBACK_HOST}:${actual}/?t=${session.token}` });
+      youtubeAuth = createYoutubeAuthService({ root, port: actual });
+      youtubeChannel = createYoutubeChannel({ root });
+      // Lecture de la chaîne au démarrage (sans appel si aucune connexion enregistrée).
+      youtubeChannel.refresh();
+
+      resolve({ server, port: actual, token: session.token, bridgeEnabled: Boolean(bridgeToken), oauthEnabled: youtubeAuth.enabled, url: `http://${LOOPBACK_HOST}:${actual}/?t=${session.token}` });
     });
   });
 }
@@ -194,8 +237,9 @@ if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) 
     process.exit(1);
   }
 
-  const { url, bridgeEnabled } = await startServer({ port });
+  const { url, bridgeEnabled, oauthEnabled } = await startServer({ port });
 
   console.log(`YouTube Agent (local, 127.0.0.1 uniquement)\n${url}`);
   console.log(`Pont Norixo : ${bridgeEnabled ? "activé (jeton fourni)" : "désactivé (aucun jeton valide fourni)"}`);
+  console.log(`Connexion Google : ${oauthEnabled ? "configurée" : "non configurée (variables YOUTUBE_OAUTH_* à fournir)"}`);
 }

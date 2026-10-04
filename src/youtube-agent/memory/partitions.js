@@ -23,5 +23,10 @@ export const PARTITIONS = Object.freeze({
     review_states: Object.freeze(["proposed", "in_review", "approved"])
   }),
   prompts: p(["learning", "human"], "jsonl"),
-  journal: p(["agent"], "jsonl")
+  journal: p(["agent"], "jsonl"),
+  // Connexion YouTube : jamais lisible par une sélection de contexte ni par le pont.
+  oauth: p(["connector"], "json", { sensitive: true }),
+  quota: p(["connector"], "json"),
+  // Miroir en lecture seule de la chaîne et des vidéos YouTube (distinct du registre `videos`).
+  youtube: p(["sync"], "json")
 });

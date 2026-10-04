@@ -1,4 +1,4 @@
-// Identifiant de chaîne : clé de premier rang de toutes les données.
+// Identifiant interne et constant de la chaîne : sert uniquement à ranger les données.
 
 import { CHANNEL_ID_PATTERN, DEFAULT_CHANNEL_ID } from "./config.js";
 

@@ -38,7 +38,6 @@ check("approbation d'une autre production / autre transition / expirée / non hu
   if (go("in_production", { approval: approve("failed", "in_production") }).reason !== "action_mismatch") throw new Error("autre transition");
   if (go("in_production", { approval: approve("idea", "in_production", PROD_A, ch, { ttl_ms: 1000 }) , now: new Date(now.getTime() + 5000) }).reason !== "approval_expired") throw new Error("expirée");
   if (go("in_production", { approval: approve("idea", "in_production", PROD_A, ch, { approver: "agent" }) }).reason !== "approver_not_human") throw new Error("non humain");
-  if (go("in_production", { approval: approve("idea", "in_production", PROD_A, "autre") }).reason !== "action_mismatch") throw new Error("autre chaîne");
 });
 
 check("approbation valide → transition appliquée, idempotente au rejeu", () => {
@@ -73,8 +72,7 @@ check("historique persisté avec empreinte d'approbation, journal en ajout seul"
   if (j.filter(e => e.type === "workflow_transition").length !== 6) throw new Error("journal");
 });
 
-check("isolation entre chaînes et entre épisodes", () => {
-  if (getEpisode({ root, channelId: "autre", productionId: PROD_A }).state !== "idea") throw new Error("fuite entre chaînes");
+check("isolation entre épisodes", () => {
   if (getEpisode({ root, channelId: ch, productionId: PROD_B }).state !== "idea") throw new Error("fuite entre épisodes");
 });
 

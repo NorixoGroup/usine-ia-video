@@ -1,4 +1,4 @@
-// Smoke du registre de vidéos — écritures atomiques, validation, isolation par chaîne.
+// Smoke du registre de vidéos — écritures atomiques, validation.
 // Usage : NO_API=1 node --import ./scripts/fixture-network-guard.js scripts/youtube-agent-videos-registry-smoke.js
 
 import fs from "node:fs";
@@ -40,30 +40,20 @@ check("validation : production_id, type, video_id, date, notes, checklist", () =
   throwsWith(() => validateVideoEntry({ ...base, publication_checklist: Array(31).fill({ label: "a" }) }), "checklist");
 });
 
-check("isolation entre chaînes", () => {
-  upsertVideo({ root, channelId: "autre", entry: { production_id: PROD_B, type: "test" } });
-  if (loadRegistry({ root, channelId: "nomade" }).videos.some(v => v.production_id === PROD_B)) throw new Error("fuite");
-  if (loadRegistry({ root, channelId: "autre" }).videos.length !== 1) throw new Error("autre");
-});
-
-check("registre d'une autre chaîne ou d'un autre schéma refusé", () => {
+check("registre d'un autre schéma refusé", () => {
   const file = partitionFile(root, "nomade", "videos", "registry.json");
   const data = JSON.parse(fs.readFileSync(file, "utf8"));
-  fs.writeFileSync(file, JSON.stringify({ ...data, channel_id: "autre" }));
-  throwsWith(() => loadRegistry({ root, channelId: "nomade" }), "Registre");
   fs.writeFileSync(file, JSON.stringify({ ...data, schema: "x" }));
   throwsWith(() => loadRegistry({ root, channelId: "nomade" }), "Registre");
 });
 
-check("channel_id et chemins : traversée refusée, 100 chaînes sans changement", () => {
+check("identifiant interne et chemins : traversée refusée", () => {
   for (const bad of ["", "..", "../x", "A", "a/b", "a b", "x".repeat(41), null, 5]) {
     if (isValidChannelId(bad)) throw new Error(`accepté : ${bad}`);
     throwsWith(() => channelDir(root, bad), "channel_id");
   }
   throwsWith(() => partitionFile(root, "nomade", "videos", "../x.json"), "refusé");
   throwsWith(() => partitionFile(root, "nomade", "inconnue", "x.json"), "Partition");
-  for (let i = 0; i < 100; i += 1) upsertVideo({ root, channelId: `chaine-${i}`, entry: base });
-  if (loadRegistry({ root, channelId: "chaine-99" }).videos.length !== 1) throw new Error("chaîne 99");
 });
 
 cleanup(root);

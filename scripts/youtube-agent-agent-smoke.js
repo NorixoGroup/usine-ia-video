@@ -1,4 +1,4 @@
-// Smoke de la façade YouTube Agent + multi-chaînes : orchestration seulement.
+// Smoke de la façade YouTube Agent : orchestration seulement.
 // Usage : NO_API=1 node --import ./scripts/fixture-network-guard.js scripts/youtube-agent-agent-smoke.js
 
 import fs from "node:fs";
@@ -15,9 +15,9 @@ const now = new Date("2026-06-01T10:00:00Z");
 makeProduction(root, PROD_A, { agents: [{ id: "research", status: "completed" }, { id: "script", status: "failed" }] });
 const agent = createYouTubeAgent({ root, now: () => now });
 
-check("describe : 16 moteurs, partitions, états des quatre machines", () => {
+check("describe : 16 moteurs, 11 partitions, états des quatre machines", () => {
   const d = agent.describe();
-  if (d.engines.length !== 16 || Object.keys(d.partitions).length !== 8) throw new Error("describe");
+  if (d.engines.length !== 16 || Object.keys(d.partitions).length !== 11) throw new Error("describe");
   if (!d.episode_states.includes("ready_to_publish") || !d.comment_states.includes("quarantined")) throw new Error("états");
 });
 
@@ -56,9 +56,7 @@ check("aucune écriture dans projects/ ; production.json inchangé", () => {
   if (fs.readdirSync(path.join(root, "projects", PROD_A)).join() !== "production.json") throw new Error("fichier ajouté dans la production");
 });
 
-check("multi-chaînes : états indépendants, 100 chaînes sans changement de code", () => {
-  if (agent.status({ channelId: "autre" }).episodes[PROD_A] !== "idea") throw new Error("fuite d'état");
-  for (let i = 0; i < 100; i += 1) agent.status({ channelId: `chaine-${i}` });
+check("identifiant interne : traversée de chemin refusée", () => {
   throwsWith(() => agent.status({ channelId: "../x" }), "channel_id");
   throwsWith(() => agent.execute({ channelId: "BAD", engineId: "research" }), "channel_id");
 });

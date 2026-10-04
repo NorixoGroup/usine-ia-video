@@ -1,4 +1,4 @@
-// Registre éditorial par chaîne : lien production ↔ vidéo, type, date cible,
+// Registre éditorial : lien production ↔ vidéo, type, date cible,
 // checklist de publication manuelle. Partition « videos ». Aucun appel externe.
 
 import { readJson, writeJsonAtomic, withFileLock } from "./atomic-json.js";

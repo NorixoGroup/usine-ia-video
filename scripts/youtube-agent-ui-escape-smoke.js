@@ -34,7 +34,7 @@ check("titre et statut hostiles échappés dans le tableau de bord", () => {
 
 check("notes hostiles enregistrées puis ré-affichées échappées", () => {
   const body = new URLSearchParams({
-    channel_id: "nomade", production_id: PROD_A, type: "test", video_id: "", target_date: "",
+    production_id: PROD_A, type: "test", video_id: "", target_date: "",
     publication_checklist: `[x] ${XSS}`, notes: XSS
   }).toString();
   const post = handle({ method: "POST", url: `/videos?t=${token}`, headers, body });
@@ -53,7 +53,7 @@ check("entrée invalide : message d'erreur échappé, aucune écriture", () => {
 
 check("valeur hostile dans un attribut ne casse pas le contexte", () => {
   const html = renderDashboard({
-    channelId: "nomade", token,
+    token,
     productions: { total: 1, shown: [{ id: XSS, readable: true, status: "x", mode: "test", title: "", agents: [] }] },
     registry: { videos: [{ production_id: XSS, type: "test", video_id: XSS, target_date: XSS, publication_checklist: [], notes: XSS }] }
   });
