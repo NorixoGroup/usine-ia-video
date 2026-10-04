@@ -63,6 +63,7 @@ const ENVELOPES = {
       "claim_coverage_validation",
       "usage"
     ],
+    fullOptionalMetadata: ["script_generation"],
     verdicts: [
       "validation",
       "research_reference_validation",
@@ -82,6 +83,7 @@ const ENVELOPES = {
       "factual_grounding_validation",
       "usage"
     ],
+    fullOptionalMetadata: ["storyboard_generation"],
     verdicts: [
       "validation",
       "script_mapping_validation",
@@ -279,10 +281,17 @@ function isNonEmptyString(value) {
   );
 }
 
-function checkExactKeys(value, allowedKeys, label, errors) {
+function checkExactKeys(
+  value,
+  requiredKeys,
+  label,
+  errors,
+  optionalKeys = []
+) {
   const keys = Object.keys(value);
+  const allowedKeys = [...requiredKeys, ...optionalKeys];
 
-  for (const key of allowedKeys) {
+  for (const key of requiredKeys) {
     if (!keys.includes(key)) {
       errors.push(`${label}: champ ${key} manquant`);
     }
@@ -292,6 +301,102 @@ function checkExactKeys(value, allowedKeys, label, errors) {
     if (!allowedKeys.includes(key)) {
       errors.push(`${label}: champ ${key} non autorisé`);
     }
+  }
+}
+
+function isNonNegativeInteger(value) {
+  return Number.isInteger(value) && value >= 0;
+}
+
+function isPositiveInteger(value) {
+  return Number.isInteger(value) && value > 0;
+}
+
+function isSha256(value) {
+  return typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+}
+
+function auditFullOptionalMetadata({ envelope, name, errors }) {
+  const field =
+    name === "script"
+      ? "script_generation"
+      : name === "visual"
+        ? "storyboard_generation"
+        : null;
+
+  if (!field || envelope[field] === undefined) {
+    return;
+  }
+
+  const metadata = envelope[field];
+  const label = `${name}.json: ${field}`;
+
+  if (!isPlainObject(metadata)) {
+    errors.push(`${label} absent ou invalide`);
+    return;
+  }
+
+  const isScript = field === "script_generation";
+  const requiredKeys = isScript
+    ? [
+      "mode",
+      "total_segments",
+      "generated_segments",
+      "reused_segments",
+      "checkpoint_directory",
+      "plan_sha256"
+    ]
+    : [
+      "mode",
+      "batch_size",
+      "total_batches",
+      "generated_batches",
+      "reused_batches",
+      "checkpoint_directory",
+      "plan_sha256"
+    ];
+
+  checkExactKeys(metadata, requiredKeys, label, errors);
+
+  if (metadata.mode !== (isScript ? "segmented" : "batched")) {
+    errors.push(`${label}: mode invalide`);
+  }
+
+  const totalKey = isScript ? "total_segments" : "total_batches";
+  const generatedKey = isScript ? "generated_segments" : "generated_batches";
+  const reusedKey = isScript ? "reused_segments" : "reused_batches";
+
+  if (!isPositiveInteger(metadata[totalKey])) {
+    errors.push(`${label}: ${totalKey} invalide`);
+  }
+
+  if (!isNonNegativeInteger(metadata[generatedKey])) {
+    errors.push(`${label}: ${generatedKey} invalide`);
+  }
+
+  if (!isNonNegativeInteger(metadata[reusedKey])) {
+    errors.push(`${label}: ${reusedKey} invalide`);
+  }
+
+  if (
+    isPositiveInteger(metadata[totalKey]) &&
+    isNonNegativeInteger(metadata[generatedKey]) &&
+    isNonNegativeInteger(metadata[reusedKey]) &&
+    metadata[generatedKey] + metadata[reusedKey] !== metadata[totalKey]
+  ) {
+    errors.push(`${label}: total de génération incohérent`);
+  }
+
+  if (!isScript && !isPositiveInteger(metadata.batch_size)) {
+    errors.push(`${label}: batch_size invalide`);
+  }
+
+  if (!isNonEmptyString(metadata.checkpoint_directory)) {
+    errors.push(`${label}: checkpoint_directory invalide`);
+  }
+
+  if (!isSha256(metadata.plan_sha256)) {
+    errors.push(`${label}: plan_sha256 invalide`);
   }
 }
 
@@ -342,7 +447,13 @@ function auditEnvelopes({ artifacts, mode, renderVerification }) {
       continue;
     }
 
-    checkExactKeys(envelope, spec.keys, label, errors);
+    checkExactKeys(
+      envelope,
+      spec.keys,
+      label,
+      errors,
+      mode === "full" ? spec.fullOptionalMetadata : []
+    );
 
     if (envelope.agent !== spec.agent) {
       errors.push(
@@ -368,6 +479,10 @@ function auditEnvelopes({ artifacts, mode, renderVerification }) {
 
     if (!spec.modelUsage && envelope.usage !== null) {
       errors.push(`${label}: usage doit être null`);
+    }
+
+    if (mode === "full") {
+      auditFullOptionalMetadata({ envelope, name, errors });
     }
   }
 
