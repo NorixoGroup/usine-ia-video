@@ -2,6 +2,11 @@ import fs from "node:fs";
 import { createMessage, extractText } from "../services/anthropic.js";
 import { validateResearchDossier } from "../utils/validate-research.js";
 import { applySourcePolicyPrompt } from "../utils/source-policy.js";
+import {
+  buildResearchLedgers,
+  persistResearchLedgers,
+  projectResearchFromLedgers
+} from "./research-ledgers.js";
 
 import {
   agentDurationProfile,
@@ -198,7 +203,8 @@ export async function runResearchAgent({
   title,
   prompt,
   testMode = false,
-  durationProfile
+  durationProfile,
+  productionDir
 }) {
   const profile = agentDurationProfile(durationProfile);
 
@@ -279,11 +285,20 @@ YouTube factuel de ${formatDurationLabel(profile)} pour "Les Découvertes du Nom
     );
   }
 
+  // R24.1 : les ledgers sont la représentation éditoriale interne ;
+  // research.json reste leur projection compatible pour Truth et l'aval.
+  const ledgers = buildResearchLedgers(data);
+  const projectedData = projectResearchFromLedgers(ledgers);
+
+  if (productionDir !== undefined) {
+    persistResearchLedgers({ productionDir, ledgers });
+  }
+
   return {
     agent: "research",
     mode: testMode ? "test" : "full",
-    data,
-    validation,
+    data: projectedData,
+    validation: validateResearchDossier(projectedData),
     usage: meta
   };
 }

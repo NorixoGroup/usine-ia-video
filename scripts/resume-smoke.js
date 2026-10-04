@@ -257,7 +257,7 @@ try {
       JSON.stringify(listDirectory(path.join(PROJECTS, nominal.productionId))) ===
         JSON.stringify([
           "assembly.json", "assets.json", "production.json",
-          "quality.json", "research.json", "script.json",
+          "quality.json", "research", "research.json", "script.json",
           "truth-report.md", "truth.json", "visual.json", "voice.json"
         ]),
       "fichiers inattendus"
@@ -451,7 +451,7 @@ try {
       JSON.stringify(listDirectory(directory)) ===
         JSON.stringify([
           "assembly.json", "assets.json", "production.json",
-          "quality.json", "render.json", "research.json",
+          "quality.json", "render.json", "research", "research.json",
           "script.json", "truth-report.md", "truth.json", "visual.json", "voice.json"
         ]),
       `fichiers : ${listDirectory(directory)}`
@@ -552,7 +552,7 @@ try {
     assert(production.agents.find(a => a.id === "script").status === "pending", "script lancé");
     assert(
       JSON.stringify(listDirectory(path.join(PROJECTS, truthPause.productionId))) ===
-        JSON.stringify(["production.json", "research.json", "truth-report.md", "truth.json"]),
+        JSON.stringify(["production.json", "research", "research.json", "truth-report.md", "truth.json"]),
       listDirectory(path.join(PROJECTS, truthPause.productionId)).join()
     );
     assert(truthPause.stdout.includes("truth-report.md"), "rapport non indiqué");

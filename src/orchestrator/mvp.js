@@ -930,7 +930,8 @@ if (dryRun) {
         title: production.input.title,
         prompt: production.input.prompt,
         testMode,
-        durationProfile
+        durationProfile,
+        productionDir
       }));
 
       sealAndWriteArtifact({
