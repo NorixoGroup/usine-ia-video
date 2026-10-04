@@ -23,6 +23,7 @@ export const STATS_SCHEMA = "youtube-agent.stats.v1";
 export const BRIDGE_VIDEO_LIMIT = 50;
 // Une synchronisation interrompue (processus arrêté) libère son bail après ce délai.
 export const SYNC_LEASE_STALE_MS = 15 * 60 * 1000;
+export const CHECKPOINT_SCHEMA_VERSION = 1;
 
 const FILES = Object.freeze({ channel: "channel.json", videos: "videos.json", stats: "stats.jsonl", sync: "sync.json", lease: "sync.lease" });
 // Champs suivis pour détecter un changement de contenu (les statistiques sont exclues).
@@ -48,6 +49,22 @@ export function readMirror(root) {
 
 export function readStatsHistory(root, { maxLines = 1000 } = {}) {
   return readJsonl(file(root, "stats"), { maxLines });
+}
+
+// Métadonnées locales de synchronisation destinées à la seule interface de
+// l'agent. Elles ne font pas partie du contrat Bridge/Dashboard public.
+export function syncState(root) {
+  const sync = readJson(file(root, "sync"), null);
+
+  if (!sync) return { status: "not_loaded" };
+
+  return {
+    status: sync.last_success_at ? "ok" : "error",
+    last_sync_at: sync.last_success_at ?? null,
+    last_summary: sync.last_summary ?? null,
+    last_full_sync: sync.checkpoint?.lastFullSync ?? null,
+    ...(sync.last_error ? { last_error: { reason: sync.last_error.reason, at: sync.last_error.at } } : {})
+  };
 }
 
 const lastError = sync => (sync?.last_error ? { reason: sync.last_error.reason, at: sync.last_error.at } : null);
@@ -139,12 +156,51 @@ export function mergeVideos({ previous = [], details, now }) {
   return { videos: result.sort(byRecency), changes };
 }
 
+// Une synchronisation incrémentale ne conclut jamais à une suppression : les
+// vidéos qui n'ont pas été relues sont conservées exactement telles quelles.
+export function mergeIncrementalVideos({ previous = [], details, now }) {
+  const at = now.toISOString();
+  const known = new Map(previous.map(video => [video.video_id, video]));
+  const changes = { added: 0, updated: 0, unchanged: 0, removed: 0, restored: 0 };
+
+  for (const [id, fresh] of details) {
+    const old = known.get(id);
+    const print = fingerprint(fresh);
+
+    if (!old) changes.added += 1;
+    else if (old.mirror_status === "removed") changes.restored += 1;
+    else if (old.fingerprint !== print) changes.updated += 1;
+    else changes.unchanged += 1;
+
+    known.set(id, {
+      ...fresh,
+      mirror_status: "present",
+      first_seen_at: old?.first_seen_at ?? at,
+      last_seen_at: at,
+      removed_at: null,
+      fingerprint: print
+    });
+  }
+
+  return { videos: [...known.values()].sort(byRecency), changes };
+}
+
+// Le hash canonique permet de refuser un checkpoint détaché du miroir qu'il
+// prétend décrire. Il n'est jamais exposé au Bridge.
+export function mirrorHash(videos = []) {
+  const stable = [...videos]
+    .map(video => ({ video_id: video.video_id, mirror_status: video.mirror_status, fingerprint: video.fingerprint ?? null, removed_at: video.removed_at ?? null }))
+    .sort((a, b) => a.video_id.localeCompare(b.video_id));
+
+  return crypto.createHash("sha256").update(JSON.stringify(stable)).digest("hex");
+}
+
 // --- Écriture -------------------------------------------------------------------------
 
 const atomic = (path, data) => withFileLock(path, () => writeJsonAtomic(path, data));
 
 // Écrit une synchronisation réussie : vidéos, chaîne, historique, puis état.
-export function writeMirror(root, { channel, videos, syncId, syncedAt, summary }) {
+export function writeMirror(root, { channel, videos, syncId, syncedAt, summary, checkpoint = null, statsVideos = null }) {
   atomic(file(root, "videos"), { schema: MIRROR_SCHEMA, sync_id: syncId, synced_at: syncedAt, videos });
   atomic(file(root, "channel"), { schema: MIRROR_SCHEMA, sync_id: syncId, synced_at: syncedAt, channel });
 
@@ -153,7 +209,7 @@ export function writeMirror(root, { channel, videos, syncId, syncedAt, summary }
     sync_id: syncId,
     synced_at: syncedAt,
     channel: { subscriber_count: channel.subscriber_count, view_count: channel.view_count, video_count: channel.video_count },
-    videos: videos.filter(video => video.mirror_status === "present").map(video => [video.video_id, video.view_count, video.like_count, video.comment_count])
+    videos: (statsVideos ?? videos.filter(video => video.mirror_status === "present")).map(video => [video.video_id, video.view_count, video.like_count, video.comment_count])
   });
 
   const previous = readJson(file(root, "sync"), null);
@@ -164,7 +220,8 @@ export function writeMirror(root, { channel, videos, syncId, syncedAt, summary }
     last_success_at: syncedAt,
     last_error: null,
     last_summary: summary,
-    sync_count: (previous?.sync_count ?? 0) + 1
+    sync_count: (previous?.sync_count ?? 0) + 1,
+    ...(checkpoint ? { checkpoint } : {})
   });
 }
 
@@ -178,7 +235,8 @@ export function writeSyncFailure(root, { at, reason }) {
     last_success_at: previous?.last_success_at ?? null,
     last_error: { reason, at },
     last_summary: previous?.last_summary ?? null,
-    sync_count: previous?.sync_count ?? 0
+    sync_count: previous?.sync_count ?? 0,
+    ...(previous?.checkpoint ? { checkpoint: previous.checkpoint } : {})
   });
 }
 

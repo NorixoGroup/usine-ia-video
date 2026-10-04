@@ -48,6 +48,7 @@ const SCOPE_LABELS = {
 function mirrorBlock(mirror, token) {
   const channel = mirror?.channel ?? { status: "not_loaded" };
   const videos = mirror?.videos ?? { status: "not_loaded" };
+  const sync = mirror?.sync ?? { status: "not_loaded" };
   let state;
 
   if (channel.status === "ok") {
@@ -61,8 +62,12 @@ function mirrorBlock(mirror, token) {
     state = "Non lue : aucune synchronisation n'a encore été faite.";
   }
 
+  const last = sync.last_summary;
+  const details = last ? `<p>Dernière synchronisation : ${escapeHtml(sync.last_sync_at ?? "inconnue")} · mode ${escapeHtml(last.mode === "full" ? "Full" : "Incremental")} · ${escapeHtml(String(last.quota_units ?? 0))} unité(s) · ${escapeHtml(String(last.videos_analyzed ?? 0))} vidéo(s) analysée(s) · dernière Full : ${escapeHtml(sync.last_full_sync ?? "inconnue")}.</p>` : "";
+
   return `<h3>Miroir local de la chaîne</h3>
 <p>${state}</p>
+${details}
 <form method="post" action="/youtube/sync?t=${encodeURIComponent(token)}"><button type="submit">Synchroniser la chaîne</button></form>`;
 }
 

@@ -13,7 +13,7 @@ import crypto from "node:crypto";
 import { readOAuthConfig } from "./auth/config.js";
 import { GOOGLE_TOKEN_ENDPOINT } from "./auth/google-oauth.js";
 import { loadRefreshToken, readConnectionMeta } from "./auth/token-store.js";
-import { readMirror, mergeVideos, writeMirror, writeSyncFailure, acquireSyncLease, channelState, videosState } from "./mirror.js";
+import { CHECKPOINT_SCHEMA_VERSION, readMirror, mergeVideos, mergeIncrementalVideos, mirrorHash, writeMirror, writeSyncFailure, acquireSyncLease, channelState, videosState, syncState } from "./mirror.js";
 
 const CHANNELS_ENDPOINT = "https://www.googleapis.com/youtube/v3/channels";
 const PLAYLIST_ITEMS_ENDPOINT = "https://www.googleapis.com/youtube/v3/playlistItems";
@@ -27,6 +27,9 @@ const MAX_RESPONSE_CHARS = 2 * 1024 * 1024;
 const MAX_VIDEOS_TOTAL = 10_000;
 const MAX_SYNC_CALLS = 500;
 const TIMEOUT_MS = 10_000;
+const RECENT_VIDEO_WINDOW = 100;
+const FULL_SYNC_AFTER_INCREMENTALS = 20;
+const FULL_SYNC_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
 class ChannelError extends Error {
   constructor(reason) {
@@ -174,7 +177,7 @@ const authorized = accessToken => ({ method: "GET", headers: { authorization: `B
 async function fetchUploads({ accessToken, uploads, fetchImpl, budget }) {
   if (typeof uploads !== "string" || !uploads) throw new ChannelError("incomplete");
 
-  const ids = [];
+  const items = [];
   let pageToken = null;
 
   do {
@@ -192,14 +195,52 @@ async function fetchUploads({ accessToken, uploads, fetchImpl, budget }) {
     if (!r.ok) throw new ChannelError(errorReason(r.status, r.json));
     if (!Array.isArray(r.json?.items)) throw new ChannelError("incomplete");
 
-    for (const item of r.json.items) ids.push(toVideo(item).video_id);
+    for (const item of r.json.items) items.push(toVideo(item));
 
-    if (ids.length > MAX_VIDEOS_TOTAL) throw new ChannelError("sync_limit");
+    if (items.length > MAX_VIDEOS_TOTAL) throw new ChannelError("sync_limit");
 
     pageToken = typeof r.json.nextPageToken === "string" && r.json.nextPageToken ? r.json.nextPageToken : null;
   } while (pageToken);
 
-  return [...new Set(ids)];
+  return [...new Map(items.map(item => [item.video_id, item])).values()];
+}
+
+// Parcourt au moins 100 éléments récents, puis continue jusqu'à retrouver la
+// frontière du checkpoint. Une frontière absente force un parcours complet de
+// la playlist mais ne transforme jamais ce cycle en décision de suppression.
+async function fetchIncrementalUploads({ accessToken, uploads, frontierVideoId, fetchImpl, budget }) {
+  if (typeof uploads !== "string" || !uploads) throw new ChannelError("incomplete");
+
+  const items = [];
+  let pageToken = null;
+  let frontierFound = !frontierVideoId;
+
+  do {
+    const url = new URL(PLAYLIST_ITEMS_ENDPOINT);
+
+    url.searchParams.set("part", "snippet,status,contentDetails");
+    url.searchParams.set("playlistId", uploads);
+    url.searchParams.set("maxResults", String(PAGE_SIZE));
+    if (pageToken) url.searchParams.set("pageToken", pageToken);
+
+    const r = await call(fetchImpl, url.toString(), authorized(accessToken), budget);
+
+    if (r.status === 404 && !pageToken && r.json?.error?.errors?.[0]?.reason === "playlistNotFound") return [];
+    if (!r.ok) throw new ChannelError(errorReason(r.status, r.json));
+    if (!Array.isArray(r.json?.items)) throw new ChannelError("incomplete");
+
+    for (const raw of r.json.items) {
+      const item = toVideo(raw);
+      items.push(item);
+      if (item.video_id === frontierVideoId) frontierFound = true;
+    }
+
+    if (items.length > MAX_VIDEOS_TOTAL) throw new ChannelError("sync_limit");
+
+    pageToken = typeof r.json.nextPageToken === "string" && r.json.nextPageToken ? r.json.nextPageToken : null;
+  } while (pageToken && (items.length < RECENT_VIDEO_WINDOW || !frontierFound));
+
+  return [...new Map(items.map(item => [item.video_id, item])).values()];
 }
 
 // Détail de toutes les vidéos, par lots de 50 identifiants (1 unité de quota par lot).
@@ -259,22 +300,72 @@ async function fetchChannel({ accessToken, fetchImpl, budget }) {
   return toChannel(r.json.items[0]);
 }
 
-// Synchronisation complète et contrôlée : tout réussit, ou rien n'est remplacé.
+const isoTime = value => (typeof value === "string" && !Number.isNaN(Date.parse(value)) ? value : null);
+
+function compatibleCheckpoint(checkpoint, { channel, previous, now }) {
+  if (!checkpoint || checkpoint.schemaVersion !== CHECKPOINT_SCHEMA_VERSION) return false;
+  if (checkpoint.channelId !== channel.channel_id || checkpoint.uploadsPlaylistId !== channel.related_playlists.uploads) return false;
+  if (checkpoint.mirrorHash !== mirrorHash(previous)) return false;
+  if (typeof checkpoint.incrementalCount !== "number" || checkpoint.incrementalCount < 0 || !Number.isInteger(checkpoint.incrementalCount)) return false;
+  if (!isoTime(checkpoint.lastFullSync) || !isoTime(checkpoint.lastIncrementalSync)) return false;
+  if (checkpoint.frontierVideoId !== null && typeof checkpoint.frontierVideoId !== "string") return false;
+  if (checkpoint.frontierPublishedAt !== null && typeof checkpoint.frontierPublishedAt !== "string") return false;
+  if (now.getTime() - Date.parse(checkpoint.lastFullSync) >= FULL_SYNC_MAX_AGE_MS) return false;
+  if (checkpoint.incrementalCount >= FULL_SYNC_AFTER_INCREMENTALS) return false;
+
+  return true;
+}
+
+function checkpointFor({ channel, uploads, videos, previousCheckpoint, mode, syncedAt }) {
+  const frontier = uploads[0] ?? null;
+
+  return {
+    schemaVersion: CHECKPOINT_SCHEMA_VERSION,
+    channelId: channel.channel_id,
+    uploadsPlaylistId: channel.related_playlists.uploads,
+    frontierVideoId: frontier?.video_id ?? null,
+    frontierPublishedAt: frontier?.published_at ?? null,
+    lastIncrementalSync: syncedAt,
+    lastFullSync: mode === "full" ? syncedAt : previousCheckpoint.lastFullSync,
+    incrementalCount: mode === "full" ? 0 : previousCheckpoint.incrementalCount + 1,
+    mirrorHash: mirrorHash(videos)
+  };
+}
+
+// Synchronisation hybride et contrôlée : premier passage, checkpoint incompatible,
+// 20 incrémentales ou plus de 7 jours sans réconciliation imposent une Full Sync.
 async function synchronize({ root, env, fetchImpl, now }) {
   const budget = { calls: 0 };
   const accessToken = await connect({ root, env, fetchImpl, budget });
   const channel = await fetchChannel({ accessToken, fetchImpl, budget });
-  const listed = await fetchUploads({ accessToken, uploads: channel.related_playlists.uploads, fetchImpl, budget });
-  const previous = readMirror(root).videos?.videos ?? [];
-  // Toutes les vidéos connues sont contrôlées, y compris les pierres tombales (restauration).
-  const ids = [...new Set([...listed, ...previous.map(video => video.video_id)])];
+  const mirror = readMirror(root);
+  const previous = mirror.videos?.videos ?? [];
+  const checkpoint = mirror.sync?.checkpoint;
+  const at = now();
+  const full = !compatibleCheckpoint(checkpoint, { channel, previous, now: at });
+  const uploads = full
+    ? await fetchUploads({ accessToken, uploads: channel.related_playlists.uploads, fetchImpl, budget })
+    : await fetchIncrementalUploads({ accessToken, uploads: channel.related_playlists.uploads, frontierVideoId: checkpoint.frontierVideoId, fetchImpl, budget });
+  const known = new Map(previous.map(video => [video.video_id, video]));
+  const ids = full
+    ? [...new Set([...uploads.map(item => item.video_id), ...previous.map(video => video.video_id)])]
+    : [...new Set([
+      // Nouvelles vidéos et tombstones qui réapparaissent, découverts pendant
+      // le parcours, plus exactement les 100 premières entrées de la playlist.
+      ...uploads.filter(item => !known.has(item.video_id) || known.get(item.video_id).mirror_status === "removed").map(item => item.video_id),
+      ...uploads.slice(0, RECENT_VIDEO_WINDOW).map(item => item.video_id)
+    ])];
   const details = await fetchDetails({ accessToken, ids, fetchImpl, budget });
   const syncedAt = now().toISOString();
-  const { videos, changes } = mergeVideos({ previous, details, now: new Date(syncedAt) });
+  const { videos, changes } = full
+    ? mergeVideos({ previous, details, now: new Date(syncedAt) })
+    : mergeIncrementalVideos({ previous, details, now: new Date(syncedAt) });
   // Quota YouTube : 1 unité par appel, l'échange du jeton (premier appel) n'en consomme pas.
-  const summary = { ...changes, present: videos.filter(video => video.mirror_status === "present").length, total_known: videos.length, calls: budget.calls, quota_units: budget.calls - 1 };
+  const mode = full ? "full" : "incremental";
+  const summary = { ...changes, mode, videos_analyzed: ids.length, present: videos.filter(video => video.mirror_status === "present").length, total_known: videos.length, calls: budget.calls, quota_units: budget.calls - 1 };
+  const nextCheckpoint = checkpointFor({ channel, uploads, videos, previousCheckpoint: checkpoint ?? { lastFullSync: syncedAt, incrementalCount: 0 }, mode, syncedAt });
 
-  writeMirror(root, { channel, videos, syncId: crypto.randomUUID(), syncedAt, summary });
+  writeMirror(root, { channel, videos, syncId: crypto.randomUUID(), syncedAt, summary, checkpoint: nextCheckpoint, statsVideos: full ? videos.filter(video => video.mirror_status === "present") : [...details.values()] });
 
   return { status: "ok", synced_at: syncedAt, summary };
 }
@@ -310,6 +401,7 @@ export function createYoutubeChannel({ root, env, fetchImpl = globalThis.fetch, 
   return {
     current: () => channelState(root),
     videos: () => videosState(root),
+    syncState: () => syncState(root),
 
     // Une seule synchronisation à la fois dans ce processus : un second appel attend la première.
     sync() {

@@ -107,7 +107,7 @@ export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth =
 
     // Miroir local de la chaîne (R20.5, lot 2) : lecture seule, aucun appel réseau.
     youtubeMirror() {
-      return { channel: youtubeChannel?.current() ?? { status: "not_loaded" }, videos: youtubeChannel?.videos() ?? { status: "not_loaded" } };
+      return { channel: youtubeChannel?.current() ?? { status: "not_loaded" }, videos: youtubeChannel?.videos() ?? { status: "not_loaded" }, sync: youtubeChannel?.syncState?.() ?? { status: "not_loaded" } };
     },
 
     // Synchronisation à la demande (bouton local ou commande), journalisée.

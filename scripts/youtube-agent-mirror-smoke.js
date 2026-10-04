@@ -129,7 +129,7 @@ await asyncCheck("première synchronisation : miroir écrit (channel.json, video
   cleanup(ctx.root);
 });
 
-await asyncCheck("synchronisation incrémentale : nouvelle vidéo, suppression (pierre tombale), renommage, confidentialité, miniature, description, statistiques", async () => {
+await asyncCheck("synchronisation incrémentale : fenêtre récente, nouvelle vidéo et changements ; aucune tombstone", async () => {
   const ctx = setup();
   for (const id of ["aaaaaaaaaaa", "bbbbbbbbbbb", "ccccccccccc", "ddddddddddd"]) ctx.yt.put(id);
   await ctx.channel.sync();
@@ -141,20 +141,72 @@ await asyncCheck("synchronisation incrémentale : nouvelle vidéo, suppression (
   ctx.yt.state.subscribers = 12;
   const r = await ctx.channel.sync();
   const s = r.summary;
-  if (s.added !== 1 || s.removed !== 1 || s.updated !== 2 || s.unchanged !== 1 || s.restored !== 0 || s.present !== 4) throw new Error(JSON.stringify(s));
+  if (s.mode !== "incremental" || s.added !== 1 || s.removed !== 0 || s.updated !== 2 || s.unchanged !== 1 || s.restored !== 0 || s.present !== 5 || s.videos_analyzed !== 4) throw new Error(JSON.stringify(s));
   const videos = readMirrorFile(ctx.root, "videos.json").videos;
   const get = id => videos.find(v => v.video_id === id);
-  if (get("bbbbbbbbbbb").mirror_status !== "removed" || !get("bbbbbbbbbbb").removed_at || get("bbbbbbbbbbb").title !== "Vidéo bbbbbbbbbbb") throw new Error("pierre tombale");
+  if (get("bbbbbbbbbbb").mirror_status !== "present" || get("bbbbbbbbbbb").removed_at !== null || get("bbbbbbbbbbb").title !== "Vidéo bbbbbbbbbbb") throw new Error("tombstone incrémentale");
   if (get("ccccccccccc").title !== "Nouveau titre" || get("ccccccccccc").privacy_status !== "unlisted") throw new Error("renommage");
   if (get("ddddddddddd").thumbnail_url !== "https://i.ytimg.com/vi/ddddddddddd/new.jpg" || get("ddddddddddd").description !== "Nouvelle description") throw new Error("miniature ou description");
   if (get("aaaaaaaaaaa").view_count !== 999 || get("aaaaaaaaaaa").first_seen_at !== "2026-10-04T10:00:00.000Z") throw new Error("statistiques ou première vue");
   const state = ctx.channel.videos();
-  if (state.total !== 4 || state.removed !== 1 || state.items[0].video_id !== "eeeeeeeeeee" || state.items.some(i => i.video_id === "bbbbbbbbbbb")) throw new Error(JSON.stringify(state));
+  if (state.total !== 5 || state.removed !== 0 || state.items[0].video_id !== "eeeeeeeeeee" || !state.items.some(i => i.video_id === "bbbbbbbbbbb")) throw new Error(JSON.stringify(state));
   if (ctx.channel.current().channel.subscriber_count !== 12) throw new Error("statistiques de la chaîne");
-  // Restauration : la vidéo supprimée réapparaît.
+  // La vidéo était conservée : son retour ne produit pas de restauration artificielle.
   ctx.yt.put("bbbbbbbbbbb");
   const back = await ctx.channel.sync();
-  if (back.summary.restored !== 1 || readMirrorFile(ctx.root, "videos.json").videos.find(v => v.video_id === "bbbbbbbbbbb").mirror_status !== "present") throw new Error("restauration");
+  if (back.summary.restored !== 0 || readMirrorFile(ctx.root, "videos.json").videos.find(v => v.video_id === "bbbbbbbbbbb").mirror_status !== "present") throw new Error("conservation incrémentale");
+  cleanup(ctx.root);
+});
+
+await asyncCheck("Lot 3 : checkpoint versionné, 20 incrémentales puis 7 jours forcent une Full Sync ; seule la Full crée la tombstone", async () => {
+  let at = new Date("2026-10-04T10:00:00Z");
+  const ctx = setup(fakeYoutube(), { now: () => at });
+  ctx.yt.put("aaaaaaaaaaa");
+  ctx.yt.put("bbbbbbbbbbb");
+  const first = await ctx.channel.sync();
+  const initialSync = readMirrorFile(ctx.root, "sync.json");
+  if (first.summary.mode !== "full" || initialSync.checkpoint?.schemaVersion !== 1 || initialSync.checkpoint?.incrementalCount !== 0 || !initialSync.checkpoint?.mirrorHash) throw new Error("checkpoint initial");
+  ctx.yt.state.videos.delete("bbbbbbbbbbb");
+  for (let n = 0; n < 20; n += 1) {
+    at = new Date(at.getTime() + 60_000);
+    const incremental = await ctx.channel.sync();
+    if (incremental.summary.mode !== "incremental" || incremental.summary.removed !== 0) throw new Error(`incrémentale ${n}: ${JSON.stringify(incremental.summary)}`);
+  }
+  const retained = readMirrorFile(ctx.root, "videos.json").videos.find(v => v.video_id === "bbbbbbbbbbb");
+  if (retained.mirror_status !== "present") throw new Error("suppression avant Full");
+  at = new Date(at.getTime() + 60_000);
+  const forcedByCount = await ctx.channel.sync();
+  if (forcedByCount.summary.mode !== "full" || forcedByCount.summary.removed !== 1 || readMirrorFile(ctx.root, "sync.json").checkpoint.incrementalCount !== 0) throw new Error(JSON.stringify(forcedByCount.summary));
+  at = new Date(at.getTime() + 7 * 24 * 60 * 60 * 1000);
+  const forcedByAge = await ctx.channel.sync();
+  if (forcedByAge.summary.mode !== "full") throw new Error(JSON.stringify(forcedByAge.summary));
+  cleanup(ctx.root);
+});
+
+await asyncCheck("Lot 3 : checkpoint absent ou incompatible migre automatiquement vers une Full Sync", async () => {
+  const ctx = setup();
+  ctx.yt.put("aaaaaaaaaaa");
+  await ctx.channel.sync();
+  const syncPath = path.join(mirrorDir(ctx.root), "sync.json");
+  const legacy = readMirrorFile(ctx.root, "sync.json");
+  delete legacy.checkpoint;
+  fs.writeFileSync(syncPath, JSON.stringify(legacy));
+  const migrated = await ctx.channel.sync();
+  const checkpoint = readMirrorFile(ctx.root, "sync.json").checkpoint;
+  if (migrated.summary.mode !== "full" || checkpoint?.schemaVersion !== 1 || checkpoint?.incrementalCount !== 0) throw new Error(JSON.stringify({ migrated, checkpoint }));
+  cleanup(ctx.root);
+});
+
+await asyncCheck("Lot 3 : une incrémentale rafraîchit exactement la fenêtre de 100 vidéos récentes et son snapshot de statistiques", async () => {
+  const ctx = setup();
+  for (let n = 0; n < 101; n += 1) ctx.yt.put(`v${String(n).padStart(10, "0")}`, { published: new Date(Date.UTC(2026, 0, 1) + n * 60_000).toISOString() });
+  await ctx.channel.sync();
+  const before = ctx.calls.length;
+  const incremental = await ctx.channel.sync();
+  const cycleCalls = ctx.calls.slice(before);
+  const detailCalls = cycleCalls.filter(call => call.url.startsWith(`${VIDEOS}?`));
+  const history = readStatsHistory(ctx.root);
+  if (incremental.summary.mode !== "incremental" || incremental.summary.videos_analyzed !== 100 || detailCalls.length !== 2 || history.at(-1).videos.length !== 100) throw new Error(JSON.stringify({ summary: incremental.summary, detailCalls: detailCalls.length, stats: history.at(-1).videos.length }));
   cleanup(ctx.root);
 });
 
@@ -268,7 +320,7 @@ await asyncCheck("bouton local : la page affiche « non lue » et le bouton ; PO
   const refused = handle({ method: "POST", url: `/youtube/sync?t=${SESSION}`, headers: { ...host, "content-type": "application/x-www-form-urlencoded" }, body: "" });
   if (refused.status !== 403 || ctx.calls.length !== 0) throw new Error("POST sans Origin accepté");
   const out = await handle({ method: "POST", url: `/youtube/sync?t=${SESSION}`, headers: { ...host, origin: `http://127.0.0.1:${PORT}`, "content-type": "application/x-www-form-urlencoded" }, body: "" });
-  if (out.status !== 200 || !out.body.includes("Synchronisation réussie : 1 vidéos") || !out.body.includes("Chaîne « Les Découvertes du Nomade » · 1 vidéo")) throw new Error(out.body.slice(-600));
+  if (out.status !== 200 || !out.body.includes("Synchronisation réussie : 1 vidéos") || !out.body.includes("Chaîne « Les Découvertes du Nomade » · 1 vidéo") || !out.body.includes("mode Full") || !out.body.includes("vidéo(s) analysée(s)") || !out.body.includes("dernière Full")) throw new Error(out.body.slice(-900));
   const journal = readJournal({ root: ctx.root, channelId: "nomade" });
   if (journal.at(-1)?.type !== "youtube_sync" || journal.at(-1).outcome !== "ok") throw new Error(JSON.stringify(journal.at(-1)));
   if ([ACCESS, REFRESH, SECRET].some(x => out.body.includes(x) || JSON.stringify(journal).includes(x))) throw new Error("fuite");
