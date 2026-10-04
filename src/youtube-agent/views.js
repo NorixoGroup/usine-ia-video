@@ -71,6 +71,29 @@ ${details}
 <form method="post" action="/youtube/sync?t=${encodeURIComponent(token)}"><button type="submit">Synchroniser la chaîne</button></form>`;
 }
 
+// Analytiques de la chaîne (R20.5, lot 4A) : résumé local et bouton (aucun appel à l'affichage).
+function analyticsBlock(analytics, token) {
+  const a = analytics ?? { status: "not_loaded" };
+  const n = value => escapeHtml(String(Math.round(value * 10) / 10));
+  let body;
+
+  if (a.status === "ok") {
+    const t = a.totals;
+    const error = a.last_error ? ` · dernière tentative en échec (${escapeHtml(a.last_error.reason)}) le ${escapeHtml(a.last_error.at)}, données précédentes conservées` : "";
+
+    body = `<p>Données jusqu'au ${escapeHtml(a.data_until)} (fuseau du Pacifique) · synchronisées le ${escapeHtml(a.synced_at)} · ${escapeHtml(String(a.days_stored))} jour(s) enregistré(s)${error}.</p>
+<p>Du ${escapeHtml(a.period.from)} au ${escapeHtml(a.period.to)} : ${n(t.views)} vue(s) · ${n(t.watch_time_minutes)} minute(s) regardée(s) · abonnés ${t.subscribers_net >= 0 ? "+" : ""}${n(t.subscribers_net)} · ${n(t.likes)} j'aime · ${n(t.comments)} commentaire(s) · ${n(t.shares)} partage(s) · pourcentage moyen regardé : ${t.average_view_percentage === null ? "sans objet" : `${n(t.average_view_percentage)} %`}.</p>`;
+  } else if (a.status === "error") {
+    body = `<p>Non lues : dernière synchronisation en échec (${escapeHtml(a.reason)}) le ${escapeHtml(a.at)}.</p>`;
+  } else {
+    body = "<p>Non lues : aucune synchronisation n'a encore été faite.</p>";
+  }
+
+  return `<h3>Analytiques de la chaîne</h3>
+${body}
+<form method="post" action="/youtube/analytics/sync?t=${encodeURIComponent(token)}"><button type="submit">Synchroniser les analytiques</button></form>`;
+}
+
 // Bloc « Connexion Google » : état et bouton, jamais aucun secret.
 function youtubeBlock(youtube, token) {
   if (!youtube) return "";
@@ -91,7 +114,8 @@ function youtubeBlock(youtube, token) {
     return `<h2>Connexion Google</h2>
 <p>Connectée le ${escapeHtml(c.connected_at)} · accès en ${escapeHtml(scopes)} uniquement.</p>
 <p><a class="button" href="${escapeHtml(link)}">Se reconnecter à Google</a></p>
-${mirrorBlock(youtube.mirror, token)}`;
+${mirrorBlock(youtube.mirror, token)}
+${analyticsBlock(youtube.analytics, token)}`;
   }
 
   return `<h2>Connexion Google</h2>

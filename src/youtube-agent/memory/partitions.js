@@ -12,6 +12,8 @@ export const PARTITIONS = Object.freeze({
   channel: p(["human"], "json"),
   knowledge: p(["human"], "json"),
   videos: p(["agent", "publishing"], "json"),
+  // Analytiques : analytics.jsonl (mémoire) ; depuis R20.5 lot 4A, aussi les fichiers du
+  // connecteur Analytics (channel-daily-AAAA-MM.json, state.json, fetch.jsonl, sync.lease).
   analytics: p(["analytics"], "jsonl"),
   learning: p(["learning"], "jsonl"),
   comments: p(["comments"], "jsonl", {

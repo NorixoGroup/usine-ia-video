@@ -21,7 +21,7 @@ import {
   analyticsView, learningView, journalView, settingsView
 } from "./studio-models.js";
 
-export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth = null, youtubeChannel = null }) {
+export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth = null, youtubeChannel = null, youtubeAnalytics = null }) {
   return {
     describe() {
       return {
@@ -108,6 +108,31 @@ export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth =
     // Miroir local de la chaîne (R20.5, lot 2) : lecture seule, aucun appel réseau.
     youtubeMirror() {
       return { channel: youtubeChannel?.current() ?? { status: "not_loaded" }, videos: youtubeChannel?.videos() ?? { status: "not_loaded" }, sync: youtubeChannel?.syncState?.() ?? { status: "not_loaded" } };
+    },
+
+    // Analytiques de la chaîne (R20.5, lot 4A) : résumé local, aucun appel réseau.
+    youtubeAnalytics() {
+      return youtubeAnalytics?.summary() ?? { status: "not_loaded" };
+    },
+
+    // Synchronisation des analytiques à la demande (bouton local ou commande), journalisée.
+    async youtubeAnalyticsSync() {
+      if (!youtubeAnalytics) throw new Error("Lecteur Analytics indisponible");
+
+      const result = await youtubeAnalytics.sync();
+      const s = result.summary;
+
+      appendJournal({
+        root, channelId: DEFAULT_CHANNEL_ID, now: now(),
+        entry: {
+          type: "youtube_analytics_sync",
+          action: "sync",
+          outcome: result.status === "ok" ? "ok" : result.reason,
+          ...(s ? { detail: `${s.start_date} → ${s.end_date} ; ${s.days_received} jours ; ${s.calls} appels, ${s.analytics_requests} requête Analytics` } : {})
+        }
+      });
+
+      return result;
     },
 
     // Synchronisation à la demande (bouton local ou commande), journalisée.

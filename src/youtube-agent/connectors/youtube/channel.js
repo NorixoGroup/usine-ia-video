@@ -411,3 +411,8 @@ export function createYoutubeChannel({ root, env, fetchImpl = globalThis.fetch, 
     }
   };
 }
+
+// Partagés avec le connecteur Analytics (R20.5 lot 4A) : même échange de jeton, même
+// enveloppe HTTP (délai, taille, budget d'appels), mêmes codes d'erreur. Le miroir
+// n'est pas concerné.
+export { connect as connectYoutube, call as callGoogle, errorReason as googleErrorReason, ChannelError as YoutubeConnectorError };

@@ -95,6 +95,8 @@ check("environnement : seul bridge-config.js lit le jeton du pont ; aucun .env, 
 check("réseau Google : seuls google-oauth.js (échange du code) et channel.js (chaîne et vidéos) appellent fetchImpl", () => {
   for (const f of files) {
     if (f.rel === "connectors/youtube/auth/google-oauth.js" || f.rel === "connectors/youtube/channel.js") continue;
+    // analytics.js ne fait que transmettre fetchImpl à l'enveloppe de channel.js (vérifié plus bas).
+    if (f.rel === "connectors/youtube/analytics.js" && !/fetchImpl\s*\(/.test(f.code)) continue;
     if (/fetchImpl\s*\(|globalThis\.fetch/.test(f.code)) throw new Error(`${f.rel} : appel réseau hors google-oauth.js`);
   }
   const oauth = files.find(f => f.rel === "connectors/youtube/auth/google-oauth.js");
@@ -111,6 +113,19 @@ check("réseau Google : seuls google-oauth.js (échange du code) et channel.js (
   if ((channel.code.match(/method:\s*"POST"/g) ?? []).length !== 1 || !/method:\s*"GET"/.test(channel.code)) throw new Error("channel.js : méthodes non conformes");
 });
 
+check("Analytics (R20.5 lot 4A) : un seul endpoint, youtubeanalytics v2/reports, en GET, sans revenus ni impressions", () => {
+  const analytics = files.find(f => f.rel === "connectors/youtube/analytics.js");
+  if (!analytics) throw new Error("analytics.js introuvable");
+  const urls = fs.readFileSync(analytics.file, "utf8").match(/https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+[^"'`\s]*/g) ?? [];
+  if (urls.join() !== "https://youtubeanalytics.googleapis.com/v2/reports") throw new Error("analytics.js : endpoints non conformes");
+  if (/fetchImpl\s*\(/.test(analytics.code)) throw new Error("analytics.js : appel réseau direct");
+  if (/method:\s*"(?:POST|PUT|DELETE|PATCH)"/.test(analytics.code) || !/method:\s*"GET"/.test(analytics.code)) throw new Error("analytics.js : méthodes non conformes");
+  if (/revenue|\bcpm\b|\brpm\b|monetiz|impression|adRate|grossRevenue|playbackBasedCpm/i.test(analytics.code)) throw new Error("analytics.js : métrique hors périmètre");
+  for (const f of files) {
+    if (f.rel !== "connectors/youtube/analytics.js" && /youtubeanalytics\.googleapis/i.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : appel Analytics hors analytics.js`);
+  }
+});
+
 check("adresses Google uniquement dans le connecteur YouTube", () => {
   for (const f of files) {
     if (f.rel.startsWith("connectors/youtube/")) continue;
@@ -122,7 +137,7 @@ check("serveur et pont : aucun import direct des moteurs ni des modules de donn�
   const forbidden = /(?:^|\/)(?:planner|approvals|engines|journal|videos-registry|productions-reader|studio-models|settings-reader|atomic-json|paths|capabilities)\.js$|(?:^|\/)(?:workflow|memory|comments|analytics|learning)\//;
   const allowed = {
     "agent-api.js": ["./guard.js", "./session.js", "./channels.js", "./config.js", "./bridge-config.js"],
-    "server.js": ["./config.js", "./channels.js", "./guard.js", "./session.js", "./agent.js", "./agent-api.js", "./bridge-config.js", "./views.js", "./connectors/youtube/auth/service.js", "./connectors/youtube/channel.js"]
+    "server.js": ["./config.js", "./channels.js", "./guard.js", "./session.js", "./agent.js", "./agent-api.js", "./bridge-config.js", "./views.js", "./connectors/youtube/auth/service.js", "./connectors/youtube/channel.js", "./connectors/youtube/analytics.js"]
   };
   for (const rel of Object.keys(allowed)) {
     const f = files.find(x => x.rel === rel);
