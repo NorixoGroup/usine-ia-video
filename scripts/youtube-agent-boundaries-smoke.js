@@ -96,7 +96,7 @@ check("réseau Google : seuls google-oauth.js (échange du code) et channel.js (
   for (const f of files) {
     if (f.rel === "connectors/youtube/auth/google-oauth.js" || f.rel === "connectors/youtube/channel.js") continue;
     // analytics.js ne fait que transmettre fetchImpl à l'enveloppe de channel.js (vérifié plus bas).
-    if (["connectors/youtube/analytics.js", "connectors/youtube/analytics-probe.js", "connectors/youtube/video-analytics.js"].includes(f.rel) && !/fetchImpl\s*\(/.test(f.code)) continue;
+    if (["connectors/youtube/analytics.js", "connectors/youtube/analytics-probe.js", "connectors/youtube/video-analytics.js", "connectors/youtube/breakdowns.js", "connectors/youtube/analytics-suite.js"].includes(f.rel) && !/fetchImpl\s*\(/.test(f.code)) continue;
     if (/fetchImpl\s*\(|globalThis\.fetch/.test(f.code)) throw new Error(`${f.rel} : appel réseau hors google-oauth.js`);
   }
   const oauth = files.find(f => f.rel === "connectors/youtube/auth/google-oauth.js");
@@ -122,7 +122,7 @@ check("Analytics (R20.5 lot 4A) : un seul endpoint, youtubeanalytics v2/reports,
   if (/method:\s*"(?:POST|PUT|DELETE|PATCH)"/.test(analytics.code) || !/method:\s*"GET"/.test(analytics.code)) throw new Error("analytics.js : méthodes non conformes");
   if (/revenue|\bcpm\b|\brpm\b|monetiz|impression|adRate|grossRevenue|playbackBasedCpm/i.test(analytics.code)) throw new Error("analytics.js : métrique hors périmètre");
   for (const f of files) {
-    if (!["connectors/youtube/analytics.js", "connectors/youtube/analytics-probe.js", "connectors/youtube/video-analytics.js"].includes(f.rel) && /youtubeanalytics\.googleapis/i.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : appel Analytics hors analytics.js`);
+    if (!["connectors/youtube/analytics.js", "connectors/youtube/analytics-probe.js", "connectors/youtube/video-analytics.js", "connectors/youtube/breakdowns.js"].includes(f.rel) && /youtubeanalytics\.googleapis/i.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : appel Analytics hors analytics.js`);
   }
 });
 
@@ -137,7 +137,26 @@ check("Analytics par vidéo (R20.5 lot 4B) : v2/reports en GET, jamais day,video
   if (/writeMirror|writeSyncFailure|acquireSyncLease|mergeVideos|mergeIncrementalVideos/.test(video.code)) throw new Error("video-analytics.js : écriture du miroir");
   // Test réel 4B.0 : la combinaison jour + vidéo est refusée (HTTP 400) ; elle ne doit plus exister.
   for (const f of files) if (/day\s*,\s*video|video\s*,\s*day/.test(fs.readFileSync(f.file, "utf8"))) throw new Error(`${f.rel} : dimensions jour et vidéo combinées`);
-  for (const f of files) if (!["youtube-analytics-videos-sync.js"].includes(f.rel) && /video-analytics\.js/.test(f.code)) throw new Error(`${f.rel} importe video-analytics.js`);
+  for (const f of files) if (!["youtube-analytics-videos-sync.js", "connectors/youtube/analytics-suite.js", "analytics/read-model.js"].includes(f.rel) && /video-analytics\.js/.test(f.code)) throw new Error(`${f.rel} importe video-analytics.js`);
+});
+
+check("bloc Analytics (R20.6) : répartitions en GET sur v2/reports, une dimension par requête ; lecture et liaison sans réseau ni écriture", () => {
+  const breakdowns = files.find(f => f.rel === "connectors/youtube/breakdowns.js");
+  if (!breakdowns) throw new Error("breakdowns.js introuvable");
+  const urls = fs.readFileSync(breakdowns.file, "utf8").match(/https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+[^"'`\s]*/g) ?? [];
+  if (urls.join() !== "https://youtubeanalytics.googleapis.com/v2/reports") throw new Error("breakdowns.js : endpoints non conformes");
+  if (/fetchImpl\s*\(/.test(breakdowns.code) || /method:\s*"(?:POST|PUT|DELETE|PATCH)"/.test(breakdowns.code) || !/method:\s*"GET"/.test(breakdowns.code)) throw new Error("breakdowns.js : méthodes non conformes");
+  if (/revenue|\bcpm\b|\brpm\b|monetiz|impression|adRate/i.test(breakdowns.code)) throw new Error("breakdowns.js : métrique hors périmètre");
+  const suite = files.find(f => f.rel === "connectors/youtube/analytics-suite.js");
+  if (!suite || /https:|callGoogle|writeJson|appendJsonl/.test(fs.readFileSync(suite.file, "utf8"))) throw new Error("analytics-suite.js : orchestration seulement");
+  for (const rel of ["analytics/linking.js", "analytics/read-model.js"]) {
+    const f = files.find(x => x.rel === rel);
+    if (!f) throw new Error(`${rel} introuvable`);
+    if (/writeJson|appendJsonl|writeFile|appendFile|mkdirSync|rmSync|renameSync|acquireLease|upsertVideo|linkVideo|\.sync\(|callGoogle|connectYoutube/.test(f.code)) throw new Error(`${rel} : écriture ou réseau`);
+  }
+  // Le pont reste inchangé : la route analytics sert toujours analyticsView() (not_connected).
+  const api = files.find(f => f.rel === "agent-api.js");
+  if (!/analytics: \(\{ agent, channelId \}\) => agent\.analytics\(\{ channelId \}\)/.test(api.code) || /analyticsDashboard|analyticsOverview/.test(api.code)) throw new Error("pont modifié");
 });
 
 check("sonde Analytics (R20.5 4B.0) : v2/reports en GET seulement, aucune écriture, aucun import d'écriture, absente du serveur", () => {
@@ -166,7 +185,7 @@ check("serveur et pont : aucun import direct des moteurs ni des modules de donn�
   const forbidden = /(?:^|\/)(?:planner|approvals|engines|journal|videos-registry|productions-reader|studio-models|settings-reader|atomic-json|paths|capabilities)\.js$|(?:^|\/)(?:workflow|memory|comments|analytics|learning)\//;
   const allowed = {
     "agent-api.js": ["./guard.js", "./session.js", "./channels.js", "./config.js", "./bridge-config.js"],
-    "server.js": ["./config.js", "./channels.js", "./guard.js", "./session.js", "./agent.js", "./agent-api.js", "./bridge-config.js", "./views.js", "./connectors/youtube/auth/service.js", "./connectors/youtube/channel.js", "./connectors/youtube/analytics.js"]
+    "server.js": ["./config.js", "./channels.js", "./guard.js", "./session.js", "./agent.js", "./agent-api.js", "./bridge-config.js", "./views.js", "./connectors/youtube/auth/service.js", "./connectors/youtube/channel.js", "./connectors/youtube/analytics-suite.js"]
   };
   for (const rel of Object.keys(allowed)) {
     const f = files.find(x => x.rel === rel);

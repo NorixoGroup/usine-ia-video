@@ -13,6 +13,7 @@
 //   remplacé à chaque relecture ; l'historique est conservé ;
 // - video-state.json : état global et, par vidéo, dernier jour lu et dernière erreur ;
 // - video-fetch.jsonl : journal des synchronisations (ajout seul) ;
+// - video-index.json : index par vidéo, reconstruit à chaque synchronisation (R20.6) ;
 // - video-sync.lease : bail exclusif (une synchronisation à la fois).
 // Chaque vidéo est enregistrée dès que son rapport est reçu : un arrêt en cours de
 // synchronisation conserve les vidéos déjà traitées. Dates de l'API conservées (Pacifique).
@@ -96,7 +97,7 @@ function mirrorVideos(root) {
 
   for (const v of Array.isArray(list) ? list : []) {
     if (typeof v?.video_id === "string" && VIDEO_ID.test(v.video_id)) {
-      map.set(v.video_id, { title: typeof v.title === "string" ? v.title : null, privacy_status: v.privacy_status ?? null, present: v.mirror_status !== "removed" });
+      map.set(v.video_id, { title: typeof v.title === "string" ? v.title : null, privacy_status: v.privacy_status ?? null, published_at: typeof v.published_at === "string" ? v.published_at : null, present: v.mirror_status !== "removed" });
     }
   }
 
@@ -123,8 +124,63 @@ export function readVideoFetchLog(root, { maxLines = 100 } = {}) {
   return readJsonl(file(root, "video-fetch.jsonl"), { maxLines });
 }
 
-// Résumé par vidéo (aucun appel réseau) : jours stockés et totaux sur `days` jours.
-export function videoAnalyticsSummary(root, { days = 28 } = {}) {
+// --- Index par vidéo -------------------------------------------------------------------
+//
+// video-index.json : reconstruit à la fin de chaque synchronisation (une seule lecture des
+// fichiers mensuels). Par vidéo : premier et dernier jour, jours stockés, totaux depuis le
+// début et sur les 28 derniers jours lus. Les moyennes sont pondérées par les vues.
+
+export const INDEX_RECENT_DAYS = 28;
+const SUMMED = ["views", "watch_time_minutes", "likes", "comments", "shares", "subscribers_gained", "subscribers_lost"];
+
+function totalsOf(records) {
+  const totals = Object.fromEntries(SUMMED.map(key => [key, records.reduce((sum, r) => sum + (r[key] ?? 0), 0)]));
+  const weighted = key => totals.views > 0 ? records.reduce((sum, r) => sum + (r[key] ?? 0) * (r.views ?? 0), 0) / totals.views : null;
+
+  return { ...totals, average_view_percentage: weighted("average_view_percentage"), average_view_duration_seconds: weighted("average_view_duration_seconds") };
+}
+
+export function buildVideoIndex(root, { now = new Date() } = {}) {
+  const state = readVideoAnalyticsState(root);
+  const byVideo = new Map();
+
+  for (const month of state?.months ?? []) {
+    const content = readJson(monthFile(root, month), null);
+
+    for (const [videoId, days] of Object.entries(content?.videos ?? {})) {
+      if (!byVideo.has(videoId)) byVideo.set(videoId, []);
+      for (const [day, record] of Object.entries(days)) byVideo.get(videoId).push({ day, ...record });
+    }
+  }
+
+  const videos = {};
+
+  for (const videoId of new Set([...Object.keys(state?.videos ?? {}), ...byVideo.keys()])) {
+    const records = (byVideo.get(videoId) ?? []).sort((a, b) => a.day.localeCompare(b.day));
+    const dataUntil = state?.videos?.[videoId]?.last_end_date ?? records.at(-1)?.day ?? null;
+    const from = dataUntil ? shift(dataUntil, -(INDEX_RECENT_DAYS - 1)) : null;
+
+    videos[videoId] = {
+      first_day: records[0]?.day ?? null,
+      last_day: records.at(-1)?.day ?? null,
+      days_stored: records.length,
+      data_until: dataUntil,
+      lifetime: totalsOf(records),
+      recent: { from, to: dataUntil, days: INDEX_RECENT_DAYS, totals: totalsOf(from ? records.filter(r => r.day >= from && r.day <= dataUntil) : []) },
+      last_error: state?.videos?.[videoId]?.last_error ?? null
+    };
+  }
+
+  return { schema: VIDEO_ANALYTICS_SCHEMA, built_at: now.toISOString(), videos };
+}
+
+// Index enregistré ; à défaut (synchronisation antérieure à l'index), calculé en mémoire.
+export function readVideoIndex(root) {
+  return readJson(file(root, "video-index.json"), null) ?? (readVideoAnalyticsState(root) ? buildVideoIndex(root) : null);
+}
+
+// Résumé par vidéo (aucun appel réseau) : depuis l'index, avec titre et confidentialité du miroir.
+export function videoAnalyticsSummary(root) {
   const state = readVideoAnalyticsState(root);
 
   if (!state?.last_success_at) {
@@ -132,30 +188,20 @@ export function videoAnalyticsSummary(root, { days = 28 } = {}) {
   }
 
   const mirror = mirrorVideos(root);
-  const videos = Object.entries(state.videos ?? {}).map(([videoId, v]) => {
-    const to = v.last_end_date;
-    const window = to ? readVideoDaily(root, videoId, { from: shift(to, -(days - 1)), to }) : [];
-    const sum = key => window.reduce((total, r) => total + (r[key] ?? 0), 0);
-    const views = sum("views");
+  const index = readVideoIndex(root);
+  const videos = Object.entries(index?.videos ?? {}).map(([videoId, v]) => {
     const m = mirror.get(videoId);
 
     return {
       video_id: videoId,
       title: m?.title ?? null,
       privacy_status: m?.privacy_status ?? null,
+      published_at: m?.published_at ?? null,
       mirror_status: m ? (m.present ? "present" : "removed") : "unknown",
-      data_until: to ?? null,
-      days_stored: readVideoDaily(root, videoId).length,
-      totals: {
-        views,
-        watch_time_minutes: sum("watch_time_minutes"),
-        likes: sum("likes"),
-        comments: sum("comments"),
-        shares: sum("shares"),
-        subscribers_gained: sum("subscribers_gained"),
-        subscribers_lost: sum("subscribers_lost"),
-        average_view_percentage: views > 0 ? window.reduce((total, r) => total + (r.average_view_percentage ?? 0) * (r.views ?? 0), 0) / views : null
-      },
+      data_until: v.data_until,
+      days_stored: v.days_stored,
+      totals: v.recent.totals,
+      lifetime: v.lifetime,
       ...(v.last_error ? { last_error: v.last_error } : {})
     };
   });
@@ -293,6 +339,7 @@ async function synchronize({ root, env, fetchImpl, now }) {
     last_summary: summary,
     sync_count: state.sync_count + (ok ? 1 : 0)
   });
+  atomic(file(root, "video-index.json"), buildVideoIndex(root, { now: at }));
 
   return ok ? { status: "ok", synced_at: fetchedAt, summary } : { status: "error", at: fetchedAt, reason: summary.stopped, summary };
 }

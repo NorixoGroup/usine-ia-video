@@ -112,7 +112,7 @@ await asyncCheck("chaîne vide : 1 jeton + 1 liste (rows vide), aucune série, �
   const [list] = reportCalls(ctx);
   if (list.dimensions !== "video" || list.sort !== "-views" || list.maxResults !== "200" || list.metrics !== API_METRICS.join(",") || list.startDate !== "2026-07-06" || list.endDate !== "2026-10-03" || list.ids !== "channel==MINE") throw new Error(JSON.stringify(list));
   const files = fs.readdirSync(analyticsDir(ctx.root)).sort();
-  if (files.join() !== "video-fetch.jsonl,video-state.json") throw new Error(files.join());
+  if (files.join() !== "video-fetch.jsonl,video-index.json,video-state.json") throw new Error(files.join());
   const s = ctx.analytics.summary();
   if (s.status !== "ok" || s.videos_tracked !== 0) throw new Error(JSON.stringify(s));
   cleanup(ctx.root);
@@ -137,7 +137,7 @@ await asyncCheck("stockage : fichiers mensuels par vidéo et par jour, 9 métriq
   ctx.sim.active = [A, B];
   await ctx.analytics.sync();
   const files = fs.readdirSync(analyticsDir(ctx.root)).sort();
-  if (files.join() !== "video-daily-2026-07.json,video-daily-2026-08.json,video-daily-2026-09.json,video-daily-2026-10.json,video-fetch.jsonl,video-state.json") throw new Error(files.join());
+  if (files.join() !== "video-daily-2026-07.json,video-daily-2026-08.json,video-daily-2026-09.json,video-daily-2026-10.json,video-fetch.jsonl,video-index.json,video-state.json") throw new Error(files.join());
   const july = JSON.parse(fs.readFileSync(path.join(analyticsDir(ctx.root), "video-daily-2026-07.json"), "utf8"));
   if (july.schema !== "youtube-agent.video-analytics.v1" || july.month !== "2026-07" || Object.keys(july.videos).join() !== `${A},${B}` || Object.keys(july.videos[A]).length !== 26) throw new Error(JSON.stringify(Object.keys(july.videos)));
   const d = july.videos[A]["2026-07-06"];
@@ -306,11 +306,13 @@ await asyncCheck("commande npm run youtube-analytics-videos-sync : synchronise, 
   cleanup(off.root);
 });
 
-check("à la demande seulement : ni le serveur, ni l'agent, ni le pont n'utilisent les analytiques par vidéo", () => {
+check("à la demande seulement : aucun lecteur par vidéo dans le serveur, l'agent ou le pont (la suite R20.6 passe par la commande ou le bouton)", () => {
   for (const rel of ["server.js", "agent.js", "agent-api.js", "studio-models.js", "views.js"]) {
     const code = fs.readFileSync(new URL(`../src/youtube-agent/${rel}`, import.meta.url), "utf8");
-    if (/video-analytics|VideoAnalytics/.test(code)) throw new Error(`${rel} utilise les analytiques par vidéo`);
+    if (/video-analytics\.js|createYoutubeVideoAnalytics/.test(code)) throw new Error(`${rel} utilise le lecteur par vidéo`);
   }
+  const server = fs.readFileSync(new URL("../src/youtube-agent/server.js", import.meta.url), "utf8");
+  if (/\.sync\(/.test(server.slice(server.indexOf("export function startServer")))) throw new Error("synchronisation au démarrage");
 });
 
 check("aucune requête n'a combiné les dimensions jour et vidéo", () => {

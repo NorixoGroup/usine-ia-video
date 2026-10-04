@@ -91,7 +91,99 @@ function analyticsBlock(analytics, token) {
 
   return `<h3>Analytiques de la chaîne</h3>
 ${body}
-<form method="post" action="/youtube/analytics/sync?t=${encodeURIComponent(token)}"><button type="submit">Synchroniser les analytiques</button></form>`;
+<form method="post" action="/youtube/analytics/sync?t=${encodeURIComponent(token)}"><button type="submit">Synchroniser les analytiques</button></form>
+${insightsBlock(analytics?.insights, token)}`;
+}
+
+// Bloc Analytics (R20.6) : répartitions, classements, propositions de liaison (lecture seule ;
+// la validation d'une proposition passe par le formulaire existant du registre).
+const BREAKDOWN_LABELS = { traffic_source: "Sources de trafic", device_type: "Appareils", country: "Pays" };
+const num = value => escapeHtml(String(Math.round((value ?? 0) * 10) / 10));
+const videoLink = (videoId, token) => `/analytics/video?v=${encodeURIComponent(videoId)}&t=${encodeURIComponent(token)}`;
+
+function rankingTable(title, items, token) {
+  if (!items.length) return `<h4>${escapeHtml(title)}</h4><p class="muted">Aucune vidéo.</p>`;
+
+  return `<h4>${escapeHtml(title)}</h4>
+<table><thead><tr><th>Vidéo</th><th>Vues (28 j)</th><th>Minutes</th><th>% regardé</th></tr></thead><tbody>
+${items.map(v => `<tr><td><a href="${escapeHtml(videoLink(v.video_id, token))}">${escapeHtml(v.title ?? v.video_id)}</a>${v.privacy_status ? ` <span class="tag">${escapeHtml(v.privacy_status)}</span>` : ""}</td><td>${num(v.views)}</td><td>${num(v.watch_time_minutes)}</td><td>${v.average_view_percentage === null ? "—" : `${num(v.average_view_percentage)} %`}</td></tr>`).join("\n")}
+</tbody></table>`;
+}
+
+function proposalForm(p, token) {
+  const e = p.entry;
+
+  return `<form class="entry" method="post" action="/videos?t=${encodeURIComponent(token)}">
+<input type="hidden" name="production_id" value="${escapeHtml(p.production_id)}">
+<input type="hidden" name="type" value="${escapeHtml(e.type)}">
+<input type="hidden" name="video_id" value="${escapeHtml(p.video_id)}">
+<input type="hidden" name="target_date" value="${escapeHtml(e.target_date ?? "")}">
+<input type="hidden" name="publication_checklist" value="${escapeHtml(checklistToText(e.publication_checklist))}">
+<input type="hidden" name="notes" value="${escapeHtml(e.notes)}">
+<p>« ${escapeHtml(p.video_title)} » ↔ <code>${escapeHtml(p.production_id)}</code> (${escapeHtml(p.production_title)}) · score ${escapeHtml(String(p.score))} · ${escapeHtml(p.reasons.join(" ; "))}</p>
+<button type="submit">Valider le lien</button>
+</form>`;
+}
+
+function insightsBlock(insights, token) {
+  if (!insights) return "";
+
+  const { overview, proposals } = insights;
+  const parts = [];
+  const dims = overview.breakdowns?.dimensions;
+
+  if (dims) {
+    parts.push(`<h4>Répartitions (28 jours)</h4>${Object.entries(dims).map(([name, d]) => {
+      const label = escapeHtml(BREAKDOWN_LABELS[name] ?? name);
+      const error = d.last_error ? ` <span class="muted">(dernière lecture en échec : ${escapeHtml(d.last_error.reason)})</span>` : "";
+
+      return d.status === "ok"
+        ? `<p>${label} : ${d.rows.length ? d.rows.slice(0, 5).map(r => `${escapeHtml(r.key)} ${num(r.views)}`).join(" · ") : "aucune donnée"}${error}</p>`
+        : `<p>${label} : non disponible${error}</p>`;
+    }).join("\n")}`);
+  }
+
+  const v = overview.videos;
+
+  if (v.status === "ok") {
+    parts.push(`<h4>Vidéos</h4><p>${escapeHtml(String(v.tracked))} vidéo(s) suivie(s) · ${escapeHtml(String(v.eligible))} classée(s) · synchronisées le ${escapeHtml(v.synced_at)}${v.last_error ? ` · dernière tentative en échec (${escapeHtml(v.last_error.reason)})` : ""}.</p>`);
+    parts.push(rankingTable("Meilleures vidéos", v.top, token));
+    parts.push(rankingTable("Moins bonnes vidéos", v.worst, token));
+  } else {
+    parts.push(`<h4>Vidéos</h4><p>${v.status === "error" ? `Non lues : dernière synchronisation en échec (${escapeHtml(v.reason)}).` : "Non lues : aucune synchronisation des vidéos n'a encore été faite."}</p>`);
+  }
+
+  parts.push(`<h4>Liaisons production ↔ vidéo</h4><p>${escapeHtml(String(overview.links.linked_videos))} vidéo(s) liée(s) · ${escapeHtml(String(proposals.length))} proposition(s) à valider.</p>
+${proposals.map(p => proposalForm(p, token)).join("\n")}`);
+
+  return parts.join("\n");
+}
+
+// Fiche d'une vidéo (lecture seule).
+export function renderVideoAnalytics({ detail, token }) {
+  const title = detail.title ?? detail.video_id;
+  const a = detail.analytics;
+  const totals = (label, t) => t ? `<p>${escapeHtml(label)} : ${num(t.views)} vue(s) · ${num(t.watch_time_minutes)} minute(s) · ${num(t.likes)} j'aime · ${num(t.comments)} commentaire(s) · ${num(t.shares)} partage(s) · abonnés +${num(t.subscribers_gained)} / -${num(t.subscribers_lost)} · % regardé ${t.average_view_percentage === null ? "—" : `${num(t.average_view_percentage)} %`}</p>` : "";
+  const lineage = detail.lineage
+    ? `<h2>Production liée</h2>
+<p><code>${escapeHtml(detail.lineage.production.id)}</code> · ${escapeHtml(detail.lineage.production.title)} · <span class="tag">${escapeHtml(detail.link.type)}</span></p>
+<ul>${Object.entries(detail.lineage.artifacts).map(([name, art]) => `<li>${escapeHtml(name)} (${escapeHtml(art.file)}) : ${art.present ? "présent" : "absent"}${art.title ? ` · « ${escapeHtml(art.title)} »` : ""}${art.title_verdict ? ` · verdict du titre ${escapeHtml(art.title_verdict)}` : ""}${art.shots !== undefined && art.shots !== null ? ` · ${escapeHtml(String(art.shots))} plan(s)` : ""}</li>`).join("")}</ul>
+${detail.lineage.publication ? `<p>Publication : checklist ${escapeHtml(String(detail.lineage.publication.checklist_done))}/${escapeHtml(String(detail.lineage.publication.checklist_total))}.</p>` : ""}`
+    : "<h2>Production liée</h2><p class=\"muted\">Aucune production liée.</p>";
+  const rows = detail.daily.map(d => `<tr><td>${escapeHtml(d.day)}</td><td>${num(d.views)}</td><td>${num(d.watch_time_minutes)}</td><td>${num(d.average_view_percentage)} %</td><td>${num(d.likes)}</td><td>${num(d.subscribers_gained)}</td></tr>`).join("\n");
+
+  return page(`Vidéo ${detail.video_id}`, token, `<h1>${escapeHtml(title)}</h1>
+<p><a href="/?t=${encodeURIComponent(token)}">Retour</a></p>
+<p><code>${escapeHtml(detail.video_id)}</code>${detail.privacy_status ? ` · <span class="tag">${escapeHtml(detail.privacy_status)}</span>` : ""} · miroir : ${escapeHtml(detail.mirror_status)}${detail.published_at ? ` · publiée le ${escapeHtml(detail.published_at)}` : ""}</p>
+<h2>Analytiques</h2>
+${a.status === "not_loaded" ? "<p>Non lues : aucune synchronisation des vidéos ne concerne cette vidéo.</p>" : `<p>Données jusqu'au ${escapeHtml(a.data_until ?? "—")} (fuseau du Pacifique) · ${escapeHtml(String(a.days_stored))} jour(s) enregistré(s)${a.last_error ? ` · dernière lecture en échec (${escapeHtml(a.last_error.reason)})` : ""}.</p>
+${totals("28 derniers jours", a.recent)}
+${totals("Depuis le début du suivi", a.lifetime)}`}
+${lineage}
+<h2>Détail quotidien</h2>
+<table><thead><tr><th>Jour</th><th>Vues</th><th>Minutes</th><th>% regardé</th><th>J'aime</th><th>Abonnés gagnés</th></tr></thead><tbody>
+${rows || '<tr><td colspan="6" class="muted">Aucun jour enregistré.</td></tr>'}
+</tbody></table>`);
 }
 
 // Bloc « Connexion Google » : état et bouton, jamais aucun secret.

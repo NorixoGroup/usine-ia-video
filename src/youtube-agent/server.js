@@ -14,13 +14,13 @@ import {
 } from "./config.js";
 import { checkRequest, allowedHosts } from "./guard.js";
 import { createSession } from "./session.js";
-import { createYouTubeAgent } from "./agent.js";
+import { createYouTubeAgent, stepsDetail } from "./agent.js";
 import { createBridgeHandler } from "./agent-api.js";
 import { readBridgeToken, BRIDGE_API_PREFIX } from "./bridge-config.js";
-import { renderDashboard, renderError } from "./views.js";
+import { renderDashboard, renderError, renderVideoAnalytics } from "./views.js";
 import { createYoutubeAuthService } from "./connectors/youtube/auth/service.js";
 import { createYoutubeChannel } from "./connectors/youtube/channel.js";
-import { createYoutubeAnalytics } from "./connectors/youtube/analytics.js";
+import { createYoutubeAnalyticsSuite } from "./connectors/youtube/analytics-suite.js";
 
 const HERE = path.dirname(fileURLToPath(import.meta.url));
 const ROOT = path.resolve(HERE, "..", "..");
@@ -43,6 +43,7 @@ const OAUTH_LOGIN_PATH = "/oauth/youtube/login";
 const OAUTH_CALLBACK_PATH = "/oauth/youtube/callback";
 const YOUTUBE_SYNC_PATH = "/youtube/sync";
 const YOUTUBE_ANALYTICS_SYNC_PATH = "/youtube/analytics/sync";
+const ANALYTICS_VIDEO_PATH = "/analytics/video";
 
 function redirect(location) {
   return { status: 303, headers: { ...BASE_HEADERS, location }, body: "" };
@@ -64,7 +65,11 @@ function parseChecklist(text) {
 // Le callback OAuth (échange du code) et la synchronisation répondent par une promesse ; le reste est synchrone.
 export function createHandler({ root = ROOT, port, token, youtubeAuth = null, youtubeChannel = null, youtubeAnalytics = null }) {
   const agent = createYouTubeAgent({ root, youtubeAuth, youtubeChannel, youtubeAnalytics });
-  const youtubeView = () => ({ ...agent.youtubeStatus(), mirror: agent.youtubeMirror(), analytics: agent.youtubeAnalytics() });
+  const youtubeView = () => ({
+    ...agent.youtubeStatus(),
+    mirror: agent.youtubeMirror(),
+    analytics: { ...agent.youtubeAnalytics(), insights: { overview: agent.analyticsOverview(), proposals: agent.analyticsLinkProposals() } }
+  });
 
   return function handle(req) {
     const url = new URL(req.url, `http://${LOOPBACK_HOST}:${port}`);
@@ -131,11 +136,15 @@ export function createHandler({ root = ROOT, port, token, youtubeAuth = null, yo
       return agent.youtubeAnalyticsSync().then(result => {
         const { productions, registry } = agent.status({ channelId });
         const s = result.summary;
+        const channelPart = s ? `${s.days_received} jours reçus (${s.start_date} → ${s.end_date}), ${s.analytics_requests} requête Analytics` : "chaîne non lue";
+        const detail = result.steps ? ` Détail : ${stepsDetail(result.steps)}.` : "";
         const message = result.status === "ok"
-          ? `Analytiques synchronisées : ${s.days_received} jours reçus (${s.start_date} → ${s.end_date}), ${s.analytics_requests} requête Analytics.`
-          : `Synchronisation des analytiques impossible (${result.reason}). Les données précédentes sont conservées.`;
+          ? `Analytiques synchronisées : ${channelPart}.${detail}`
+          : result.status === "partial"
+            ? `Analytiques synchronisées en partie (${result.reason}) : ${channelPart}.${detail} Les données précédentes sont conservées.`
+            : `Synchronisation des analytiques impossible (${result.reason}). Les données précédentes sont conservées.`;
 
-        return html(result.status === "ok" ? 200 : 502, renderDashboard({ productions, registry, token, message, youtube: youtubeView() }));
+        return html(result.status === "error" ? 502 : 200, renderDashboard({ productions, registry, token, message, youtube: youtubeView() }));
       });
     }
 
@@ -160,6 +169,16 @@ export function createHandler({ root = ROOT, port, token, youtubeAuth = null, yo
 
         return html(result.status === "ok" ? 200 : 502, renderDashboard({ productions, registry, token, message, youtube: youtubeView() }));
       });
+    }
+
+    // Fiche d'une vidéo (R20.6) : lecture locale seulement.
+    if (url.pathname === ANALYTICS_VIDEO_PATH && method === "GET") {
+      const detail = agent.analyticsVideo({ videoId: url.searchParams.get("v") ?? "" });
+
+      if (detail.status === "invalid") return html(400, renderError({ title: "Entrée refusée", message: "Identifiant de vidéo invalide.", token }));
+      if (detail.status !== "ok") return html(404, renderError({ title: "Introuvable", message: "Vidéo inconnue des analytiques et du miroir.", token }));
+
+      return html(200, renderVideoAnalytics({ detail, token }));
     }
 
     if (url.pathname === "/videos" && method === "POST") {
@@ -199,7 +218,7 @@ export function createHandler({ root = ROOT, port, token, youtubeAuth = null, yo
       };
     }
 
-    const known = ["/", "/style.css", "/videos", OAUTH_LOGIN_PATH, YOUTUBE_SYNC_PATH, YOUTUBE_ANALYTICS_SYNC_PATH].includes(url.pathname);
+    const known = ["/", "/style.css", "/videos", OAUTH_LOGIN_PATH, YOUTUBE_SYNC_PATH, YOUTUBE_ANALYTICS_SYNC_PATH, ANALYTICS_VIDEO_PATH].includes(url.pathname);
 
     return known
       ? html(405, renderError({ title: "Méthode refusée", message: "Méthode non autorisée.", token }))
@@ -269,8 +288,9 @@ export function startServer({ root = ROOT, port = DEFAULT_PORT, bridgeToken = re
       youtubeAuth = createYoutubeAuthService({ root, port: actual });
       // R20.5 lot 2 : aucun appel Google au démarrage ; l'agent lit le miroir local.
       youtubeChannel = createYoutubeChannel({ root });
-      // R20.5 lot 4A : aucune lecture Analytics au démarrage ; synchronisation à la demande seulement.
-      youtubeAnalytics = createYoutubeAnalytics({ root });
+      // R20.5 lot 4A / R20.6 : aucune lecture Analytics au démarrage ; la suite (chaîne,
+      // répartitions, vidéos) ne se synchronise qu'à la demande.
+      youtubeAnalytics = createYoutubeAnalyticsSuite({ root });
 
       resolve({ server, port: actual, token: session.token, bridgeEnabled: Boolean(bridgeToken), oauthEnabled: youtubeAuth.enabled, url: `http://${LOOPBACK_HOST}:${actual}/?t=${session.token}` });
     });

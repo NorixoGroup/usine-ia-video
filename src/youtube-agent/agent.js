@@ -16,10 +16,21 @@ import { PARTITIONS } from "./memory/partitions.js";
 import { COMMENT_STATES } from "./comments/states.js";
 import { ANALYTICS_STAGES } from "./analytics/stages.js";
 import { LEARNING_STATES } from "./learning/cycle.js";
+import { analyticsOverview, analyticsVideo, analyticsProductions, analyticsLinkProposals, analyticsDashboard } from "./analytics/read-model.js";
 import {
   systemView, productionsView, pipelineView, plannerView, commentsView,
   analyticsView, learningView, journalView, settingsView
 } from "./studio-models.js";
+
+// Détail court des étapes de la suite Analytics (journal et interface locale).
+export function stepsDetail(steps) {
+  const b = steps.breakdowns;
+  const v = steps.videos;
+  const breakdowns = b?.status === "ok" || b?.summary ? `répartitions ${b.summary?.dimensions_ok ?? 0}/${(b.summary?.dimensions_ok ?? 0) + (b.summary?.dimensions_failed ?? 0)}` : `répartitions : ${b?.reason ?? "non lancées"}`;
+  const videos = v?.summary ? `vidéos ${v.summary.synced} synchronisée(s), ${v.summary.failed} en échec${v.status === "ok" ? "" : ` (${v.reason})`}` : `vidéos : ${v?.reason ?? "non lancées"}`;
+
+  return `${breakdowns} ; ${videos}`;
+}
 
 export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth = null, youtubeChannel = null, youtubeAnalytics = null }) {
   return {
@@ -115,20 +126,33 @@ export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth =
       return youtubeAnalytics?.summary() ?? { status: "not_loaded" };
     },
 
+    // Bloc Analytics (R20.6) : vues de lecture locales, aucun appel réseau.
+    analyticsOverview() { return analyticsOverview({ root, channelId: DEFAULT_CHANNEL_ID }); },
+    analyticsVideo({ videoId }) { return analyticsVideo({ root, channelId: DEFAULT_CHANNEL_ID, videoId }); },
+    analyticsProductions() { return analyticsProductions({ root, channelId: DEFAULT_CHANNEL_ID }); },
+    analyticsLinkProposals() { return analyticsLinkProposals({ root, channelId: DEFAULT_CHANNEL_ID }); },
+    // Modèle préparé pour le Dashboard ; non exposé par le pont en R20.6.
+    analyticsDashboard() { return analyticsDashboard({ root, channelId: DEFAULT_CHANNEL_ID }); },
+
     // Synchronisation des analytiques à la demande (bouton local ou commande), journalisée.
+    // Avec la suite (R20.6), le résultat porte aussi les étapes répartitions et vidéos.
     async youtubeAnalyticsSync() {
       if (!youtubeAnalytics) throw new Error("Lecteur Analytics indisponible");
 
       const result = await youtubeAnalytics.sync();
       const s = result.summary;
+      const parts = [];
+
+      if (s) parts.push(`${s.start_date} → ${s.end_date} ; ${s.days_received} jours ; ${s.calls} appels, ${s.analytics_requests} requête Analytics`);
+      if (result.steps) parts.push(stepsDetail(result.steps));
 
       appendJournal({
         root, channelId: DEFAULT_CHANNEL_ID, now: now(),
         entry: {
           type: "youtube_analytics_sync",
           action: "sync",
-          outcome: result.status === "ok" ? "ok" : result.reason,
-          ...(s ? { detail: `${s.start_date} → ${s.end_date} ; ${s.days_received} jours ; ${s.calls} appels, ${s.analytics_requests} requête Analytics` } : {})
+          outcome: result.status === "ok" ? "ok" : result.status === "partial" ? `partial_${result.reason}` : result.reason,
+          ...(parts.length ? { detail: parts.join(" · ") } : {})
         }
       });
 

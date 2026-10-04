@@ -229,7 +229,7 @@ await asyncCheck("miroir YouTube intact : aucun fichier du miroir créé ni modi
 await asyncCheck("démarrage de l'agent : aucune lecture Analytics (startServer crée le lecteur sans synchroniser)", async () => {
   const source = fs.readFileSync(new URL("../src/youtube-agent/server.js", import.meta.url), "utf8");
   const startup = source.slice(source.indexOf("export function startServer"));
-  if (!/createYoutubeAnalytics\(\{ root \}\)/.test(startup) || /\.sync\(|youtubeAnalyticsSync/.test(startup)) throw new Error("synchronisation au démarrage");
+  if (!/createYoutubeAnalytics(?:Suite)?\(\{ root \}\)/.test(startup) || /\.sync\(|youtubeAnalyticsSync/.test(startup)) throw new Error("synchronisation au démarrage");
   if ((source.match(/youtubeAnalyticsSync\(/g) ?? []).length !== 1) throw new Error("déclencheurs inattendus");
   const ctx = setup();
   const agent = createYouTubeAgent({ root: ctx.root, youtubeAnalytics: ctx.analytics });
