@@ -11,6 +11,7 @@ import { getEpisode, transitionEpisode } from "./workflow/manager.js";
 import { EPISODE_STATES, EPISODE_TRANSITIONS } from "./workflow/transitions.js";
 import { appendJournal } from "./journal.js";
 import { assertChannelId } from "./channels.js";
+import { DEFAULT_CHANNEL_ID } from "./config.js";
 import { PARTITIONS } from "./memory/partitions.js";
 import { COMMENT_STATES } from "./comments/states.js";
 import { ANALYTICS_STAGES } from "./analytics/stages.js";
@@ -102,6 +103,31 @@ export function createYouTubeAgent({ root, now = () => new Date(), youtubeAuth =
 
     youtubeCallback(query) {
       return youtubeAuth.completeCallback(query);
+    },
+
+    // Miroir local de la chaîne (R20.5, lot 2) : lecture seule, aucun appel réseau.
+    youtubeMirror() {
+      return { channel: youtubeChannel?.current() ?? { status: "not_loaded" }, videos: youtubeChannel?.videos() ?? { status: "not_loaded" } };
+    },
+
+    // Synchronisation à la demande (bouton local ou commande), journalisée.
+    async youtubeSync() {
+      if (!youtubeChannel) throw new Error("Lecteur YouTube indisponible");
+
+      const result = await youtubeChannel.sync();
+      const s = result.summary;
+
+      appendJournal({
+        root, channelId: DEFAULT_CHANNEL_ID, now: now(),
+        entry: {
+          type: "youtube_sync",
+          action: "sync",
+          outcome: result.status === "ok" ? "ok" : result.reason,
+          ...(s ? { detail: `${s.present} vidéos ; +${s.added} ~${s.updated} -${s.removed} restaurées ${s.restored} ; ${s.calls} appels, ${s.quota_units} unités` } : {})
+        }
+      });
+
+      return result;
     },
 
     // R18.2 : aucun moteur ne s'exécute. Le refus est motivé et journalisé.

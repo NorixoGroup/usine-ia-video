@@ -7,7 +7,8 @@
   "scripts": {
     "check": "node scripts/check-environment.js",
     "mvp": "node src/orchestrator/mvp.js",
-    "youtube-agent": "node src/youtube-agent/server.js"
+    "youtube-agent": "node src/youtube-agent/server.js",
+    "youtube-sync": "node src/youtube-agent/youtube-sync.js"
   },
   "engines": {
     "node": ">=22"

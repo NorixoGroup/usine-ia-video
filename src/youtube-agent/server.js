@@ -40,6 +40,7 @@ function html(status, body) {
 
 const OAUTH_LOGIN_PATH = "/oauth/youtube/login";
 const OAUTH_CALLBACK_PATH = "/oauth/youtube/callback";
+const YOUTUBE_SYNC_PATH = "/youtube/sync";
 
 function redirect(location) {
   return { status: 303, headers: { ...BASE_HEADERS, location }, body: "" };
@@ -58,7 +59,7 @@ function parseChecklist(text) {
 }
 
 // Gestionnaire : { method, url, headers, body } → { status, headers, body }.
-// Seul le callback OAuth répond par une promesse (échange du code) ; le reste est synchrone.
+// Le callback OAuth (échange du code) et la synchronisation répondent par une promesse ; le reste est synchrone.
 export function createHandler({ root = ROOT, port, token, youtubeAuth = null, youtubeChannel = null }) {
   const agent = createYouTubeAgent({ root, youtubeAuth, youtubeChannel });
 
@@ -81,12 +82,9 @@ export function createHandler({ root = ROOT, port, token, youtubeAuth = null, yo
           state: url.searchParams.get("state") ?? undefined,
           error: url.searchParams.get("error") ?? undefined
         })
-        .then(async result => {
-          // Connexion réussie : l'identité de la chaîne est relue avant le retour vers Nomad Studio.
-          if (result.ok && youtubeChannel) await youtubeChannel.refresh();
-
-          return redirect(youtubeAuth.returnUrl);
-        });
+        // R20.5 lot 2 : aucune lecture automatique après la connexion ; la chaîne se
+        // synchronise uniquement à la demande (bouton local ou commande).
+        .then(() => redirect(youtubeAuth.returnUrl));
     }
 
     const verdict = checkRequest({ headers, searchParams: url.searchParams, port, token, method });
@@ -112,7 +110,30 @@ export function createHandler({ root = ROOT, port, token, youtubeAuth = null, yo
     if (url.pathname === "/" && method === "GET") {
       const { productions, registry } = agent.status({ channelId });
 
-      return html(200, renderDashboard({ productions, registry, token, youtube: agent.youtubeStatus() }));
+      return html(200, renderDashboard({ productions, registry, token, youtube: { ...agent.youtubeStatus(), mirror: agent.youtubeMirror() } }));
+    }
+
+    // Synchronisation à la demande depuis l'interface locale (seul déclencheur avec la commande).
+    if (url.pathname === YOUTUBE_SYNC_PATH && method === "POST") {
+      const contentType = String(headers["content-type"] ?? "").split(";")[0].trim().toLowerCase();
+
+      if (contentType !== "application/x-www-form-urlencoded") {
+        return html(415, renderError({ title: "Refusé", message: "Type de contenu non pris en charge.", token }));
+      }
+
+      if (!youtubeChannel) {
+        return html(503, renderError({ title: "Synchronisation indisponible", message: "Le lecteur YouTube n'est pas initialisé.", token }));
+      }
+
+      return agent.youtubeSync().then(result => {
+        const { productions, registry } = agent.status({ channelId });
+        const s = result.summary;
+        const message = result.status === "ok"
+          ? `Synchronisation réussie : ${s.present} vidéos (${s.added} nouvelles, ${s.updated} modifiées, ${s.removed} retirées, ${s.restored} restaurées), ${s.quota_units} unités de quota.`
+          : `Synchronisation impossible (${result.reason}). Le miroir précédent est conservé.`;
+
+        return html(result.status === "ok" ? 200 : 502, renderDashboard({ productions, registry, token, message, youtube: { ...agent.youtubeStatus(), mirror: agent.youtubeMirror() } }));
+      });
     }
 
     if (url.pathname === "/videos" && method === "POST") {
@@ -152,7 +173,7 @@ export function createHandler({ root = ROOT, port, token, youtubeAuth = null, yo
       };
     }
 
-    const known = ["/", "/style.css", "/videos", OAUTH_LOGIN_PATH].includes(url.pathname);
+    const known = ["/", "/style.css", "/videos", OAUTH_LOGIN_PATH, YOUTUBE_SYNC_PATH].includes(url.pathname);
 
     return known
       ? html(405, renderError({ title: "Méthode refusée", message: "Méthode non autorisée.", token }))
@@ -219,9 +240,8 @@ export function startServer({ root = ROOT, port = DEFAULT_PORT, bridgeToken = re
       const actual = server.address().port;
 
       youtubeAuth = createYoutubeAuthService({ root, port: actual });
+      // R20.5 lot 2 : aucun appel Google au démarrage ; l'agent lit le miroir local.
       youtubeChannel = createYoutubeChannel({ root });
-      // Lecture de la chaîne au démarrage (sans appel si aucune connexion enregistrée).
-      youtubeChannel.refresh();
 
       resolve({ server, port: actual, token: session.token, bridgeEnabled: Boolean(bridgeToken), oauthEnabled: youtubeAuth.enabled, url: `http://${LOOPBACK_HOST}:${actual}/?t=${session.token}` });
     });

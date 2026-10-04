@@ -94,6 +94,35 @@ export function removeFile(file) {
   });
 }
 
+// Bail exclusif longue durée (inter-processus) pour une opération asynchrone,
+// par exemple une synchronisation : contrairement à withFileLock, il n'attend
+// pas. Retourne une fonction de libération, ou null si le bail est déjà pris.
+// Un bail plus ancien que staleMs (processus interrompu) est repris.
+export function acquireLease(file, staleMs) {
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const fd = fs.openSync(file, "wx", 0o600);
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+
+      return () => fs.rmSync(file, { force: true });
+    } catch (error) {
+      if (error.code !== "EEXIST") throw error;
+
+      try {
+        if (Date.now() - fs.statSync(file).mtimeMs <= staleMs) return null;
+        fs.rmSync(file, { force: true });
+      } catch {
+        // bail libéré entre-temps : nouvelle tentative
+      }
+    }
+  }
+
+  return null;
+}
+
 // Ajout seul d'une ligne JSON (journal, mémoire historique).
 export function appendJsonl(file, record) {
   const line = `${JSON.stringify(record)}\n`;

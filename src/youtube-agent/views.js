@@ -44,6 +44,28 @@ const SCOPE_LABELS = {
   "https://www.googleapis.com/auth/yt-analytics.readonly": "lecture des analytiques"
 };
 
+// Miroir local de la chaîne : état de la dernière synchronisation et bouton (aucun appel à l'affichage).
+function mirrorBlock(mirror, token) {
+  const channel = mirror?.channel ?? { status: "not_loaded" };
+  const videos = mirror?.videos ?? { status: "not_loaded" };
+  let state;
+
+  if (channel.status === "ok") {
+    const error = channel.last_error ? ` · dernière tentative en échec (${escapeHtml(channel.last_error.reason)}) le ${escapeHtml(channel.last_error.at)}, miroir précédent conservé` : "";
+    const count = videos.status === "ok" ? `${videos.total} vidéo${videos.total > 1 ? "s" : ""}${videos.removed ? `, ${videos.removed} retirée${videos.removed > 1 ? "s" : ""}` : ""}` : "vidéos non lues";
+
+    state = `Chaîne « ${escapeHtml(channel.channel.title)} » · ${count} · synchronisée le ${escapeHtml(channel.synced_at)}${error}.`;
+  } else if (channel.status === "error") {
+    state = `Non lue : dernière synchronisation en échec (${escapeHtml(channel.reason)}) le ${escapeHtml(channel.fetched_at)}.`;
+  } else {
+    state = "Non lue : aucune synchronisation n'a encore été faite.";
+  }
+
+  return `<h3>Miroir local de la chaîne</h3>
+<p>${state}</p>
+<form method="post" action="/youtube/sync?t=${encodeURIComponent(token)}"><button type="submit">Synchroniser la chaîne</button></form>`;
+}
+
 // Bloc « Connexion Google » : état et bouton, jamais aucun secret.
 function youtubeBlock(youtube, token) {
   if (!youtube) return "";
@@ -62,8 +84,9 @@ function youtubeBlock(youtube, token) {
     const scopes = (c.scopes ?? []).map(s => SCOPE_LABELS[s] ?? "autorisation").join(", ");
 
     return `<h2>Connexion Google</h2>
-<p>Connectée le ${escapeHtml(c.connected_at)} · accès en ${escapeHtml(scopes)} uniquement. Aucune donnée YouTube n'est encore lue.</p>
-<p><a class="button" href="${escapeHtml(link)}">Se reconnecter à Google</a></p>`;
+<p>Connectée le ${escapeHtml(c.connected_at)} · accès en ${escapeHtml(scopes)} uniquement.</p>
+<p><a class="button" href="${escapeHtml(link)}">Se reconnecter à Google</a></p>
+${mirrorBlock(youtube.mirror, token)}`;
   }
 
   return `<h2>Connexion Google</h2>

@@ -124,7 +124,8 @@ await asyncCheck("aucune fuite dans les réponses, la page ou le statut", async 
   const everything = `${JSON.stringify(out)}\n${page.body}\n${JSON.stringify(page.headers)}\n${status}`;
   for (const secret of [ACCESS, REFRESH, SECRET, CODE, SESSION, ENV.YOUTUBE_OAUTH_TOKEN_KEY, "ciphertext", "refresh_token"]) if (JSON.stringify(out).includes(secret) || (secret !== SESSION && everything.includes(secret))) throw new Error(`fuite : ${secret.slice(0, 12)}`);
   if (!page.body.includes("Connectée le") || !page.body.includes("lecture YouTube")) throw new Error("page de succès");
-  if (!page.body.includes("Se reconnecter à Google") || !page.body.includes("Aucune donnée YouTube n")) throw new Error("bouton ou mention");
+  // R20.5 lot 2 : la mention « Aucune donnée YouTube n'est encore lue » est remplacée par l'état du miroir local.
+  if (!page.body.includes("Se reconnecter à Google") || !page.body.includes("Non lue : aucune synchronisation n'a encore été faite.") || !page.body.includes("Synchroniser la chaîne")) throw new Error("bouton ou mention");
   cleanup(ctx.root);
 });
 

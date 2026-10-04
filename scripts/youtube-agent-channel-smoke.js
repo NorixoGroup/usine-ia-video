@@ -1,5 +1,7 @@
 // Smoke R20.1 — identité de la chaîne (Google simulé) : échange du refresh token,
 // channels.list (mine=true), chaîne vide nominale, erreurs, aucune fuite, aucun autre endpoint.
+// R20.5 lot 2 : la lecture se fait uniquement par synchronisation à la demande (sync()),
+// enregistrée dans le miroir local ; current() lit ce miroir, sans appel.
 // Usage : NO_API=1 node --import ./scripts/fixture-network-guard.js scripts/youtube-agent-channel-smoke.js
 
 import fs from "node:fs";
@@ -73,10 +75,12 @@ const asyncCheck = async (name, fn) => { let err = null; try { await fn(); } cat
 
 await asyncCheck("succès : refresh token → access token → channels.list, données attendues", async () => {
   const ctx = setup();
-  if (ctx.yt.current().status !== "not_loaded") throw new Error("état initial");
-  const r = await ctx.yt.refresh();
+  if (ctx.yt.current().status !== "not_loaded" || ctx.calls.length !== 0) throw new Error("état initial");
+  const r = await ctx.yt.sync();
   if (r.status !== "ok") throw new Error(JSON.stringify(r));
-  const c = r.channel;
+  const state = ctx.yt.current();
+  if (state.status !== "ok" || state.fetched_at !== NOW.toISOString()) throw new Error(JSON.stringify(state));
+  const c = state.channel;
   if (c.channel_id !== ITEM.id || c.title !== ITEM.snippet.title || c.country !== "FR" || c.thumbnail_url !== "https://yt3.ggpht.com/h.jpg") throw new Error("identité");
   if (c.subscriber_count !== 3 || c.video_count !== 0 || c.view_count !== 0 || c.related_playlists.uploads !== "UUabcdefghijklmnopqrstuv" || c.description !== "Voyages") throw new Error("statistiques");
   if (ctx.calls.length !== 3) throw new Error(`${ctx.calls.length} appels`);
@@ -90,16 +94,23 @@ await asyncCheck("succès : refresh token → access token → channels.list, do
 
 await asyncCheck("chaîne vide (videoCount = 0) : cas nominal, aucune erreur", async () => {
   const ctx = setup({ channels: () => json(200, { items: [{ ...ITEM, statistics: { viewCount: "0", subscriberCount: "0", hiddenSubscriberCount: false, videoCount: "0" } }] }) });
-  const r = await ctx.yt.refresh();
-  if (r.status !== "ok" || r.channel.video_count !== 0 || r.channel.subscriber_count !== 0 || "reason" in r) throw new Error(JSON.stringify(r));
+  const r = await ctx.yt.sync();
+  const state = ctx.yt.current();
+  if (r.status !== "ok" || state.channel.video_count !== 0 || state.channel.subscriber_count !== 0 || "reason" in state || "last_error" in state) throw new Error(JSON.stringify(state));
   cleanup(ctx.root);
 });
 
 await asyncCheck("variantes tolérées : pays absent, abonnés masqués, miniature unique", async () => {
   const snippet = { title: "X", thumbnails: { default: { url: "https://yt3.ggpht.com/d.jpg" } } };
   const ctx = setup({ channels: () => json(200, { items: [{ id: "UCx", snippet, statistics: { viewCount: "5", hiddenSubscriberCount: true, videoCount: "0" } }] }) });
-  const r = await ctx.yt.refresh();
-  if (r.status !== "ok" || r.channel.country !== null || r.channel.subscriber_count !== null || r.channel.thumbnail_url !== "https://yt3.ggpht.com/d.jpg" || Object.keys(r.channel.related_playlists).length !== 0) throw new Error(JSON.stringify(r));
+  // Sans playlist « uploads », la synchronisation refuse (incomplete) : l'identité est vérifiée sur la conversion seule.
+  const r = await ctx.yt.sync();
+  if (r.status !== "error" || r.reason !== "incomplete") throw new Error(JSON.stringify(r));
+  const withUploads = setup({ channels: () => json(200, { items: [{ id: "UCx", snippet, statistics: { viewCount: "5", hiddenSubscriberCount: true, videoCount: "0" }, contentDetails: { relatedPlaylists: { uploads: "UUx" } } }] }) });
+  await withUploads.yt.sync();
+  const c = withUploads.yt.current().channel;
+  if (c.country !== null || c.subscriber_count !== null || c.thumbnail_url !== "https://yt3.ggpht.com/d.jpg" || Object.keys(c.related_playlists).join() !== "uploads") throw new Error(JSON.stringify(c));
+  cleanup(withUploads.root);
   cleanup(ctx.root);
 });
 
@@ -125,28 +136,33 @@ await asyncCheck("erreurs propagées proprement, sans exception ni détail", asy
   ];
   for (const [reason, opts] of cases) {
     const ctx = setup(opts);
-    const r = await ctx.yt.refresh();
-    const text = JSON.stringify(r);
+    const r = await ctx.yt.sync();
+    const text = JSON.stringify(r) + JSON.stringify(ctx.yt.current());
     if (r.status !== "error" || r.reason !== reason) throw new Error(`${reason} attendu : ${text}`);
     if ([REFRESH, ACCESS, SECRET].some(s => text.includes(s))) throw new Error("fuite dans l'erreur");
     if ((reason === "not_connected" || reason === "not_configured") && ctx.calls.length !== 0) throw new Error("appel sans connexion");
+    // Aucune synchronisation réussie : l'état exposé porte l'erreur, sans donnée inventée.
+    if (ctx.yt.current().status !== "error" || ctx.yt.current().reason !== reason) throw new Error(`état : ${JSON.stringify(ctx.yt.current())}`);
     cleanup(ctx.root);
   }
 });
 
 await asyncCheck("jeton illisible (clé changée) : erreur propre, aucun appel", async () => {
   const ctx = setup({ env: { ...ENV, YOUTUBE_OAUTH_TOKEN_KEY: Buffer.alloc(32, 9).toString("base64") } });
-  const r = await ctx.yt.refresh();
+  const r = await ctx.yt.sync();
   if (r.reason !== "token_unreadable" || ctx.calls.length !== 0) throw new Error(JSON.stringify(r));
   cleanup(ctx.root);
 });
 
-await asyncCheck("access token jamais écrit sur disque ni exposé ; aucune écriture hors connexion OAuth", async () => {
+await asyncCheck("access token jamais écrit sur disque ni exposé ; écritures limitées à la connexion OAuth et au miroir", async () => {
   const ctx = results[0];
-  const list = files(path.join(ctx.root, "data"));
-  if (list.length !== 1 || !list[0].endsWith(path.join("oauth", "youtube.json"))) throw new Error(`fichiers : ${list}`);
-  const dump = fs.readFileSync(list[0], "utf8");
-  if (dump.includes(ACCESS) || dump.includes("access_token") || dump.includes(ITEM.id)) throw new Error("écriture inattendue");
+  const list = files(path.join(ctx.root, "data")).map(f => path.relative(path.join(ctx.root, "data"), f)).sort();
+  const expected = ["oauth/youtube.json", "youtube/channel.json", "youtube/stats.jsonl", "youtube/sync.json", "youtube/videos.json"].map(f => path.join("youtube-agent", "channels", "nomade", ...f.split("/")));
+  if (list.join() !== expected.join()) throw new Error(`fichiers : ${list}`);
+  for (const f of list) {
+    const dump = fs.readFileSync(path.join(ctx.root, "data", f), "utf8");
+    if (dump.includes(ACCESS) || dump.includes("access_token") || dump.includes(REFRESH) || dump.includes(SECRET)) throw new Error(`écriture inattendue : ${f}`);
+  }
   if (JSON.stringify(ctx.yt.current()).includes(ACCESS)) throw new Error("access token exposé");
 });
 
@@ -162,19 +178,20 @@ await asyncCheck("façade et pont inchangé : la route settings expose la chaîn
   cleanup(ctx.root);
 });
 
-await asyncCheck("callback OAuth : la chaîne est relue après une connexion réussie, pas après un échec", async () => {
+await asyncCheck("callback OAuth (R20.5 lot 2) : aucune lecture automatique, ni après une connexion réussie ni après un échec", async () => {
   for (const ok of [true, false]) {
     const ctx = setup();
     const auth = { enabled: true, returnUrl: ENV.YOUTUBE_OAUTH_RETURN_URL, completeCallback: async () => (ok ? { ok: true } : { ok: false, reason: "access_denied" }), status: () => ({ enabled: true, problem: null, connection: { status: "connected" } }) };
     const handle = createHandler({ root: ctx.root, port: PORT, token: "s".repeat(64), youtubeAuth: auth, youtubeChannel: ctx.yt });
     const out = await handle({ method: "GET", url: "/oauth/youtube/callback?code=x&state=y", headers: { host: `127.0.0.1:${PORT}` } });
     if (out.status !== 303 || out.headers.location !== ENV.YOUTUBE_OAUTH_RETURN_URL) throw new Error("redirection");
-    if (ctx.yt.current().status !== (ok ? "ok" : "not_loaded")) throw new Error(`relecture : ${ctx.yt.current().status}`);
+    if (ctx.yt.current().status !== "not_loaded" || ctx.calls.length !== 0) throw new Error(`relecture : ${ctx.yt.current().status}, ${ctx.calls.length} appels`);
     cleanup(ctx.root);
   }
 });
 
 await asyncCheck("seuls les endpoints Google autorisés sur toute la suite : échange OAuth, channels.list, playlistItems.list", async () => {
+  // Les chaînes de ce smoke n'ont aucune vidéo : videos.list n'est jamais appelé (couvert par youtube-agent-videos-smoke.js).
   if (all.length === 0 || all.some(u => u !== GOOGLE_TOKEN_ENDPOINT && !u.startsWith(`${CHANNELS}?`) && !u.startsWith(`${PLAYLIST_ITEMS}?`))) throw new Error(`endpoints : ${[...new Set(all)]}`);
 });
 

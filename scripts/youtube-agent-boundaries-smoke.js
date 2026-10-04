@@ -100,12 +100,15 @@ check("réseau Google : seuls google-oauth.js (échange du code) et channel.js (
   const oauth = files.find(f => f.rel === "connectors/youtube/auth/google-oauth.js");
   const calls = oauth.code.match(/fetchImpl\s*\(/g) ?? [];
   if (calls.length !== 1 || !/GOOGLE_TOKEN_ENDPOINT/.test(oauth.code) || /youtube\/v3|youtubeanalytics|playlistItems|channels\.list/i.test(oauth.code)) throw new Error("google-oauth.js : un seul appel, vers l'échange OAuth uniquement");
-  // R20.1 / R20.2 : un seul point d'appel réseau, vers l'échange OAuth, youtube/v3/channels et youtube/v3/playlistItems uniquement.
+  // R20.1 / R20.2 / R20.5 lot 2 : un seul point d'appel réseau, vers l'échange OAuth,
+  // youtube/v3/channels, youtube/v3/playlistItems et youtube/v3/videos (lecture) uniquement.
   const channel = files.find(f => f.rel === "connectors/youtube/channel.js");
   // Les adresses sont lues dans le source brut : le retrait des commentaires coupe aussi « https:// ».
   const urls = fs.readFileSync(channel.file, "utf8").match(/https:\/\/[a-z0-9-]+(?:\.[a-z0-9-]+)+[^"'`\s]*/g) ?? [];
-  if ((channel.code.match(/fetchImpl\s*\(/g) ?? []).length !== 1 || urls.join() !== "https://www.googleapis.com/youtube/v3/channels,https://www.googleapis.com/youtube/v3/playlistItems") throw new Error("channel.js : endpoints non conformes");
-  if (/youtubeanalytics|commentThreads|\/search|\/videos|\/subscriptions|\/playlists|method:\s*"(?:PUT|DELETE|PATCH)"/i.test(channel.code)) throw new Error("channel.js : endpoint ou méthode interdits");
+  if ((channel.code.match(/fetchImpl\s*\(/g) ?? []).length !== 1 || urls.join() !== "https://www.googleapis.com/youtube/v3/channels,https://www.googleapis.com/youtube/v3/playlistItems,https://www.googleapis.com/youtube/v3/videos") throw new Error("channel.js : endpoints non conformes");
+  if (/youtubeanalytics|commentThreads|\/search|\/subscriptions|\/playlists\b|method:\s*"(?:PUT|DELETE|PATCH)"/i.test(channel.code)) throw new Error("channel.js : endpoint ou méthode interdits");
+  // Lecture seule : un seul POST (l'échange du jeton), toutes les requêtes YouTube en GET.
+  if ((channel.code.match(/method:\s*"POST"/g) ?? []).length !== 1 || !/method:\s*"GET"/.test(channel.code)) throw new Error("channel.js : méthodes non conformes");
 });
 
 check("adresses Google uniquement dans le connecteur YouTube", () => {

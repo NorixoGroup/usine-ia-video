@@ -27,6 +27,8 @@ export const PARTITIONS = Object.freeze({
   // Connexion YouTube : jamais lisible par une sélection de contexte ni par le pont.
   oauth: p(["connector"], "json", { sensitive: true }),
   quota: p(["connector"], "json"),
-  // Miroir en lecture seule de la chaîne et des vidéos YouTube (distinct du registre `videos`).
+  // Miroir en lecture seule de la chaîne et des vidéos YouTube (distinct du registre `videos`) :
+  // channel.json, videos.json, sync.json (états) et stats.jsonl (historique en ajout seul),
+  // écrits uniquement par la synchronisation (connectors/youtube/mirror.js).
   youtube: p(["sync"], "json")
 });
