@@ -55,6 +55,26 @@ const ITEM = {
 };
 const KEY_FACT = "La densité de population de l'Australie était de 3,6 personnes par km² en juin 2025.";
 
+// Fixtures de réponses fournisseur : chaque variante est une citation
+// non-littérale que le contrat prompt interdit et que le validateur rejette
+// fail-closed avant toute réparation.
+const QUOTATION_VOICEOVER = "Quatre contraintes qui expliquent pourquoi l'Australie, sixième plus grand pays de la planète, demeure l'un des plus vides.";
+const QUOTATION_ITEM = {
+  id: "s1-g6",
+  voiceover: QUOTATION_VOICEOVER,
+  claims: [{ claim_id: "s1-g6-c1", text: "L'Australie est peu peuplée." }]
+};
+
+function providerQuotation(sentence) {
+  return validateClaimBatchResponse({
+    results: [{
+      id: "s1-g6",
+      covered: false,
+      unsupported: [{ sentence, segment_id: "s1-g6", claim_id: "", action: "DELETE" }]
+    }]
+  }, [QUOTATION_ITEM]);
+}
+
 function judge(entry) {
   return validateClaimBatchResponse({
     results: [{ id: "s1-g1", covered: false, unsupported: [{ sentence: SENTENCE, segment_id: "s1-g1", ...entry }] }]
@@ -115,6 +135,18 @@ for (const [name, entry, expected] of CASES) {
 }
 
 console.log("--- 3. Fail-closed et déterminisme ---");
+
+for (const [name, sentence] of [
+  ["clause partielle", "L'Australie, sixième plus grand pays de la planète, demeure l'un des plus vides."],
+  ["changement de casse", "Quatre contraintes qui expliquent pourquoi L'Australie, sixième plus grand pays de la planète, demeure l'un des plus vides."],
+  ["préfixe retiré", "Contraintes qui expliquent pourquoi l'Australie, sixième plus grand pays de la planète, demeure l'un des plus vides."],
+  ["suffixe retiré", "Quatre contraintes qui expliquent pourquoi l'Australie, sixième plus grand pays de la planète."],
+  ["phrase réécrite", "Les contraintes expliquent que l'Australie demeure l'un des pays les plus vides."]
+]) {
+  test(`fixture fournisseur : ${name} → FAIL`, () => {
+    expectThrow(() => providerQuotation(sentence), /s1-g6\.unsupported\[0\]\.sentence absente du voiceover/);
+  });
+}
 
 test("action inconnue toujours refusée (juge et réparation)", () => {
   expectThrow(() => judge({ action: "REWRITE", claim_id: "s1-g1-c1" }), /action invalide/);

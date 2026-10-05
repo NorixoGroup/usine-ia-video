@@ -47,10 +47,18 @@ forment la seule frontière factuelle. Une reformulation équivalente est
 couverte; une quantité, date, attribution, causalité, propriété ou conséquence
 supplémentaire ne l'est pas.
 
-Pour chaque phrase non couverte, retourne sa citation exacte, l'id exact du
-segment et l'action fermée conseillée : DELETE, ou DECLARE seulement avec un
-claim_id reçu qui désigne le key_fact approuvé qui remplacera exactement la
-phrase. Pour DELETE, claim_id n'est pas requis (laisse-le vide). Ne retourne ni paraphrase, ni prose de remplacement, ni fait nouveau.
+CONTRAT DE CITATION STRICT — pour chaque phrase non couverte, le champ
+sentence DOIT être copié mot pour mot depuis le voiceover fourni : une sous-chaîne
+contiguë exacte, correspondant à une phrase entière du voiceover. Avant de la
+retourner, vérifie mécaniquement voiceover.includes(sentence) === true. Ne
+paraphrase jamais, ne raccourcis jamais une clause, ne changes jamais la casse,
+la ponctuation, les guillemets, les espaces ni les caractères Unicode. Si tu ne
+peux pas copier une citation exacte, n'en invente aucune.
+
+Retourne aussi l'id exact du segment et l'action fermée conseillée : DELETE, ou
+DECLARE seulement avec un claim_id reçu qui désigne le key_fact approuvé qui
+remplacera exactement la phrase. Pour DELETE, claim_id n'est pas requis
+(laisse-le vide). Ne retourne ni prose de remplacement ni fait nouveau.
 
 Chaque id reçu doit apparaître une seule fois, sans ajout, omission ni
 réordonnancement. Réponds uniquement avec ce JSON :
