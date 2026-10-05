@@ -18,12 +18,8 @@ const SIGNATURES = {
     "Tu es le Visual Director de la chaîne YouTube \"Les Découvertes du Nomade\".",
   "validate-script-claim-coverage":
     "Tu es un auditeur de couverture factuelle.",
-  "validate-script-claim-coverage-batch":
-    "Tu es un auditeur de couverture factuelle batché.",
   "validate-visual-factual-grounding":
     "Tu es un validateur strict de grounding factuel pour un plan visuel documentaire.",
-  "repair-script-claim-coverage":
-    "Tu es un réparateur strict de couverture factuelle pour une voix-off documentaire.",
   "repair-visual-factual-grounding":
     "Tu es un réparateur strict de grounding factuel pour un shot de plan visuel documentaire.",
   "judge-title":
@@ -42,9 +38,7 @@ const SYNTHETIC_USAGE = {
   "script": { input_tokens: 2400, output_tokens: 700 },
   "visual-director": { input_tokens: 2300, output_tokens: 800 },
   "validate-script-claim-coverage": { input_tokens: 1200, output_tokens: 60 },
-  "validate-script-claim-coverage-batch": { input_tokens: 1400, output_tokens: 120 },
   "validate-visual-factual-grounding": { input_tokens: 1100, output_tokens: 80 },
-  "repair-script-claim-coverage": { input_tokens: 1000, output_tokens: 90 },
   "repair-visual-factual-grounding": { input_tokens: 900, output_tokens: 70 },
   "judge-title": { input_tokens: 1300, output_tokens: 300 },
   "judge-evidence": { input_tokens: 1500, output_tokens: 400 },

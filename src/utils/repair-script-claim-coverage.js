@@ -1,247 +1,140 @@
-import {
-  createMessage,
-  extractText
-} from "../services/anthropic.js";
+// Réparation déterministe de couverture. Le modèle ne rédige jamais de prose :
+// il désigne une phrase exacte et une opération fermée, appliquée ici.
+export const CLAIM_COVERAGE_REPAIR_PROTOCOL =
+  "claim-coverage-repair.v2-deterministic";
 
-const SYSTEM_PROMPT = `
-Tu es un réparateur strict de couverture factuelle pour une voix-off documentaire.
-
-Tu reçois :
-
-1. un voiceover ;
-2. les claims factuels autorisés ;
-3. les affirmations factuelles détectées comme non déclarées.
-
-TA MISSION :
-
-Réécrire le voiceover afin que toutes les affirmations factuelles qu'il contient
-soient couvertes par les claims autorisés.
-
-RÈGLE FONDAMENTALE :
-
-Les claims fournis constituent la FRONTIÈRE FACTUELLE ABSOLUE.
-
-Tu peux :
-
-- conserver les faits déjà couverts ;
-- reformuler un claim sans changer son sens ;
-- supprimer une affirmation non couverte ;
-- remplacer une formulation factuelle non couverte par une transition narrative
-  qui n'ajoute aucun fait ;
-- améliorer légèrement la fluidité après suppression.
-
-Tu ne peux JAMAIS :
-
-- inventer un nouveau fait ;
-- ajouter un nouveau claim ;
-- enrichir un claim avec une information absente ;
-- introduire un chiffre, une date, un lieu, une institution ou une attribution
-  qui n'apparaît pas dans les claims ;
-- ajouter une cause, une conséquence ou une relation explicative absente des claims ;
-- transformer une affirmation détectée comme non déclarée en fait autorisé simplement
-  en la reformulant ;
-- utiliser tes connaissances générales ;
-- effectuer une recherche externe ;
-- modifier les claims.
-
-IMPORTANT :
-
-Si une information factuelle n'est pas couverte par les claims, SUPPRIME-LA.
-
-La qualité stylistique est secondaire par rapport à la fidélité factuelle.
-
-Le voiceover réparé doit rester naturel à l'oral.
-
-Réponds UNIQUEMENT avec un JSON valide.
-
-Structure obligatoire :
-
-{
-  "voiceover": ""
+function fail(message) {
+  throw new Error(`Script Claim Coverage Repair : ${message}`);
 }
 
-Aucun Markdown.
-Aucun texte avant ou après le JSON.
-`.trim();
+function countOccurrences(text, needle) {
+  let count = 0;
+  let offset = 0;
 
-function parseJson(text) {
-  if (!text?.trim()) {
-    throw new Error(
-      "Script Claim Coverage Repair : réponse Anthropic vide."
-    );
+  while (true) {
+    const index = text.indexOf(needle, offset);
+    if (index === -1) return count;
+    count += 1;
+    offset = index + needle.length;
+  }
+}
+
+function normalizeVoiceover(text) {
+  return text
+    .replace(/[ \t]+/g, " ")
+    .replace(/\s+([,.;:!?])/g, "$1")
+    .replace(/([.!?])(?=[^\s])/g, "$1 ")
+    .trim();
+}
+
+function normalizeClaims(claims) {
+  if (!Array.isArray(claims) || claims.length === 0) {
+    fail("claims doit être un tableau non vide.");
   }
 
-  const raw = text.trim();
+  const ids = new Set();
 
-  const jsonFence = raw.match(
-    /```json\s*([\s\S]*?)```/i
-  );
-
-  if (jsonFence?.[1]) {
-    return JSON.parse(jsonFence[1].trim());
-  }
-
-  const genericFence = raw.match(
-    /```\s*([\s\S]*?)```/
-  );
-
-  if (genericFence?.[1]) {
-    try {
-      return JSON.parse(genericFence[1].trim());
-    } catch {
-      // Continue.
+  return claims.map((claim, index) => {
+    if (!claim || typeof claim.claim_id !== "string" || !claim.claim_id.trim()) {
+      fail(`claims[${index}].claim_id invalide.`);
     }
-  }
+    if (ids.has(claim.claim_id)) fail(`claims[${index}].claim_id dupliqué.`);
+    ids.add(claim.claim_id);
 
-  try {
-    return JSON.parse(raw);
-  } catch {
-    // Continue.
-  }
+    if (typeof claim.text !== "string" || !claim.text.trim()) {
+      fail(`claims[${index}].text invalide.`);
+    }
 
-  const firstBrace = raw.indexOf("{");
-  const lastBrace = raw.lastIndexOf("}");
-
-  if (firstBrace !== -1 && lastBrace > firstBrace) {
-    return JSON.parse(
-      raw.slice(firstBrace, lastBrace + 1)
-    );
-  }
-
-  throw new Error(
-    "Script Claim Coverage Repair : aucun JSON détecté."
-  );
+    return { claim_id: claim.claim_id, text: claim.text.trim() };
+  });
 }
 
-export async function repairVoiceoverClaimCoverage({
+function normalizeUnsupported(unsupported, claimIds) {
+  if (!Array.isArray(unsupported) || unsupported.length === 0) {
+    fail("unsupported doit être un tableau non vide.");
+  }
+
+  const sentences = new Set();
+
+  return unsupported.map((item, index) => {
+    if (!item || typeof item.sentence !== "string" || !item.sentence.trim()) {
+      fail(`unsupported[${index}].sentence invalide.`);
+    }
+    const sentence = item.sentence.trim();
+    if (sentences.has(sentence)) fail(`unsupported[${index}].sentence dupliquée.`);
+    sentences.add(sentence);
+
+    if (typeof item.claim_id !== "string" || !claimIds.has(item.claim_id)) {
+      fail(`unsupported[${index}].claim_id inconnu.`);
+    }
+    if (item.action !== "DELETE" && item.action !== "DECLARE") {
+      fail(`unsupported[${index}].action invalide.`);
+    }
+
+    return { sentence, claim_id: item.claim_id, action: item.action };
+  });
+}
+
+function approvedFactMap(approvedFacts, claimIds) {
+  if (!Array.isArray(approvedFacts)) fail("approvedFacts doit être un tableau.");
+
+  const facts = new Map();
+  for (const [index, item] of approvedFacts.entries()) {
+    if (!item || typeof item.claim_id !== "string" || !claimIds.has(item.claim_id)) {
+      fail(`approvedFacts[${index}].claim_id invalide.`);
+    }
+    if (typeof item.key_fact !== "string" || !item.key_fact.trim()) {
+      fail(`approvedFacts[${index}].key_fact invalide.`);
+    }
+    if (facts.has(item.claim_id)) fail(`approvedFacts[${index}].claim_id dupliqué.`);
+    facts.set(item.claim_id, item.key_fact.trim());
+  }
+  return facts;
+}
+
+export function repairVoiceoverClaimCoverage({
   voiceover,
   claims,
-  undeclaredClaims
+  unsupported,
+  approvedFacts
 }) {
-  if (
-    typeof voiceover !== "string" ||
-    voiceover.trim().length === 0
-  ) {
-    throw new Error(
-      "Script Claim Coverage Repair : voiceover absent ou invalide."
-    );
+  if (typeof voiceover !== "string" || !voiceover.trim()) {
+    fail("voiceover absent ou invalide.");
   }
 
-  if (!Array.isArray(claims)) {
-    throw new Error(
-      "Script Claim Coverage Repair : claims doit être un tableau."
-    );
-  }
+  const normalizedClaims = normalizeClaims(claims);
+  const claimIds = new Set(normalizedClaims.map(claim => claim.claim_id));
+  const operations = normalizeUnsupported(unsupported, claimIds);
+  const facts = approvedFactMap(approvedFacts, claimIds);
+  let repaired = voiceover.trim();
 
-  if (
-    !Array.isArray(undeclaredClaims) ||
-    undeclaredClaims.length === 0
-  ) {
-    throw new Error(
-      "Script Claim Coverage Repair : undeclaredClaims doit être un tableau non vide."
-    );
-  }
-
-  const allowedClaims = claims.map((claim, index) => {
-    if (
-      !claim ||
-      typeof claim.text !== "string" ||
-      claim.text.trim().length === 0
-    ) {
-      throw new Error(
-        `Script Claim Coverage Repair : claims[${index}].text invalide.`
-      );
+  for (const operation of operations) {
+    // Sans offset dans le contrat fermé, une phrase répétée est ambiguë :
+    // on échoue fermé au lieu de supprimer ou remplacer la mauvaise occurrence.
+    if (countOccurrences(repaired, operation.sentence) !== 1) {
+      fail(`phrase introuvable ou ambiguë : ${operation.sentence}`);
     }
 
-    return claim.text.trim();
-  });
+    const replacement = operation.action === "DECLARE"
+      ? facts.get(operation.claim_id)
+      : "";
 
-  const rejectedClaims = undeclaredClaims.map(
-    (claim, index) => {
-      if (
-        !claim ||
-        typeof claim.text !== "string" ||
-        claim.text.trim().length === 0
-      ) {
-        throw new Error(
-          `Script Claim Coverage Repair : undeclaredClaims[${index}].text invalide.`
-        );
-      }
-
-      return {
-        text: claim.text.trim(),
-        reason:
-          typeof claim.reason === "string"
-            ? claim.reason.trim()
-            : ""
-      };
+    if (operation.action === "DECLARE" && !replacement) {
+      fail(`key_fact approuvé absent pour ${operation.claim_id}.`);
     }
-  );
 
-  const userPrompt = `
-VOICEOVER ORIGINAL :
-
-${voiceover}
-
-CLAIMS FACTUELS AUTORISES :
-
-${JSON.stringify(allowedClaims, null, 2)}
-
-AFFIRMATIONS FACTUELLES NON DECLAREES A ELIMINER :
-
-${JSON.stringify(rejectedClaims, null, 2)}
-
-Réécris uniquement le voiceover.
-
-Toutes les informations factuelles du résultat doivent rester à
-l'intérieur des claims autorisés.
-
-N'ajoute aucun nouveau fait.
-`.trim();
-
-  const { response, meta } = await createMessage({
-    system: SYSTEM_PROMPT,
-    messages: [
-      {
-        role: "user",
-        content: userPrompt
-      }
-    ],
-    maxTokens: 1800,
-    temperature: 0
-  });
-
-  if (meta.stop_reason === "max_tokens") {
-    throw new Error(
-      "Script Claim Coverage Repair : réponse tronquée — stop_reason=max_tokens."
-    );
+    repaired = repaired.replace(operation.sentence, replacement ?? "");
+    repaired = normalizeVoiceover(repaired);
   }
 
-  const text = extractText(response);
-
-  let data;
-
-  try {
-    data = parseJson(text);
-  } catch (error) {
-    throw new Error(
-      "Script Claim Coverage Repair : JSON invalide. " +
-      error.message
-    );
-  }
-
-  if (
-    !data ||
-    typeof data.voiceover !== "string" ||
-    data.voiceover.trim().length === 0
-  ) {
-    throw new Error(
-      "Script Claim Coverage Repair : voiceover réparé invalide."
-    );
+  if (!repaired) {
+    fail("la réparation supprimerait entièrement le voiceover.");
   }
 
   return {
-    voiceover: data.voiceover.trim(),
-    usage: meta
+    voiceover: repaired,
+    operations,
+    protocol: CLAIM_COVERAGE_REPAIR_PROTOCOL,
+    usage: null
   };
 }

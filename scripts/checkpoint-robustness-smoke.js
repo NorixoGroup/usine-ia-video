@@ -157,19 +157,15 @@ function makeHandler({ research, faults }) {
       return text({ title: `Chapitre ${i}`, purpose: `Objectif ${i}/${total}`, ...(i === 1 ? { thesis: "Thèse factuelle." } : {}), segments });
     }
 
-    if (system.startsWith("Tu es un auditeur de couverture factuelle batché")) {
-      const items = JSON.parse(user.replace(/^ELEMENTS A CONTROLER :\n\n/, ""));
-      return text({ results: items.map(item => ({ id: item.id, covered: !item.voiceover.includes("NONCOUVERT"), undeclared_claims: item.voiceover.includes("NONCOUVERT") ? [{ text: "fait non déclaré", reason: "absent des claims" }] : [] })) });
-    }
-
     if (system.startsWith("Tu es un auditeur de couverture factuelle")) {
-      const uncovered = user.includes("NONCOUVERT");
-      return text({ covered: !uncovered, undeclared_claims: uncovered ? [{ text: "fait non déclaré", reason: "absent des claims" }] : [] });
-    }
-
-    if (system.startsWith("Tu es un réparateur strict de couverture factuelle")) {
-      const voiceover = /VOICEOVER[^:]*:\n\n([\s\S]+?)\n\n/.exec(user)?.[1] ?? "réparé";
-      return text({ voiceover });
+      const payload = JSON.parse(user.replace(/^ELEMENTS A CONTROLER :\n\n/, ""));
+      return text({ results: payload.items.map(item => ({
+        id: item.id,
+        covered: !item.voiceover.includes("NONCOUVERT"),
+        unsupported: item.voiceover.includes("NONCOUVERT")
+          ? [{ sentence: "NONCOUVERT", segment_id: item.id, claim_id: item.claims[0].claim_id, action: "DELETE" }]
+          : []
+      })) });
     }
 
     if (system.startsWith("Tu es le Visual Director") && system.includes("MODE LOT")) {
@@ -303,16 +299,14 @@ for (const [fault, pattern] of [["truncate", /tronqué — stop_reason=max_token
   });
 }
 
-await test("gate du script complet (couverture non réparable, chapitre 2) : checkpoint 2 écarté, 1 et 3 conservés, reprise correcte", async () => {
+await test("gate du script complet : phrase non couverte supprimée déterministement, tous checkpoints conservés", async () => {
   const directory = makeDir();
-  await expectReject(() => scriptRun(directory, { chapter: { 2: "uncovered" } }), /Voiceover Claim Coverage Gate.*sections\[1\]/);
+  const first = await scriptRun(directory, { chapter: { 2: "uncovered" } });
   const segments = path.join(directory, "script-segments");
-  assert(listJson(segments).join() === "segment-001.json,segment-003.json", listJson(segments).join());
-  assert(listJson(path.join(segments, "rejected", fs.readdirSync(path.join(segments, "rejected"))[0])).join() === "segment-002.json", "checkpoint non déplacé");
+  assert(listJson(segments).join() === "segment-001.json,segment-002.json,segment-003.json", listJson(segments).join());
+  assert(!first.result.data.sections[1].segments.some(s => s.voiceover.includes("NONCOUVERT")), "phrase non couverte conservée");
   const resume = await scriptRun(directory);
-  // Le chapitre 3 n'est réutilisé que si le contexte transmis (fin du chapitre 2) est inchangé, ce qui est le cas ici.
-  assert(resume.calls.filter(isChapter).length === 1 && resume.result.script_generation.reused_segments === 2, `${resume.calls.filter(isChapter).length} chapitres`);
-  assert(!resume.result.data.sections[1].segments.some(s => s.voiceover.includes("NONCOUVERT")), "chapitre fautif conservé");
+  assert(resume.calls.length === 0 && resume.result.script_generation.reused_segments === 3, `${resume.calls.length} appels`);
 });
 
 console.log("--- 3. Réponse invalide : jamais de checkpoint, reprise correcte (storyboard) ---");

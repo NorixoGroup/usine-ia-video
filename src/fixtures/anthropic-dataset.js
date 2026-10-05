@@ -93,6 +93,22 @@ const RESEARCH = {
   ]
 };
 
+function scriptResearchProjection(research) {
+  return {
+    topic: research.topic,
+    key_facts: research.key_facts.map((fact, index) => ({
+      research_fact_ref: index,
+      claim: fact.claim,
+      importance: fact.importance,
+      verification_status: fact.verification_status
+    })),
+    chapter_structure: research.sections.map(section => ({
+      title: section.title,
+      purpose: section.purpose
+    }))
+  };
+}
+
 // JSON volontairement tronqué : simule une réponse modèle cassée.
 const MALFORMED_RESEARCH_TEXT =
   '{\n  "topic": "' + CANONICAL_TITLE + '",\n  "key_facts": [';
@@ -137,7 +153,7 @@ const SCRIPT_VOICEOVER_ARID_BY_SCENARIO = {
   "script-coverage-repair":
     `${VOICEOVER_ARID} ${UNDECLARED_WATER.text}`,
   "script-coverage-unrepairable":
-    `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text}`
+    `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text} ${UNDECLARED_RAINFALL.text}`
 };
 
 // Cadre narré (R14B) : hook et conclusion sont de vrais segments, avec
@@ -315,6 +331,11 @@ const COVERAGE_TABLE = [
     // Réparation volontairement insuffisante.
     repaired:
       `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL_RESIDUAL.text}`
+  },
+  {
+    voiceover: `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text} ${UNDECLARED_RAINFALL.text}`,
+    claims: [CLAIM_ARID],
+    undeclared: [UNDECLARED_RAINFALL]
   },
   {
     voiceover:
@@ -747,7 +768,7 @@ function resolveScript(fixtureId, scenario, userMessage) {
 
   if (
     title !== CANONICAL_TITLE ||
-    !isDeepStrictEqual(research, RESEARCH)
+    !isDeepStrictEqual(research, scriptResearchProjection(RESEARCH))
   ) {
     fail(
       fixtureId,
@@ -848,12 +869,13 @@ function resolveCoverageJudge(fixtureId, scenario, userMessage) {
 }
 
 function resolveCoverageBatchJudge(fixtureId, scenario, userMessage) {
-  const [, itemsText] = matchOrFail(
+  const [, payloadText] = matchOrFail(
     fixtureId,
     userMessage,
     /^ELEMENTS A CONTROLER :\n\n([\s\S]+)$/
   );
-  const items = parseJsonOrFail(fixtureId, itemsText, "éléments");
+  const payload = parseJsonOrFail(fixtureId, payloadText, "éléments");
+  const items = payload?.items;
 
   if (!Array.isArray(items)) {
     fail(fixtureId, "éléments doit être un tableau.");
@@ -875,7 +897,12 @@ function resolveCoverageBatchJudge(fixtureId, scenario, userMessage) {
       return {
         id: item.id,
         covered: entry.undeclared.length === 0,
-        undeclared_claims: entry.undeclared
+        unsupported: entry.undeclared.map(undeclared => ({
+          sentence: undeclared.text,
+          segment_id: item.id,
+          claim_id: item.claims[0]?.claim_id,
+          action: "DELETE"
+        }))
       };
     })
   });
@@ -1000,7 +1027,7 @@ const RESOLVERS = {
   "research": resolveResearch,
   "script": resolveScript,
   "visual-director": resolveVisualDirector,
-  "validate-script-claim-coverage": resolveCoverageJudge,
+  "validate-script-claim-coverage": resolveCoverageBatchJudge,
   "validate-script-claim-coverage-batch": resolveCoverageBatchJudge,
   "validate-visual-factual-grounding": resolveGroundingJudge,
   "repair-script-claim-coverage": resolveCoverageRepair,

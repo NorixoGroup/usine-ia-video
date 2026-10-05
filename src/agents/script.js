@@ -264,7 +264,16 @@ function chapterErrors({ chapter, index, research, profile }) {
   if (index === 0 && (typeof chapter.thesis !== "string" || !chapter.thesis.trim())) return ["thesis manquante"];
 
   const segments = chapter.segments;
-  const single = { sections: [{ title: chapter.title, purpose: chapter.purpose, segments }] };
+  // Un chapitre isolé ne représente pas le script complet : le cadre narré
+  // (hook/conclusion) est donc validé uniquement après l'assemblage de tous
+  // les chapitres. Les autres contraintes de dossier restent contrôlées ici.
+  const single = {
+    sections: [{
+      title: chapter.title,
+      purpose: chapter.purpose,
+      segments: segments.map(({ role, ...segment }) => segment)
+    }]
+  };
   const dossier = validateScriptDossier({
     title: chapter.title,
     hook: segments[0].voiceover,
@@ -339,6 +348,23 @@ function validChapter(value) {
       typeof segment.contains_unverified_claim === "boolean" &&
       Array.isArray(segment.claims) && segment.claims.length > 0
     );
+}
+
+// Les rôles hook/conclusion appartiennent au script assemblé, jamais à une
+// réponse de chapitre. Le contenu du segment reste inchangé.
+function withoutProviderNarrativeRoles(chapter) {
+  if (!chapter || typeof chapter !== "object" || !Array.isArray(chapter.segments)) {
+    return chapter;
+  }
+
+  return {
+    ...chapter,
+    segments: chapter.segments.map(segment => {
+      if (!segment || typeof segment !== "object") return segment;
+      const { role, ...content } = segment;
+      return content;
+    })
+  };
 }
 
 function readCheckpoint({
@@ -429,12 +455,42 @@ chaque affirmation factuelle du voiceover doit avoir un claim atomique ; chaque 
 doit référencer exactement un key_fact ; les faits non vérifiés sont explicitement
 présentés comme incertains.
 
+CONTRAT NON NÉGOCIABLE — À APPLIQUER À CHAQUE SEGMENT SANS EXCEPTION :
+- claims doit contenir AU MOINS un objet : il ne doit jamais être [].
+- Chaque claim doit provenir exclusivement d'un key_fact approuvé du dossier
+  Research et pointer vers cet unique key_fact avec research_fact_ref.
+- research_fact_refs et claims doivent rester cohérents : chaque référence du
+  segment doit être réellement utilisée par au moins un claim, et chaque claim
+  doit avoir sa référence présente dans research_fact_refs.
+- Avant de répondre, vérifie chaque segment un par un. Si tu ne peux pas
+  écrire au moins un claim soutenu par le Research, régénère ce segment avec
+  un voiceover factuellement soutenu ; ne laisse jamais claims vide.
+
 CONTEXTE DU CHAPITRE PRÉCÉDENT :
 ${previous ? JSON.stringify(previous) : "Aucun : ouverture du documentaire."}
 
-DOSSIER RESEARCH :
-${JSON.stringify(research)}
+DOSSIER FACTUEL AUTORISÉ — KEY_FACTS UNIQUEMENT :
+${JSON.stringify(scriptFactualResearch(research))}
 `.trim();
+}
+
+// Le Script Agent ne reçoit aucun objectif de recherche non résolu
+// (facts_needed, gaps ou uncertainties). Seuls les key_facts issus du
+// contrat Research peuvent être utilisés comme matériau factuel.
+function scriptFactualResearch(research) {
+  return {
+    topic: research.topic,
+    key_facts: research.key_facts.map((fact, index) => ({
+      research_fact_ref: index,
+      claim: fact.claim,
+      importance: fact.importance,
+      verification_status: fact.verification_status
+    })),
+    chapter_structure: research.sections.map(section => ({
+      title: section.title,
+      purpose: section.purpose
+    }))
+  };
 }
 
 // Adapte le prompt au profil de durée et au cadre narré. Avec le profil
@@ -614,12 +670,17 @@ async function validateGeneratedScript(data, research, options = {}) {
       let repair = null;
 
       if (!initialCoverage.covered) {
+        const approvedFacts = segment.claims.map((claim, claimIndex) => ({
+          claim_id: `${initialCoverage.id}-c${claimIndex + 1}`,
+          key_fact: research.key_facts[claim.research_fact_ref]?.claim
+        }));
+
         repair =
-          await repairVoiceoverClaimCoverage({
+          repairVoiceoverClaimCoverage({
             voiceover: segment.voiceover,
-            claims: segment.claims,
-            undeclaredClaims:
-              initialCoverage.undeclared_claims
+            claims: initialCoverage.claims,
+            unsupported: initialCoverage.unsupported,
+            approvedFacts
           });
 
         segment.voiceover = repair.voiceover;
@@ -627,7 +688,8 @@ async function validateGeneratedScript(data, research, options = {}) {
         finalCoverage =
           await validateVoiceoverClaimCoverage({
             voiceover: segment.voiceover,
-            claims: segment.claims
+            claims: segment.claims,
+            id: initialCoverage.id
           });
       }
 
@@ -637,10 +699,13 @@ async function validateGeneratedScript(data, research, options = {}) {
         repaired: repair !== null,
         initial_undeclared_claims:
           initialCoverage.undeclared_claims,
+        initial_unsupported: initialCoverage.unsupported,
         undeclared_claims:
           finalCoverage.undeclared_claims,
+        unsupported: finalCoverage.unsupported,
         initial_usage: initialCoverage.usage,
         repair_usage: repair?.usage ?? null,
+        repair_operations: repair?.operations ?? [],
         usage: finalCoverage.usage
       });
 
@@ -784,6 +849,8 @@ async function runSegmentedScriptAgent({
         reject(`invalide — ${error.message}`);
       }
 
+      chapter = withoutProviderNarrativeRoles(chapter);
+
       const errors = chapterErrors({ chapter, index, research, profile });
 
       if (errors.length > 0) {
@@ -815,7 +882,8 @@ async function runSegmentedScriptAgent({
   const sections = checkpoints.map(checkpoint => ({
     title: checkpoint.chapter.title,
     purpose: checkpoint.chapter.purpose,
-    segments: checkpoint.chapter.segments.map(segment => ({ ...segment }))
+    segments: withoutProviderNarrativeRoles(checkpoint.chapter)
+      .segments.map(segment => ({ ...segment }))
   }));
   const firstSegment = sections[0].segments[0];
   const lastSection = sections.at(-1);
@@ -935,7 +1003,7 @@ Pour ce test uniquement :
 - n'invente aucun fait.
 ${narratedFrame ? `\n${FRAME_REMINDER}\n` : ""}
 DOSSIER RESEARCH :
-${JSON.stringify(research)}
+${JSON.stringify(scriptFactualResearch(research))}
 `.trim()
     : `
 Rédige le script voix-off documentaire complet.
@@ -948,7 +1016,7 @@ ${narratedFrame ? `\n${FRAME_REMINDER}\n` : ""}
 Utilise exclusivement le dossier Research suivant.
 
 DOSSIER RESEARCH :
-${JSON.stringify(research)}
+${JSON.stringify(scriptFactualResearch(research))}
 `.trim();
 
   const { response, meta } = await createMessage({

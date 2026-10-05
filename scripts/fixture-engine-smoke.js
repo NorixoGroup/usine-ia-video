@@ -51,9 +51,6 @@ import {
   validateVoiceoverClaimCoverage
 } from "../src/utils/validate-script-claim-coverage.js";
 
-import {
-  repairVoiceoverClaimCoverage
-} from "../src/utils/repair-script-claim-coverage.js";
 
 import {
   validateVisualFactualGrounding
@@ -79,12 +76,8 @@ const PROMPT_FILES = {
   "visual-director": "src/agents/visual-director.js",
   "validate-script-claim-coverage":
     "src/utils/validate-script-claim-coverage.js",
-  "validate-script-claim-coverage-batch":
-    "src/utils/validate-script-claim-coverage.js",
   "validate-visual-factual-grounding":
     "src/utils/validate-visual-factual-grounding.js",
-  "repair-script-claim-coverage":
-    "src/utils/repair-script-claim-coverage.js",
   "repair-visual-factual-grounding":
     "src/utils/repair-visual-factual-grounding.js",
   "judge-title":
@@ -186,9 +179,7 @@ function readSystemPrompt(file, id) {
     "utf8"
   );
 
-  const constant = id === "validate-script-claim-coverage-batch"
-    ? "BATCH_SYSTEM_PROMPT"
-    : "SYSTEM_PROMPT";
+  const constant = "SYSTEM_PROMPT";
   const match = source.match(
     new RegExp("const " + constant + " = `([\\s\\S]*?)`\\.trim\\(\\);")
   );
@@ -475,7 +466,7 @@ await test("chaîne Research → Script → Visual Director (happy)", async () =
     for (const segment of scriptResult.claim_coverage_validation.segments) {
       assertFixtureUsage(
         segment.usage,
-        "validate-script-claim-coverage-batch",
+        "validate-script-claim-coverage",
         segment.label
       );
     }
@@ -520,7 +511,7 @@ await test("chaîne Research → Script → Visual Director (happy)", async () =
       isDeepStrictEqual(counts, {
         "research": 1,
         "script": 1,
-        "validate-script-claim-coverage-batch": 1,
+        "validate-script-claim-coverage": 1,
         "visual-director": 1,
         "validate-visual-factual-grounding": 5
       }),
@@ -616,10 +607,9 @@ await test("script-coverage-repair : FAIL → repair → revalidation PASS", asy
       "segment 0 : détection + repair + revalidation attendus"
     );
 
-    assertFixtureUsage(
-      first.repair_usage,
-      "repair-script-claim-coverage",
-      "repair_usage"
+    assert(
+      first.repair_usage === null,
+      "la réparation déterministe ne doit pas appeler le fournisseur"
     );
 
     assert(
@@ -635,34 +625,26 @@ await test("script-coverage-repair : FAIL → repair → revalidation PASS", asy
     assert(
       isDeepStrictEqual(logSince(start), {
         "script": 1,
-        "validate-script-claim-coverage-batch": 1,
-        "validate-script-claim-coverage": 1,
-        "repair-script-claim-coverage": 1
+        "validate-script-claim-coverage": 2
       }),
       `journal d'appels inattendu : ${JSON.stringify(logSince(start))}`
     );
   });
 });
 
-await test("script-coverage-unrepairable : le gate bloque après repair", async () => {
+await test("script-coverage-unrepairable : phrase répétée ambiguë refusée fail-closed", async () => {
   await fixtures("script-coverage-unrepairable", async () => {
     const start = getFixtureCallLog().length;
 
     await expectReject(
-      () => runScriptAgent({
-        research,
-        title: CANONICAL_TITLE,
-        testMode: true
-      }),
-      /Voiceover Claim Coverage Gate.*non déclarées après réparation — Les précipitations y sont très faibles\./
+      () => runScriptAgent({ research, title: CANONICAL_TITLE, testMode: true }),
+      /Script Claim Coverage Repair : phrase introuvable ou ambiguë/
     );
 
     assert(
       isDeepStrictEqual(logSince(start), {
         "script": 1,
-        "validate-script-claim-coverage-batch": 1,
-        "validate-script-claim-coverage": 1,
-        "repair-script-claim-coverage": 1
+        "validate-script-claim-coverage": 1
       }),
       `journal d'appels inattendu : ${JSON.stringify(logSince(start))}`
     );
@@ -872,28 +854,6 @@ const closedTableCases = [
       claims: [{ text: "Un autre claim." }]
     }),
     /fixture "validate-script-claim-coverage" : voiceover\/claims hors du jeu de données canonique/
-  ],
-  [
-    "Claim Coverage Repair : affirmations rejetées inattendues",
-    () => repairVoiceoverClaimCoverage({
-      voiceover: `${CLAIM_ARID} L'eau y est rare.`,
-      claims: [{ text: CLAIM_ARID }],
-      undeclaredClaims: [
-        { text: "Une autre affirmation.", reason: "Autre." }
-      ]
-    }),
-    /fixture "repair-script-claim-coverage" : demande de réparation hors du jeu de données canonique/
-  ],
-  [
-    "Claim Coverage Repair : voiceover déjà couvert",
-    () => repairVoiceoverClaimCoverage({
-      voiceover: CLAIM_ARID,
-      claims: [{ text: CLAIM_ARID }],
-      undeclaredClaims: [
-        { text: "L'eau y est rare.", reason: "Autre." }
-      ]
-    }),
-    /fixture "repair-script-claim-coverage" : demande de réparation hors du jeu de données canonique/
   ],
   [
     "Visual Grounding : shot inconnu",
