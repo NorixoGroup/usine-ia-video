@@ -129,8 +129,13 @@ export function repairVoiceoverClaimCoverage({
     }
 
     repaired = repaired.replace(operation.sentence, replacement ?? "");
-    repaired = normalizeVoiceover(repaired);
   }
+
+  // Les citations fournies par le juge sont des sous-chaînes exactes du
+  // voiceover d'origine. Toute normalisation intermédiaire pourrait les
+  // transformer avant l'opération suivante (notamment "..." -> ". . .").
+  // On applique donc toutes les opérations fermées, puis normalise une fois.
+  repaired = normalizeVoiceover(repaired);
 
   if (!repaired) {
     fail("la réparation supprimerait entièrement le voiceover.");

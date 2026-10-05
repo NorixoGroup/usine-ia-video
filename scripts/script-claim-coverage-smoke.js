@@ -60,6 +60,75 @@ await test("fail-closed : phrase absente ou claim inconnu est refusé", () => {
   assert(rejected === 2, `rejets=${rejected}`);
 });
 
+await test("deux DELETE à ellipses s'appliquent avant la normalisation finale", () => {
+  const voiceover = "Premier... fragment. Entre les deux. Second... fragment.";
+  const repaired = repairVoiceoverClaimCoverage({
+    voiceover,
+    claims: claimRecord,
+    unsupported: [
+      { sentence: "Premier... fragment.", segment_id: "s1-g1", claim_id: "", action: "DELETE" },
+      { sentence: "Second... fragment.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }
+    ],
+    approvedFacts: []
+  });
+  assert(repaired.voiceover === "Entre les deux.", repaired.voiceover);
+});
+
+await test("DELETE + DECLARE + DELETE normalise une seule fois après toutes les opérations", () => {
+  const voiceover = "Avant... après. À supprimer. À déclarer. Fin... ici.";
+  const repaired = repairVoiceoverClaimCoverage({
+    voiceover,
+    claims: claimRecord,
+    unsupported: [
+      { sentence: "À supprimer.", segment_id: "s1-g1", claim_id: "", action: "DELETE" },
+      { sentence: "À déclarer.", segment_id: "s1-g1", claim_id: "s1-g1-c1", action: "DECLARE" },
+      { sentence: "Fin... ici.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }
+    ],
+    approvedFacts: [{ claim_id: "s1-g1-c1", key_fact: "Fait approuvé." }]
+  });
+  assert(repaired.voiceover === "Avant. . . après. Fait approuvé.", repaired.voiceover);
+});
+
+await test("fail-closed : une citation répétée reste ambiguë", () => {
+  try {
+    repairVoiceoverClaimCoverage({
+      voiceover: "Réponse. Réponse.",
+      claims: claimRecord,
+      unsupported: [{ sentence: "Réponse.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
+      approvedFacts: []
+    });
+  } catch (error) {
+    assert(error.message.includes("phrase introuvable ou ambiguë"), error.message);
+    return;
+  }
+  throw new Error("citation répétée acceptée");
+});
+
+await test("fail-closed : une citation absente reste refusée", () => {
+  try {
+    repairVoiceoverClaimCoverage({
+      voiceover: "Présente.",
+      claims: claimRecord,
+      unsupported: [{ sentence: "Absente.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
+      approvedFacts: []
+    });
+  } catch (error) {
+    assert(error.message.includes("phrase introuvable ou ambiguë"), error.message);
+    return;
+  }
+  throw new Error("citation absente acceptée");
+});
+
+await test("ponctuation ordinaire : comportement de normalisation préservé", () => {
+  const repaired = repairVoiceoverClaimCoverage({
+    voiceover: "Une phrase.  Une autre !",
+    claims: claimRecord,
+    unsupported: [{ sentence: "Une autre !", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
+    approvedFacts: []
+  });
+  assert(repaired.voiceover === "Une phrase.", repaired.voiceover);
+});
+
 assert(networkGuard.attempts().length === 0, `NETWORK ATTEMPTS = ${networkGuard.attempts().length}`);
 delete process.env.ANTHROPIC_FIXTURES;
 console.log(`NETWORK ATTEMPTS = 0\nTests : ${passed} PASS / ${failed} FAIL`);
