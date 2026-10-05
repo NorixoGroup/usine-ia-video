@@ -30,6 +30,7 @@ import {
   noteTexts,
   runContradictionJudge,
   sameConditionConflicts,
+  validateContradictionJudgeInput,
   validateContradictionJudgeResponse
 } from "../src/utils/fact-contradictions.js";
 
@@ -224,6 +225,14 @@ await test("réponse du juge : contrôle strict (paire oubliée, paire inconnue,
   assert(contradictionJudgeInputSha256(input) === contradictionJudgeInputSha256(structuredClone(input)), "empreinte stable");
 });
 
+await test("entrée du juge : les paires invalides sont refusées avant tout appel", () => {
+  const result = findCandidates({ research: REAL });
+  const input = buildContradictionJudgeInput(result);
+  const invalid = structuredClone(input);
+  invalid.candidates[0].b = invalid.candidates[0].a;
+  assert(/textes a et b invalides/.test(validateContradictionJudgeInput(invalid).join(" ; ")), "paire invalide acceptée");
+});
+
 async function withStubbedSdk(responses, fn) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "fact-contradictions-judge-"));
   const original = Anthropic.Messages.prototype.create;
@@ -263,6 +272,13 @@ await test("juge des contradictions : via le garde des appels, une seule répara
   assert(!repaired.error && repaired.result.attempts === 2 && repaired.requests[1].messages[0].content.startsWith("RÉPARATION"), repaired.error?.message ?? "réparation");
   const broken = await withStubbedSdk(["pas du JSON", "{}"], () => runContradictionJudge(input));
   assert(/réponse invalide après réparation/.test(broken.error?.message ?? "") && broken.requests.length === 2, broken.error?.message ?? "échec");
+  const malformed = JSON.stringify({ pairs: [{ ...judgeFor(result).pairs[0], candidate: "", a: "f1", b: "f1" }] });
+  const structural = await withStubbedSdk([malformed], () => runContradictionJudge(input));
+  assert(/réponse structurellement invalide/.test(structural.error?.message ?? "") && structural.requests.length === 1, structural.error?.message ?? "paire invalide non bloquée");
+  const invalidInput = structuredClone(input);
+  invalidInput.candidates[0].b = invalidInput.candidates[0].a;
+  const preflight = await withStubbedSdk([good], () => runContradictionJudge(invalidInput));
+  assert(/entrée invalide avant appel/.test(preflight.error?.message ?? "") && preflight.requests.length === 0, preflight.error?.message ?? "prévalidation absente");
 });
 
 await test("Truth Report : pause « contradiction à revoir » (HIGH, block), rien en report, fait MEDIUM seul non bloquant", () => {

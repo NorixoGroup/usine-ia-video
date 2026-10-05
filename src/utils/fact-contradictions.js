@@ -280,8 +280,11 @@ existent, des extraits de leurs preuves), les autres textes du dossier
    - category : chiffres, dates, causalités, portées, unités, géographie,
      chronologie ou définitions ;
    - explanation : une phrase précise.
-2. Signale ensuite toute AUTRE contradiction entre deux textes fournis,
-   avec les mêmes champs et "candidate": "".
+
+Les candidates fournies constituent l'espace de recherche complet. Réponds
+exactement une fois pour chacune d'elles, et uniquement pour elles : ne crée
+aucune paire supplémentaire, ne laisse jamais candidate vide, et conserve
+exactement les identifiants a et b de la candidate fournie.
 
 N'utilise aucune connaissance extérieure. Ne reformule jamais les citations.
 
@@ -289,7 +292,7 @@ Réponds uniquement en JSON valide, sans markdown ni texte autour :
 
 {
   "pairs": [
-    { "candidate": "", "a": "", "b": "", "verdict": "", "dimension": "", "category": "", "quote_a": "", "quote_b": "", "explanation": "" }
+    { "candidate": "c1", "a": "f1", "b": "n1", "verdict": "", "dimension": "", "category": "", "quote_a": "", "quote_b": "", "explanation": "" }
   ]
 }
 `.trim();
@@ -317,6 +320,48 @@ export function contradictionJudgeInputSha256(input) {
   return sha256(`${SYSTEM_PROMPT}\n${JSON.stringify(input)}`);
 }
 
+// Le juge ne doit jamais recevoir une paire que le code sait déjà
+// structurellement invalide. Cette validation est distincte de celle de sa
+// réponse : elle protège la frontière avant tout appel payant.
+export function validateContradictionJudgeInput(input) {
+  const errors = [];
+
+  if (!input || typeof input !== "object") {
+    return ["entrée du juge absente ou invalide"];
+  }
+
+  if (!Array.isArray(input.facts) || !Array.isArray(input.notes) || !Array.isArray(input.candidates)) {
+    return ["entrée du juge : facts, notes et candidates doivent être des tableaux"];
+  }
+
+  const texts = [...input.facts, ...input.notes];
+  const ids = new Set();
+
+  texts.forEach((item, index) => {
+    const label = index < input.facts.length ? `facts[${index}]` : `notes[${index - input.facts.length}]`;
+    if (!isNonEmptyString(item?.id) || !isNonEmptyString(item?.text)) {
+      errors.push(`${label} : id ou texte invalide`);
+      return;
+    }
+    if (ids.has(item.id)) errors.push(`${label} : id dupliqué ${item.id}`);
+    ids.add(item.id);
+  });
+
+  const candidateIds = new Set();
+  input.candidates.forEach((candidate, index) => {
+    const label = `candidates[${index}]`;
+    if (!isNonEmptyString(candidate?.id)) errors.push(`${label} : id invalide`);
+    else if (candidateIds.has(candidate.id)) errors.push(`${label} : id dupliqué ${candidate.id}`);
+    else candidateIds.add(candidate.id);
+
+    if (!ids.has(candidate?.a) || !ids.has(candidate?.b) || candidate?.a === candidate?.b) {
+      errors.push(`${label} : textes a et b invalides`);
+    }
+  });
+
+  return errors;
+}
+
 export function validateContradictionJudgeResponse(response, input) {
   const errors = [];
 
@@ -335,9 +380,10 @@ export function validateContradictionJudgeResponse(response, input) {
     const label = `pairs[${position}]`;
     const candidate = input.candidates.find(item => item.id === pair?.candidate);
 
-    if (isNonEmptyString(pair?.candidate) && !candidate) errors.push(`${label} : paire inconnue ${pair.candidate}`);
+    if (!isNonEmptyString(pair?.candidate)) errors.push(`${label} : candidate manquante`);
+    else if (!candidate) errors.push(`${label} : paire inconnue ${pair.candidate}`);
     if (!ids.has(pair?.a) || !ids.has(pair?.b) || pair?.a === pair?.b) errors.push(`${label} : textes a et b invalides`);
-    if (candidate && !(candidate.a === pair.a && candidate.b === pair.b) && !(candidate.a === pair.b && candidate.b === pair.a)) errors.push(`${label} : a et b ne correspondent pas à la paire ${candidate.id}`);
+    if (candidate && (candidate.a !== pair.a || candidate.b !== pair.b)) errors.push(`${label} : a et b ne correspondent pas à la paire ${candidate.id}`);
     if (!["contradiction", "compatible"].includes(pair?.verdict)) errors.push(`${label} : verdict invalide`);
     if (!CATEGORIES.includes(pair?.category)) errors.push(`${label} : category invalide`);
     if (typeof pair?.dimension !== "string" || typeof pair?.quote_a !== "string" || typeof pair?.quote_b !== "string") errors.push(`${label} : dimension, quote_a et quote_b doivent être des chaînes`);
@@ -345,6 +391,12 @@ export function validateContradictionJudgeResponse(response, input) {
   });
 
   return errors;
+}
+
+function hasMalformedPairTopology(errors) {
+  return errors.some(error =>
+    /paire inconnue|textes a et b invalides|a et b ne correspondent pas à la paire/.test(error)
+  );
 }
 
 function parseJson(text) {
@@ -366,6 +418,14 @@ function parseJson(text) {
 // Un appel, plus au plus une réparation. Passe par createMessage : garde des
 // appels, plafond, journal et cache.
 export async function runContradictionJudge(input) {
+  const inputErrors = validateContradictionJudgeInput(input);
+
+  if (inputErrors.length > 0) {
+    throw new Error(
+      `Juge des contradictions : entrée invalide avant appel — ${inputErrors.join(" ; ")}`
+    );
+  }
+
   const payload = JSON.stringify(input);
   const usage = [];
   let previous = null;
@@ -390,6 +450,15 @@ export async function runContradictionJudge(input) {
 
     if (errors.length === 0) {
       return { response: parsed, attempts: attempt, usage };
+    }
+
+    // Une paire inventée avec des identifiants inconnus ou identiques ne peut
+    // pas être réparée de façon sûre sans la laisser à nouveau influencer le
+    // modèle. On échoue donc de manière déterministe avant un second appel.
+    if (hasMalformedPairTopology(errors)) {
+      throw new Error(
+        `Juge des contradictions : réponse structurellement invalide — ${errors.join(" ; ")}`
+      );
     }
 
     previous = { errors, text: text.slice(0, 4000) };

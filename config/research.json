@@ -55,6 +55,7 @@
       ],
       "domain_exceptions": {
         "insee.fr": "official_body",
+        "australian.museum": "official_body",
         "un.org": "official_body",
         "oecd.org": "official_body",
         "worldbank.org": "official_body",

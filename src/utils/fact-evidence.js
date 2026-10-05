@@ -379,6 +379,12 @@ const EXPONENTS = { "2": "²", "3": "³", "²": "²", "³": "³" };
 const UNIT_PATTERN = /^\s*([\p{L}°]+)(?:([²³])|\s*\^?\s*([23])(?!\d|[.,]\d))?/u;
 
 function readUnit(rest) {
+  const squareKilometres = rest.match(/^\s*(?:square\s+kilomet(?:er|re)s?|kilom(?:è|e)tre?s?\s+carr(?:é|e)s?)/iu);
+
+  if (squareKilometres) {
+    return { unit: "km²", length: squareKilometres[0].length };
+  }
+
   const match = rest.match(UNIT_PATTERN);
 
   if (!match) return null;
@@ -396,13 +402,48 @@ function readUnit(rest) {
 }
 const SCALES = { million: 1e6, millions: 1e6, milliard: 1e9, milliards: 1e9 };
 
+// Représentations déterministes supplémentaires admises par le matcher de
+// preuves uniquement : séparateurs de milliers et « one/un million ».
+// Aucune proximité sémantique ni approximation textuelle n'est introduite.
+const GROUPED_THOUSANDS = /\b\d{1,3}(?:[ ,]\d{3})+\b/g;
+const ONE_MILLION = /\b(?:one|un)\s+millions?\b/giu;
+
+function normalizedQuantityWords(text) {
+  return [...String(text ?? "").matchAll(ONE_MILLION)].map(match => ({
+    text: match[0],
+    low: 1,
+    high: 1,
+    percent: false,
+    position: match.index,
+    scale: 1e6
+  }));
+}
+
+function evidenceFigures(text) {
+  const source = String(text ?? "");
+  const figures = extractFigures(source);
+
+  for (const match of source.matchAll(GROUPED_THOUSANDS)) {
+    figures.push({
+      text: match[0],
+      low: Number(match[0].replace(/[ ,]/g, "")),
+      high: Number(match[0].replace(/[ ,]/g, "")),
+      percent: false,
+      position: match.index
+    });
+  }
+
+  figures.push(...normalizedQuantityWords(source));
+  return figures.sort((a, b) => a.position - b.position || b.text.length - a.text.length);
+}
+
 // Quantité d'un chiffre dans son texte : échelle (« 1,37 million » →
 // 1 370 000) et unité reconnue (« km », « habitants »…), ou null.
 function quantityOf(text, figure) {
   if (figure.percent) return { low: figure.low, high: figure.high, unit: "%" };
 
   let rest = text.slice(figure.position + figure.text.length);
-  let scale = 1;
+  let scale = figure.scale ?? 1;
   const scaleMatch = rest.match(/^\s*(millions?|milliards?)\b\s*(?:de\s+|d['’]\s*)?/iu);
 
   if (scaleMatch) {
@@ -439,6 +480,21 @@ export function factElements(claim) {
     });
   }
 
+  for (const figure of normalizedQuantityWords(text)) {
+    const quantity = quantityOf(text, figure);
+    const unit = quantity.unit;
+    const before = normalizeText(text.slice(0, figure.position)).replace(/'/g, " ").split(" ").filter(Boolean).slice(-TITLE_VALIDATION.approximation_window_words).join(" ");
+    const shown = unit && unit !== "%" ? `${figure.text}${text.slice(figure.position + figure.text.length, figure.position + figure.text.length + (readUnit(text.slice(figure.position + figure.text.length))?.length ?? 0))}`.trim() : figure.text;
+
+    elements.push({
+      kind: "figure",
+      text: shown,
+      figure: { low: quantity.low, high: quantity.high, percent: false },
+      unit,
+      approximate: approximation.some(marker => ` ${before} `.includes(` ${marker} `))
+    });
+  }
+
   for (const match of text.matchAll(/[«"“]\s*([^«»"“”]{8,}?)\s*[»"”]/g)) {
     elements.push({ kind: "quote", text: match[1].trim() });
   }
@@ -447,7 +503,7 @@ export function factElements(claim) {
 }
 
 function figureInEvidence(element, evidenceText, tolerance) {
-  const candidates = extractFigures(evidenceText)
+  const candidates = evidenceFigures(evidenceText)
     .filter(candidate => candidate.percent === element.figure.percent)
     .map(candidate => ({ ...candidate, ...quantityOf(evidenceText, candidate) }));
   const unitOk = candidate => !element.unit || element.unit === "%" || candidate.unit === element.unit;
