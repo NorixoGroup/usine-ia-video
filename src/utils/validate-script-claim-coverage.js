@@ -2,7 +2,12 @@ import { createMessage, extractText } from "../services/anthropic.js";
 import { assertRealCallBudget, getCallGuardStatus } from "../services/call-guard.js";
 
 export const MAX_CLAIMS_PER_BATCH = 24;
+export const MAX_BATCH_ESTIMATED_CHARS = 9000;
 export const CLAIM_COVERAGE_PROTOCOL = "claim-coverage.v2-deterministic-repair";
+
+// Coûts fixes du JSON envoyé au juge. Ils font partie du contrat de
+// planification : aucun tokenizer ni estimateur du modèle n'intervient.
+const CLAIM_JSON_OVERHEAD_CHARS = 72;
 
 // Ce contrat est identique pour le juge initial et les rechecks : seul le
 // nombre d'items varie. Les résultats ne peuvent donc pas diverger sur une
@@ -45,13 +50,6 @@ function assertPositiveInteger(value, label) {
   if (!Number.isSafeInteger(value) || value < 1) fail(`${label} doit être un entier positif.`);
 }
 
-// Estimation pure : elle ne consomme et ne réserve aucun appel.
-export function estimateClaimValidationCalls({ claimCount, batchSize = MAX_CLAIMS_PER_BATCH }) {
-  assertPositiveInteger(batchSize, "batchSize");
-  if (!Number.isSafeInteger(claimCount) || claimCount < 0) fail("claimCount doit être un entier positif ou nul.");
-  return { claim_count: claimCount, batch_size: batchSize, batch_count: Math.ceil(claimCount / batchSize), validation_calls_max: Math.ceil(claimCount / batchSize) };
-}
-
 function normalizeClaim(claim, id, index) {
   if (!claim || typeof claim.text !== "string" || !claim.text.trim()) fail(`${id}.claims[${index}].text invalide.`);
   return { claim_id: `${id}-c${index + 1}`, text: claim.text.trim(), research_fact_ref: claim.research_fact_ref };
@@ -68,20 +66,83 @@ function normalizeItems(script) {
       const id = `s${sectionIndex + 1}-g${segmentIndex + 1}`;
       const claims = segment.claims.map((claim, claimIndex) => normalizeClaim(claim, id, claimIndex));
       if (claims.length > MAX_CLAIMS_PER_BATCH) fail(`${id}: ${claims.length} claims dépasse MAX_CLAIMS_PER_BATCH=${MAX_CLAIMS_PER_BATCH}.`);
-      items.push({ id, label: `sections[${sectionIndex}].segments[${segmentIndex}]`, voiceover: segment.voiceover.trim(), claims });
+      const voiceover = segment.voiceover.trim();
+      const estimated_chars = estimateItemChars({ voiceover, claims });
+      items.push({ id, label: `sections[${sectionIndex}].segments[${segmentIndex}]`, voiceover, claims, estimated_chars });
     });
   });
   return items;
 }
 
+function estimateItemChars({ voiceover, claims }) {
+  return voiceover.length +
+    claims.reduce(
+      (total, claim) => total + CLAIM_JSON_OVERHEAD_CHARS + claim.text.length,
+      0
+    );
+}
+
+function summarizeBatch(items) {
+  return {
+    items,
+    claim_count: items.reduce((total, item) => total + item.claims.length, 0),
+    estimated_chars: items.reduce((total, item) => total + item.estimated_chars, 0)
+  };
+}
+
 function batchItems(items) {
-  const batches = []; let batch = []; let count = 0;
+  const batches = []; let batch = []; let claimCount = 0;
+  let estimatedChars = 0;
+
   for (const item of items) {
-    if (batch.length && count + item.claims.length > MAX_CLAIMS_PER_BATCH) { batches.push(batch); batch = []; count = 0; }
-    batch.push(item); count += item.claims.length;
+    const itemChars = item.estimated_chars;
+    if (itemChars > MAX_BATCH_ESTIMATED_CHARS) {
+      fail(`${item.id}: ${itemChars} caractères estimés dépasse MAX_BATCH_ESTIMATED_CHARS=${MAX_BATCH_ESTIMATED_CHARS}.`);
+    }
+
+    if (
+      batch.length &&
+      (
+        claimCount + item.claims.length > MAX_CLAIMS_PER_BATCH ||
+        estimatedChars + itemChars > MAX_BATCH_ESTIMATED_CHARS
+      )
+    ) {
+      batches.push(summarizeBatch(batch));
+      batch = [];
+      claimCount = 0;
+      estimatedChars = 0;
+    }
+
+    batch.push(item);
+    claimCount += item.claims.length;
+    estimatedChars += itemChars;
   }
-  if (batch.length) batches.push(batch);
+  if (batch.length) batches.push(summarizeBatch(batch));
   return batches;
+}
+
+export function planClaimValidationBatches(script) {
+  const items = normalizeItems(script);
+  return { items, batches: batchItems(items) };
+}
+
+function estimateFromPlan({ items, batches }) {
+  const claimCount = items.reduce((total, item) => total + item.claims.length, 0);
+  return {
+    claim_count: claimCount,
+    batch_size: MAX_CLAIMS_PER_BATCH,
+    max_batch_estimated_chars: MAX_BATCH_ESTIMATED_CHARS,
+    item_count: items.length,
+    batch_count: batches.length,
+    batch_estimated_chars: batches.map(batch => batch.estimated_chars),
+    validation_calls_max: batches.length
+  };
+}
+
+// Estimation pure : exactement le même planificateur que l'exécution, sans
+// réserver ni consommer un appel.
+export function estimateClaimValidationCalls({ script }) {
+  return estimateFromPlan(planClaimValidationBatches(script));
 }
 
 function parseJson(text) {
@@ -163,14 +224,14 @@ export async function validateVoiceoverClaimCoverage({ voiceover, claims, id = "
 }
 
 export async function validateScriptClaimCoverage(script) {
-  const items = normalizeItems(script); const batches = batchItems(items);
-  const claimCount = items.reduce((total, item) => total + item.claims.length, 0);
-  const estimate = { ...estimateClaimValidationCalls({ claimCount }), item_count: items.length, batch_count: batches.length, repair_calls_max: 0, recheck_calls_max: items.length, repair_and_recheck_calls_max: items.length, total_calls_max: batches.length + items.length };
+  const plan = planClaimValidationBatches(script);
+  const { items, batches } = plan;
+  const estimate = { ...estimateFromPlan(plan), repair_calls_max: 0, recheck_calls_max: items.length, repair_and_recheck_calls_max: items.length, total_calls_max: batches.length + items.length };
   if (getCallGuardStatus().configured) assertRealCallBudget({ calls: estimate.batch_count, label: "validation batchée des claims" });
   const errors = []; const segments = []; const usage = [];
   for (const batch of batches) {
-    const judged = await validateBatch(batch); const byId = new Map(judged.results.map(result => [result.id, result]));
-    for (const item of batch) {
+    const judged = await validateBatch(batch.items); const byId = new Map(judged.results.map(result => [result.id, result]));
+    for (const item of batch.items) {
       const result = byId.get(item.id);
       const undeclared = result.unsupported.map(entry => ({ text: entry.sentence, reason: entry.action }));
       segments.push({ label: item.label, id: item.id, claims: item.claims, covered: result.covered, unsupported: result.unsupported, undeclared_claims: undeclared, usage: result.usage });

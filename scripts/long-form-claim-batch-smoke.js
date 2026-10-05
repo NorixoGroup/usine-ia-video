@@ -6,7 +6,9 @@ import path from "node:path";
 
 import {
   MAX_CLAIMS_PER_BATCH,
+  MAX_BATCH_ESTIMATED_CHARS,
   estimateClaimValidationCalls,
+  planClaimValidationBatches,
   validateClaimBatchResponse,
   validateScriptClaimCoverage
 } from "../src/utils/validate-script-claim-coverage.js";
@@ -51,11 +53,51 @@ function longScript(sectionCount = 6, segmentsPerSection = 8) {
 
 console.log("LONG-FORM CLAIM BATCH — SMOKE (ZERO API)");
 const script = longScript(); // 48 segments / 48 claims, représentatif sans média.
-const estimate = estimateClaimValidationCalls({ claimCount: 48 });
+const estimate = estimateClaimValidationCalls({ script });
 
 await test("48 claims → 2 batches déterministes de 24", () => {
   assert(estimate.batch_count === 2 && estimate.validation_calls_max === 2, JSON.stringify(estimate));
-  assert(JSON.stringify(estimate) === JSON.stringify(estimateClaimValidationCalls({ claimCount: 48 })), "estimation non déterministe");
+  assert(JSON.stringify(estimate) === JSON.stringify(estimateClaimValidationCalls({ script })), "estimation non déterministe");
+});
+
+function scriptWith(items) {
+  return {
+    sections: [{
+      segments: items.map(({ voiceover, claims }) => ({ voiceover, claims }))
+    }]
+  };
+}
+
+function claims(count, prefix) {
+  return Array.from({ length: count }, (_, index) => ({ text: `${prefix} claim ${index + 1}` }));
+}
+
+await test("la limite de 24 claims ferme le lot sans découper un segment", () => {
+  const plan = planClaimValidationBatches(scriptWith([
+    { voiceover: "A.", claims: claims(10, "A") },
+    { voiceover: "B.", claims: claims(10, "B") },
+    { voiceover: "C.", claims: claims(10, "C") }
+  ]));
+  assert(plan.batches.length === 2, JSON.stringify(plan.batches));
+  assert(plan.batches.map(batch => batch.claim_count).join(",") === "20,10", JSON.stringify(plan.batches));
+  assert(plan.batches[0].items.map(item => item.id).join(",") === "s1-g1,s1-g2", JSON.stringify(plan.batches));
+});
+
+await test("la limite de 9 000 caractères ferme le lot sans découper un segment", () => {
+  const plan = planClaimValidationBatches(scriptWith([
+    { voiceover: "A".repeat(4000), claims: [{ text: "A" }] },
+    { voiceover: "B".repeat(4000), claims: [{ text: "B" }] },
+    { voiceover: "C".repeat(900), claims: [{ text: "C" }] }
+  ]));
+  assert(plan.batches.length === 2, JSON.stringify(plan.batches));
+  assert(plan.batches.map(batch => batch.items.map(item => item.id).join(",")).join("|") === "s1-g1,s1-g2|s1-g3", JSON.stringify(plan.batches));
+});
+
+await test("plan identique : ordre stable et aucun lot ne dépasse ses deux plafonds", () => {
+  const first = planClaimValidationBatches(script);
+  const second = planClaimValidationBatches(structuredClone(script));
+  assert(JSON.stringify(first.batches.map(batch => ({ ids: batch.items.map(item => item.id), claims: batch.claim_count, chars: batch.estimated_chars }))) === JSON.stringify(second.batches.map(batch => ({ ids: batch.items.map(item => item.id), claims: batch.claim_count, chars: batch.estimated_chars }))), "plan non déterministe");
+  assert(first.batches.every(batch => batch.claim_count <= MAX_CLAIMS_PER_BATCH && batch.estimated_chars <= MAX_BATCH_ESTIMATED_CHARS), JSON.stringify(first.batches));
 });
 
 await test("contrat batch : aucune perte, doublon ou réordonnancement", () => {
