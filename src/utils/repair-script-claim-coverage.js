@@ -1,5 +1,7 @@
 // Réparation déterministe de couverture. Le modèle ne rédige jamais de prose :
 // il désigne une phrase exacte et une opération fermée, appliquée ici.
+
+import { coverageOperationClaimId } from "./validate-script-claim-coverage.js";
 export const CLAIM_COVERAGE_REPAIR_PROTOCOL =
   "claim-coverage-repair.v2-deterministic";
 
@@ -64,14 +66,17 @@ function normalizeUnsupported(unsupported, claimIds) {
     if (sentences.has(sentence)) fail(`unsupported[${index}].sentence dupliquée.`);
     sentences.add(sentence);
 
-    if (typeof item.claim_id !== "string" || !claimIds.has(item.claim_id)) {
-      fail(`unsupported[${index}].claim_id inconnu.`);
-    }
     if (item.action !== "DELETE" && item.action !== "DECLARE") {
       fail(`unsupported[${index}].action invalide.`);
     }
+    // R25.7C : même règle que le juge — claim_id ignoré pour DELETE, exigé
+    // et connu pour DECLARE.
+    const claimId = coverageOperationClaimId(item, claimIds);
+    if (claimId === undefined) {
+      fail(`unsupported[${index}].claim_id inconnu.`);
+    }
 
-    return { sentence, claim_id: item.claim_id, action: item.action };
+    return { sentence, claim_id: claimId, action: item.action };
   });
 }
 

@@ -7,6 +7,7 @@ import path from "node:path";
 import {
   MAX_CLAIMS_PER_BATCH,
   MAX_BATCH_ESTIMATED_CHARS,
+  OUTPUT_TOKEN_BUDGET,
   estimateClaimValidationCalls,
   planClaimValidationBatches,
   validateClaimBatchResponse,
@@ -55,8 +56,11 @@ console.log("LONG-FORM CLAIM BATCH — SMOKE (ZERO API)");
 const script = longScript(); // 48 segments / 48 claims, représentatif sans média.
 const estimate = estimateClaimValidationCalls({ script });
 
-await test("48 claims → 2 batches déterministes de 24", () => {
-  assert(estimate.batch_count === 2 && estimate.validation_calls_max === 2, JSON.stringify(estimate));
+// R25.7D : la borne de sortie (pire cas, 1 600 tokens) ferme les lots avant
+// la limite de 24 claims : 48 segments d'une phrase → 4 lots (15/15/15/3).
+await test("48 claims → 4 batches déterministes sous la borne de sortie", () => {
+  assert(estimate.batch_count === 4 && estimate.validation_calls_max === 4, JSON.stringify(estimate));
+  assert(estimate.batch_estimated_output_tokens.every(tokens => tokens <= OUTPUT_TOKEN_BUDGET), JSON.stringify(estimate));
   assert(JSON.stringify(estimate) === JSON.stringify(estimateClaimValidationCalls({ script })), "estimation non déterministe");
 });
 
@@ -83,21 +87,23 @@ await test("la limite de 24 claims ferme le lot sans découper un segment", () =
   assert(plan.batches[0].items.map(item => item.id).join(",") === "s1-g1,s1-g2", JSON.stringify(plan.batches));
 });
 
+// Entrée lourde (claims longs), sortie légère (voiceover court) : seule la
+// limite de 9 000 caractères d'entrée s'applique.
 await test("la limite de 9 000 caractères ferme le lot sans découper un segment", () => {
   const plan = planClaimValidationBatches(scriptWith([
-    { voiceover: "A".repeat(4000), claims: [{ text: "A" }] },
-    { voiceover: "B".repeat(4000), claims: [{ text: "B" }] },
-    { voiceover: "C".repeat(900), claims: [{ text: "C" }] }
+    { voiceover: "A.", claims: [{ text: "A".repeat(4000) }] },
+    { voiceover: "B.", claims: [{ text: "B".repeat(4000) }] },
+    { voiceover: "C.", claims: [{ text: "C".repeat(900) }] }
   ]));
   assert(plan.batches.length === 2, JSON.stringify(plan.batches));
   assert(plan.batches.map(batch => batch.items.map(item => item.id).join(",")).join("|") === "s1-g1,s1-g2|s1-g3", JSON.stringify(plan.batches));
 });
 
-await test("plan identique : ordre stable et aucun lot ne dépasse ses deux plafonds", () => {
+await test("plan identique : ordre stable et aucun lot ne dépasse ses trois plafonds", () => {
   const first = planClaimValidationBatches(script);
   const second = planClaimValidationBatches(structuredClone(script));
   assert(JSON.stringify(first.batches.map(batch => ({ ids: batch.items.map(item => item.id), claims: batch.claim_count, chars: batch.estimated_chars }))) === JSON.stringify(second.batches.map(batch => ({ ids: batch.items.map(item => item.id), claims: batch.claim_count, chars: batch.estimated_chars }))), "plan non déterministe");
-  assert(first.batches.every(batch => batch.claim_count <= MAX_CLAIMS_PER_BATCH && batch.estimated_chars <= MAX_BATCH_ESTIMATED_CHARS), JSON.stringify(first.batches));
+  assert(first.batches.every(batch => batch.claim_count <= MAX_CLAIMS_PER_BATCH && batch.estimated_chars <= MAX_BATCH_ESTIMATED_CHARS && batch.estimated_output_tokens <= OUTPUT_TOKEN_BUDGET), JSON.stringify(first.batches));
 });
 
 await test("contrat batch : aucune perte, doublon ou réordonnancement", () => {
@@ -147,7 +153,7 @@ await test("budget suffisant + fixtures → PASS logique, 48 résultats stables"
   const result = await validateScriptClaimCoverage(script);
   delete process.env.ANTHROPIC_FIXTURES;
   assert(result.valid && result.segments.length === 48, JSON.stringify(result.errors));
-  assert(result.estimate.batch_count === 2 && result.estimate.total_calls_max === 50, JSON.stringify(result.estimate));
+  assert(result.estimate.batch_count === 4 && result.estimate.total_calls_max === 52, JSON.stringify(result.estimate));
   assert(result.segments.map(item => item.label).at(-1) === "sections[5].segments[7]", "ordre source instable");
 });
 

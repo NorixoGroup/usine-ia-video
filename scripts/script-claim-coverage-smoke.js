@@ -51,7 +51,8 @@ await test("fail-closed : phrase absente ou claim inconnu est refusé", () => {
   let rejected = 0;
   for (const unsupported of [
     [{ sentence: "Absente.", segment_id: "s1-g1", claim_id: "s1-g1-c1", action: "DELETE" }],
-    [{ sentence: "L'eau y est rare.", segment_id: "s1-g1", claim_id: "inconnu", action: "DELETE" }]
+    // R25.7C : DELETE ignore claim_id ; seul DECLARE exige un claim_id connu.
+    [{ sentence: "L'eau y est rare.", segment_id: "s1-g1", claim_id: "inconnu", action: "DECLARE" }]
   ]) {
     try { repairVoiceoverClaimCoverage({ voiceover: original, claims: claimRecord, unsupported, approvedFacts: [{ claim_id: "s1-g1-c1", key_fact: claim }] }); }
     catch { rejected += 1; }
