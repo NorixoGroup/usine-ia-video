@@ -47,6 +47,17 @@ forment la seule frontière factuelle. Une reformulation équivalente est
 couverte; une quantité, date, attribution, causalité, propriété ou conséquence
 supplémentaire ne l'est pas.
 
+COMPLÉTUDE OBLIGATOIRE DU PLAN DE RÉPARATION — inspecte l'intégralité de
+chaque voiceover avant de répondre et évalue chaque phrase indépendamment. Ne t'arrête jamais après la première phrase non couverte. Retourne l'ensemble
+minimal et complet des opérations DELETE / DECLARE pour toutes les phrases non
+couvertes : aucune opération répétée, aucun DELETE d'un texte déjà supprimé,
+aucune opération sans lien avec une phrase non couverte, et aucun DECLARE sans
+claim_id approuvé. Avant de répondre, effectue une dernière vérification
+interne : applique mentalement toutes les opérations proposées ; si une phrase
+non couverte resterait, poursuis l'analyse et ajoute l'opération nécessaire.
+Ne retourne la réponse que lorsque le plan proposé ne devrait laisser aucune
+phrase non couverte.
+
 CONTRAT DE CITATION STRICT — pour chaque phrase non couverte, le champ
 sentence DOIT être copié mot pour mot depuis le voiceover fourni : une sous-chaîne
 contiguë exacte, correspondant à une phrase entière du voiceover. Avant de la

@@ -300,6 +300,20 @@ for (const [id, prompt] of Object.entries(SYSTEM_PROMPTS)) {
   });
 }
 
+await test("Coverage Judge : le prompt exige un plan complet et minimal", async () => {
+  const prompt = SYSTEM_PROMPTS["validate-script-claim-coverage"].replace(/\s+/g, " ");
+  for (const required of [
+    "inspecte l'intégralité",
+    "évalue chaque phrase indépendamment",
+    "Ne t'arrête jamais après la première",
+    "ensemble minimal et complet",
+    "dernière vérification interne",
+    "aucune phrase non couverte"
+  ]) {
+    assert(prompt.includes(required), `instruction manquante : ${required}`);
+  }
+});
+
 await test("prompt inconnu → FAIL", async () => {
   await expectReject(
     () => detectFixtureId("Tu es un assistant générique."),

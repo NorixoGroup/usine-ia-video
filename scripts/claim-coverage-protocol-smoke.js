@@ -182,6 +182,73 @@ test("mêmes entrées → sorties identiques (deux exécutions)", () => {
   }
 });
 
+test("plan complet : deux phrases non couvertes sont toutes deux conservées", () => {
+  const item = {
+    id: "s9-g1",
+    voiceover: "Fait approuvé. Fait non couvert un. Fait non couvert deux.",
+    claims: [{ claim_id: "s9-g1-c1", text: "Fait approuvé." }]
+  };
+  const unsupported = ["Fait non couvert un.", "Fait non couvert deux."];
+  const [result] = validateClaimBatchResponse({
+    results: [{
+      id: item.id,
+      covered: false,
+      unsupported: unsupported.map(sentence => ({
+        sentence,
+        segment_id: item.id,
+        claim_id: "",
+        action: "DELETE"
+      }))
+    }]
+  }, [item]);
+  assert(result.unsupported.length === 2, JSON.stringify(result));
+  assert(result.unsupported.map(entry => entry.sentence).join("|") === unsupported.join("|"), JSON.stringify(result));
+});
+
+test("plan complet : trois phrases non couvertes, sans doublon ni phrase supportée", () => {
+  const item = {
+    id: "s9-g2",
+    voiceover: "Fait approuvé. Bruit un. Fait approuvé encore. Bruit deux. Bruit trois.",
+    claims: [{ claim_id: "s9-g2-c1", text: "Fait approuvé." }]
+  };
+  const unsupported = ["Bruit un.", "Bruit deux.", "Bruit trois."];
+  const [result] = validateClaimBatchResponse({
+    results: [{
+      id: item.id,
+      covered: false,
+      unsupported: unsupported.map(sentence => ({
+        sentence,
+        segment_id: item.id,
+        claim_id: "",
+        action: "DELETE"
+      }))
+    }]
+  }, [item]);
+  assert(result.unsupported.length === 3, JSON.stringify(result));
+  assert(!result.unsupported.some(entry => entry.sentence === "Fait approuvé."), JSON.stringify(result));
+  assert(new Set(result.unsupported.map(entry => entry.sentence)).size === 3, JSON.stringify(result));
+});
+
+test("plan minimal : DELETE dupliqué refusé fail-closed", () => {
+  const item = {
+    id: "s9-g3",
+    voiceover: "Fait approuvé. Bruit unique.",
+    claims: [{ claim_id: "s9-g3-c1", text: "Fait approuvé." }]
+  };
+  expectThrow(() => validateClaimBatchResponse({
+    results: [{
+      id: item.id,
+      covered: false,
+      unsupported: ["Bruit unique.", "Bruit unique."].map(sentence => ({
+        sentence,
+        segment_id: item.id,
+        claim_id: "",
+        action: "DELETE"
+      }))
+    }]
+  }, [item]), /sentence dupliquée/);
+});
+
 console.log("--- 4. Coordinateur déterministe des issues de réparation ---");
 
 test("CANDIDATE + PASS → REPAIRED", () => {

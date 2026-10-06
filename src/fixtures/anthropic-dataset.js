@@ -10,6 +10,7 @@ import { isDeepStrictEqual } from "node:util";
 export const SCENARIOS = [
   "happy",
   "script-coverage-repair",
+  "script-coverage-empty",
   "script-coverage-unrepairable",
   "visual-grounding-repair",
   "visual-grounding-unrepairable",
@@ -152,6 +153,7 @@ const UNDECLARED_RAINFALL_RESIDUAL = {
 const SCRIPT_VOICEOVER_ARID_BY_SCENARIO = {
   "script-coverage-repair":
     `${VOICEOVER_ARID} ${UNDECLARED_WATER.text}`,
+  "script-coverage-empty": UNDECLARED_RAINFALL.text,
   "script-coverage-unrepairable":
     `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text} ${UNDECLARED_RAINFALL.text}`
 };
@@ -331,6 +333,11 @@ const COVERAGE_TABLE = [
     // Réparation volontairement insuffisante.
     repaired:
       `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL_RESIDUAL.text}`
+  },
+  {
+    voiceover: UNDECLARED_RAINFALL.text,
+    claims: [CLAIM_ARID],
+    undeclared: [UNDECLARED_RAINFALL]
   },
   {
     voiceover: `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text} ${UNDECLARED_RAINFALL.text}`,
