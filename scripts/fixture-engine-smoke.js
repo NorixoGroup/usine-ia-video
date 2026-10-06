@@ -632,15 +632,35 @@ await test("script-coverage-repair : FAIL → repair → revalidation PASS", asy
   });
 });
 
-await test("script-coverage-unrepairable : phrase répétée ambiguë refusée fail-closed", async () => {
+await test("script-coverage-unrepairable : HARD_FAILURE structuré sans recheck ni retry", async () => {
   await fixtures("script-coverage-unrepairable", async () => {
     const start = getFixtureCallLog().length;
+    const result = await runScriptAgent({ research, title: CANONICAL_TITLE, testMode: true });
 
-    await expectReject(
-      () => runScriptAgent({ research, title: CANONICAL_TITLE, testMode: true }),
-      /Script Claim Coverage Repair : phrase introuvable ou ambiguë/
+    assert(result.protocol_outcome?.status === "HARD_FAILURE", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.repair_status === "HARD_FAILURE", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.coverage_status === null, JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.reason?.includes("phrase introuvable ou ambiguë"), JSON.stringify(result.protocol_outcome));
+    assert(!("data" in result), "un résultat HARD_FAILURE ne doit pas exposer de script publiable");
+
+    assert(
+      isDeepStrictEqual(logSince(start), {
+        "script": 1,
+        "validate-script-claim-coverage": 1
+      }),
+      `journal d'appels inattendu : ${JSON.stringify(logSince(start))}`
     );
+  });
+});
 
+await test("script-coverage-empty : l'exécuteur reçoit IRREPARABLE_EMPTY sans recheck ni retry", async () => {
+  await fixtures("script-coverage-empty", async () => {
+    const start = getFixtureCallLog().length;
+    const result = await runScriptAgent({ research, title: CANONICAL_TITLE, testMode: true });
+
+    assert(result.protocol_outcome?.status === "IRREPARABLE_EMPTY", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.segment_id === "s1-g1", JSON.stringify(result.protocol_outcome));
+    assert(!("data" in result), "un résultat irréparable ne doit pas exposer de script publiable");
     assert(
       isDeepStrictEqual(logSince(start), {
         "script": 1,
@@ -750,6 +770,7 @@ await test("scénarios déclarés = scénarios testés", () => {
     isDeepStrictEqual([...SCENARIOS].sort(), [
       "happy",
       "malformed-json",
+      "script-coverage-empty",
       "script-coverage-repair",
       "script-coverage-unrepairable",
       "visual-grounding-repair",

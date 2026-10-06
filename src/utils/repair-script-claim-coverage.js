@@ -2,11 +2,33 @@
 // il désigne une phrase exacte et une opération fermée, appliquée ici.
 
 import { coverageOperationClaimId } from "./validate-script-claim-coverage.js";
+import { REPAIR_STATUS } from "./classify-script-claim-coverage-repair-outcome.js";
 export const CLAIM_COVERAGE_REPAIR_PROTOCOL =
   "claim-coverage-repair.v2-deterministic";
 
-function fail(message) {
-  throw new Error(`Script Claim Coverage Repair : ${message}`);
+class RepairFailure extends Error {
+  constructor(reason) {
+    super(reason);
+    this.name = "RepairFailure";
+  }
+}
+
+function fail(reason) {
+  throw new RepairFailure(reason);
+}
+
+function hardFailure(reason, operations = []) {
+  return {
+    status: REPAIR_STATUS.HARD_FAILURE,
+    reason,
+    operations,
+    diagnostics: {
+      operation_count: operations.length,
+      candidate_length: null
+    },
+    protocol: CLAIM_COVERAGE_REPAIR_PROTOCOL,
+    usage: null
+  };
 }
 
 function countOccurrences(text, needle) {
@@ -103,48 +125,71 @@ export function repairVoiceoverClaimCoverage({
   unsupported,
   approvedFacts
 }) {
-  if (typeof voiceover !== "string" || !voiceover.trim()) {
-    fail("voiceover absent ou invalide.");
-  }
+  let operations = [];
 
-  const normalizedClaims = normalizeClaims(claims);
-  const claimIds = new Set(normalizedClaims.map(claim => claim.claim_id));
-  const operations = normalizeUnsupported(unsupported, claimIds);
-  const facts = approvedFactMap(approvedFacts, claimIds);
-  let repaired = voiceover.trim();
-
-  for (const operation of operations) {
-    // Sans offset dans le contrat fermé, une phrase répétée est ambiguë :
-    // on échoue fermé au lieu de supprimer ou remplacer la mauvaise occurrence.
-    if (countOccurrences(repaired, operation.sentence) !== 1) {
-      fail(`phrase introuvable ou ambiguë : ${operation.sentence}`);
+  try {
+    if (typeof voiceover !== "string" || !voiceover.trim()) {
+      fail("voiceover absent ou invalide.");
     }
 
-    const replacement = operation.action === "DECLARE"
-      ? facts.get(operation.claim_id)
-      : "";
+    const normalizedClaims = normalizeClaims(claims);
+    const claimIds = new Set(normalizedClaims.map(claim => claim.claim_id));
+    operations = normalizeUnsupported(unsupported, claimIds);
+    const facts = approvedFactMap(approvedFacts, claimIds);
+    let repaired = voiceover.trim();
 
-    if (operation.action === "DECLARE" && !replacement) {
-      fail(`key_fact approuvé absent pour ${operation.claim_id}.`);
+    for (const operation of operations) {
+      // Sans offset dans le contrat fermé, une phrase répétée est ambiguë :
+      // on échoue fermé au lieu de supprimer ou remplacer la mauvaise occurrence.
+      if (countOccurrences(repaired, operation.sentence) !== 1) {
+        fail(`phrase introuvable ou ambiguë : ${operation.sentence}`);
+      }
+
+      const replacement = operation.action === "DECLARE"
+        ? facts.get(operation.claim_id)
+        : "";
+
+      if (operation.action === "DECLARE" && !replacement) {
+        fail(`key_fact approuvé absent pour ${operation.claim_id}.`);
+      }
+
+      repaired = repaired.replace(operation.sentence, replacement ?? "");
     }
 
-    repaired = repaired.replace(operation.sentence, replacement ?? "");
+    // Les citations fournies par le juge sont des sous-chaînes exactes du
+    // voiceover d'origine. Toute normalisation intermédiaire pourrait les
+    // transformer avant l'opération suivante (notamment "..." -> ". . .").
+    // On applique donc toutes les opérations fermées, puis normalise une fois.
+    repaired = normalizeVoiceover(repaired);
+
+    if (!repaired) {
+      return {
+        status: REPAIR_STATUS.EMPTY_CANDIDATE,
+        operations,
+        diagnostics: {
+          operation_count: operations.length,
+          candidate_length: 0
+        },
+        protocol: CLAIM_COVERAGE_REPAIR_PROTOCOL,
+        usage: null
+      };
+    }
+
+    return {
+      status: REPAIR_STATUS.CANDIDATE,
+      voiceover: repaired,
+      operations,
+      diagnostics: {
+        operation_count: operations.length,
+        candidate_length: repaired.length
+      },
+      protocol: CLAIM_COVERAGE_REPAIR_PROTOCOL,
+      usage: null
+    };
+  } catch (error) {
+    if (error instanceof RepairFailure) {
+      return hardFailure(error.message, operations);
+    }
+    throw error;
   }
-
-  // Les citations fournies par le juge sont des sous-chaînes exactes du
-  // voiceover d'origine. Toute normalisation intermédiaire pourrait les
-  // transformer avant l'opération suivante (notamment "..." -> ". . .").
-  // On applique donc toutes les opérations fermées, puis normalise une fois.
-  repaired = normalizeVoiceover(repaired);
-
-  if (!repaired) {
-    fail("la réparation supprimerait entièrement le voiceover.");
-  }
-
-  return {
-    voiceover: repaired,
-    operations,
-    protocol: CLAIM_COVERAGE_REPAIR_PROTOCOL,
-    usage: null
-  };
 }

@@ -2,6 +2,7 @@
 import { networkGuard } from "./fixture-network-guard.js";
 import { validateVoiceoverClaimCoverage } from "../src/utils/validate-script-claim-coverage.js";
 import { repairVoiceoverClaimCoverage } from "../src/utils/repair-script-claim-coverage.js";
+import { REPAIR_STATUS } from "../src/utils/classify-script-claim-coverage-repair-outcome.js";
 
 if (process.env.NO_API !== "1") throw new Error("NO_API=1 obligatoire.");
 process.env.ANTHROPIC_FIXTURES = "1";
@@ -47,17 +48,17 @@ await test("DECLARE : remplace textuellement par le key_fact approuvé", () => {
   assert(repaired.voiceover === claim, repaired.voiceover);
 });
 
-await test("fail-closed : phrase absente ou claim inconnu est refusé", () => {
-  let rejected = 0;
+await test("fail-closed : phrase absente ou claim inconnu devient HARD_FAILURE", () => {
+  let failures = 0;
   for (const unsupported of [
     [{ sentence: "Absente.", segment_id: "s1-g1", claim_id: "s1-g1-c1", action: "DELETE" }],
     // R25.7C : DELETE ignore claim_id ; seul DECLARE exige un claim_id connu.
     [{ sentence: "L'eau y est rare.", segment_id: "s1-g1", claim_id: "inconnu", action: "DECLARE" }]
   ]) {
-    try { repairVoiceoverClaimCoverage({ voiceover: original, claims: claimRecord, unsupported, approvedFacts: [{ claim_id: "s1-g1-c1", key_fact: claim }] }); }
-    catch { rejected += 1; }
+    const result = repairVoiceoverClaimCoverage({ voiceover: original, claims: claimRecord, unsupported, approvedFacts: [{ claim_id: "s1-g1-c1", key_fact: claim }] });
+    if (result.status === REPAIR_STATUS.HARD_FAILURE && result.reason) failures += 1;
   }
-  assert(rejected === 2, `rejets=${rejected}`);
+  assert(failures === 2, `hard failures=${failures}`);
 });
 
 await test("deux DELETE à ellipses s'appliquent avant la normalisation finale", () => {
@@ -89,34 +90,26 @@ await test("DELETE + DECLARE + DELETE normalise une seule fois après toutes les
   assert(repaired.voiceover === "Avant. . . après. Fait approuvé.", repaired.voiceover);
 });
 
-await test("fail-closed : une citation répétée reste ambiguë", () => {
-  try {
-    repairVoiceoverClaimCoverage({
-      voiceover: "Réponse. Réponse.",
-      claims: claimRecord,
-      unsupported: [{ sentence: "Réponse.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
-      approvedFacts: []
-    });
-  } catch (error) {
-    assert(error.message.includes("phrase introuvable ou ambiguë"), error.message);
-    return;
-  }
-  throw new Error("citation répétée acceptée");
+await test("fail-closed : une citation répétée devient HARD_FAILURE", () => {
+  const result = repairVoiceoverClaimCoverage({
+    voiceover: "Réponse. Réponse.",
+    claims: claimRecord,
+    unsupported: [{ sentence: "Réponse.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
+    approvedFacts: []
+  });
+  assert(result.status === REPAIR_STATUS.HARD_FAILURE, JSON.stringify(result));
+  assert(result.reason.includes("phrase introuvable ou ambiguë"), result.reason);
 });
 
-await test("fail-closed : une citation absente reste refusée", () => {
-  try {
-    repairVoiceoverClaimCoverage({
-      voiceover: "Présente.",
-      claims: claimRecord,
-      unsupported: [{ sentence: "Absente.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
-      approvedFacts: []
-    });
-  } catch (error) {
-    assert(error.message.includes("phrase introuvable ou ambiguë"), error.message);
-    return;
-  }
-  throw new Error("citation absente acceptée");
+await test("fail-closed : une citation absente devient HARD_FAILURE", () => {
+  const result = repairVoiceoverClaimCoverage({
+    voiceover: "Présente.",
+    claims: claimRecord,
+    unsupported: [{ sentence: "Absente.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
+    approvedFacts: []
+  });
+  assert(result.status === REPAIR_STATUS.HARD_FAILURE, JSON.stringify(result));
+  assert(result.reason.includes("phrase introuvable ou ambiguë"), result.reason);
 });
 
 await test("ponctuation ordinaire : comportement de normalisation préservé", () => {

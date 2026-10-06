@@ -37,6 +37,13 @@ import {
 } from "../utils/repair-script-claim-coverage.js";
 
 import {
+  classifyRepairOutcome,
+  REPAIR_STATUS,
+  COVERAGE_STATUS,
+  CLAIM_COVERAGE_REPAIR_OUTCOME
+} from "../utils/classify-script-claim-coverage-repair-outcome.js";
+
+import {
   discardCachedResponse
 } from "../services/call-guard.js";
 
@@ -683,6 +690,33 @@ async function validateGeneratedScript(data, research, options = {}) {
             approvedFacts
           });
 
+        if (repair.status !== REPAIR_STATUS.CANDIDATE) {
+          const outcome = classifyRepairOutcome({
+            repairStatus: repair.status,
+            coverageStatus: null
+          });
+
+          claimCoverageValidation.valid = false;
+          claimCoverageValidation.protocol_outcome = {
+            status: outcome,
+            segment_id: initialCoverage.id,
+            label,
+            repair_status: repair.status,
+            coverage_status: null,
+            operations: repair.operations,
+            diagnostics: repair.diagnostics,
+            reason: repair.reason ?? null
+          };
+
+          return {
+            validation,
+            research_reference_validation: { valid: true, errors: [] },
+            claim_validation: claimValidation,
+            claim_coverage_validation: claimCoverageValidation,
+            protocol_outcome: claimCoverageValidation.protocol_outcome
+          };
+        }
+
         segment.voiceover = repair.voiceover;
 
         finalCoverage =
@@ -691,6 +725,35 @@ async function validateGeneratedScript(data, research, options = {}) {
             claims: segment.claims,
             id: initialCoverage.id
           });
+
+        const outcome = classifyRepairOutcome({
+          repairStatus: repair.status,
+          coverageStatus: finalCoverage.covered
+            ? COVERAGE_STATUS.PASS
+            : COVERAGE_STATUS.FAIL
+        });
+
+        if (outcome !== CLAIM_COVERAGE_REPAIR_OUTCOME.REPAIRED) {
+          claimCoverageValidation.valid = false;
+          claimCoverageValidation.protocol_outcome = {
+            status: outcome,
+            segment_id: initialCoverage.id,
+            label,
+            repair_status: repair.status,
+            coverage_status: finalCoverage.covered ? COVERAGE_STATUS.PASS : COVERAGE_STATUS.FAIL,
+            operations: repair.operations,
+            diagnostics: repair.diagnostics,
+            reason: repair.reason ?? null
+          };
+
+          return {
+            validation,
+            research_reference_validation: { valid: true, errors: [] },
+            claim_validation: claimValidation,
+            claim_coverage_validation: claimCoverageValidation,
+            protocol_outcome: claimCoverageValidation.protocol_outcome
+          };
+        }
       }
 
       claimCoverageValidation.segments.push({
@@ -925,6 +988,30 @@ async function runSegmentedScriptAgent({
     duration_ms: totalUsage.duration_ms + (checkpoint.usage.duration_ms ?? 0)
   }), { input_tokens: 0, output_tokens: 0, duration_ms: 0 });
 
+  if (gateResult.protocol_outcome) {
+    return {
+      agent: "script",
+      mode: "full",
+      protocol_outcome: gateResult.protocol_outcome,
+      claim_coverage_validation: gateResult.claim_coverage_validation,
+      usage: {
+        ...usage,
+        model: "segmented-script",
+        stop_reason: "end_turn",
+        calls: generated,
+        reused_segments: reused
+      },
+      script_generation: {
+        mode: "segmented",
+        total_segments: total,
+        generated_segments: generated,
+        reused_segments: reused,
+        checkpoint_directory: SEGMENT_DIRECTORY,
+        plan_sha256: planHash
+      }
+    };
+  }
+
   return {
     agent: "script",
     mode: "full",
@@ -1044,6 +1131,16 @@ ${JSON.stringify(scriptFactualResearch(research))}
 
   const gateResult =
     await validateGeneratedScript(data, research, validationOptions);
+
+  if (gateResult.protocol_outcome) {
+    return {
+      agent: "script",
+      mode: testMode ? "test" : "full",
+      protocol_outcome: gateResult.protocol_outcome,
+      claim_coverage_validation: gateResult.claim_coverage_validation,
+      usage: meta
+    };
+  }
 
   return {
     agent: "script",

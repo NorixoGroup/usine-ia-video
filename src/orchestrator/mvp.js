@@ -1298,6 +1298,15 @@ if (dryRun) {
         productionDir
       }));
 
+      if (scriptResult.protocol_outcome) {
+        const error = new Error(
+          `Script Agent : ${scriptResult.protocol_outcome.status} ` +
+          `(${scriptResult.protocol_outcome.segment_id}).`
+        );
+        error.protocol_outcome = scriptResult.protocol_outcome;
+        throw error;
+      }
+
       sealAndWriteArtifact({
         productionDir,
         production,

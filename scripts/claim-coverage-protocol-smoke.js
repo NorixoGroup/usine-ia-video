@@ -12,6 +12,12 @@ import {
   coverageOperationClaimId
 } from "../src/utils/validate-script-claim-coverage.js";
 import { repairVoiceoverClaimCoverage } from "../src/utils/repair-script-claim-coverage.js";
+import {
+  classifyRepairOutcome,
+  REPAIR_STATUS,
+  COVERAGE_STATUS,
+  CLAIM_COVERAGE_REPAIR_OUTCOME
+} from "../src/utils/classify-script-claim-coverage-repair-outcome.js";
 
 const networkGuard = globalThis.__fixtureNetworkGuard;
 
@@ -120,7 +126,9 @@ console.log("--- 2. Réparation déterministe (même règle) ---");
 for (const [name, entry, expected] of CASES) {
   test(`réparation : ${name} → ${expected.toUpperCase()}`, () => {
     if (expected === "fail") {
-      expectThrow(() => repair(entry), /unsupported\[0\]\.claim_id inconnu/);
+      const result = repair(entry);
+      assert(result.status === REPAIR_STATUS.HARD_FAILURE, JSON.stringify(result));
+      assert(/unsupported\[0\]\.claim_id inconnu/.test(result.reason), result.reason);
       return;
     }
     const result = repair(entry);
@@ -148,9 +156,11 @@ for (const [name, sentence] of [
   });
 }
 
-test("action inconnue toujours refusée (juge et réparation)", () => {
+test("action inconnue : juge refusé, réparation HARD_FAILURE", () => {
   expectThrow(() => judge({ action: "REWRITE", claim_id: "s1-g1-c1" }), /action invalide/);
-  expectThrow(() => repair({ action: "REWRITE", claim_id: "s1-g1-c1" }), /action invalide/);
+  const result = repair({ action: "REWRITE", claim_id: "s1-g1-c1" });
+  assert(result.status === REPAIR_STATUS.HARD_FAILURE, JSON.stringify(result));
+  assert(result.reason.includes("action invalide"), result.reason);
 });
 
 test("règle unique : coverageOperationClaimId est pure et identique pour juge et réparation", () => {
@@ -170,6 +180,82 @@ test("mêmes entrées → sorties identiques (deux exécutions)", () => {
     assert(JSON.stringify(judge(entry)) === JSON.stringify(judge(entry)), "juge non déterministe");
     assert(JSON.stringify(repair(entry)) === JSON.stringify(repair(entry)), "réparation non déterministe");
   }
+});
+
+console.log("--- 4. Coordinateur déterministe des issues de réparation ---");
+
+test("CANDIDATE + PASS → REPAIRED", () => {
+  assert(
+    classifyRepairOutcome({ repairStatus: REPAIR_STATUS.CANDIDATE, coverageStatus: COVERAGE_STATUS.PASS }) ===
+      CLAIM_COVERAGE_REPAIR_OUTCOME.REPAIRED,
+    "issue inattendue"
+  );
+});
+
+test("CANDIDATE + FAIL → IRREPARABLE_UNCOVERED", () => {
+  assert(
+    classifyRepairOutcome({ repairStatus: REPAIR_STATUS.CANDIDATE, coverageStatus: COVERAGE_STATUS.FAIL }) ===
+      CLAIM_COVERAGE_REPAIR_OUTCOME.IRREPARABLE_UNCOVERED,
+    "issue inattendue"
+  );
+});
+
+test("EMPTY_CANDIDATE → IRREPARABLE_EMPTY", () => {
+  assert(
+    classifyRepairOutcome({ repairStatus: REPAIR_STATUS.EMPTY_CANDIDATE }) ===
+      CLAIM_COVERAGE_REPAIR_OUTCOME.IRREPARABLE_EMPTY,
+    "issue inattendue"
+  );
+});
+
+test("HARD_FAILURE → HARD_FAILURE", () => {
+  assert(
+    classifyRepairOutcome({ repairStatus: REPAIR_STATUS.HARD_FAILURE }) ===
+      CLAIM_COVERAGE_REPAIR_OUTCOME.HARD_FAILURE,
+    "issue inattendue"
+  );
+});
+
+test("réparation malformée → HARD_FAILURE structuré puis coordinateur", () => {
+  const result = repair({ action: "DECLARE", claim_id: "s9-g9-c9" });
+  assert(result.status === REPAIR_STATUS.HARD_FAILURE, JSON.stringify(result));
+  assert(result.reason.includes("claim_id inconnu"), result.reason);
+  assert(
+    classifyRepairOutcome({ repairStatus: result.status }) ===
+      CLAIM_COVERAGE_REPAIR_OUTCOME.HARD_FAILURE,
+    "le coordinateur doit être l'unique propriétaire de l'issue finale"
+  );
+});
+
+test("réparation HARD_FAILURE ne lance aucune exception de protocole", () => {
+  let threw = false;
+  let result;
+  try {
+    result = repair({ action: "REWRITE", claim_id: "s1-g1-c1" });
+  } catch {
+    threw = true;
+  }
+  assert(!threw, "la réparation ne doit pas lever une exception de protocole");
+  assert(result.status === REPAIR_STATUS.HARD_FAILURE, JSON.stringify(result));
+});
+
+test("coordinateur pur : mêmes entrées → même sortie", () => {
+  const input = { repairStatus: REPAIR_STATUS.CANDIDATE, coverageStatus: COVERAGE_STATUS.FAIL };
+  assert(
+    classifyRepairOutcome(input) === classifyRepairOutcome(structuredClone(input)),
+    "coordinateur non déterministe"
+  );
+});
+
+test("réparation : suppression totale → EMPTY_CANDIDATE sans exception", () => {
+  const result = repairVoiceoverClaimCoverage({
+    voiceover: "Affirmation non soutenue.",
+    claims: ITEM.claims,
+    unsupported: [{ sentence: "Affirmation non soutenue.", segment_id: "s1-g1", claim_id: "", action: "DELETE" }],
+    approvedFacts: []
+  });
+  assert(result.status === REPAIR_STATUS.EMPTY_CANDIDATE, JSON.stringify(result));
+  assert(result.diagnostics.candidate_length === 0, JSON.stringify(result));
 });
 
 const attempts = networkGuard.attempts().length;
