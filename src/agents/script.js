@@ -44,7 +44,9 @@ import {
 } from "../utils/classify-script-claim-coverage-repair-outcome.js";
 
 import {
-  discardCachedResponse
+  assertRealCallBudget,
+  discardCachedResponse,
+  getCallGuardStatus
 } from "../services/call-guard.js";
 
 const SYSTEM_PROMPT = `
@@ -171,6 +173,10 @@ CONSIGNES DE STRUCTURE :
 - estimated_seconds doit représenter raisonnablement la durée du texte
   prononcé.
 `.trim();
+
+// Garde purement défensive de convergence : ce n'est pas une règle éditoriale.
+// Une couverture complète doit converger avant cette borne.
+export const MAX_COVERAGE_FIXPOINT_ITERATIONS = 10;
 
 // Règles ajoutées au prompt système quand le cadre narré est demandé
 // (R14B). Sans cadre narré, le prompt historique est inchangé.
@@ -602,6 +608,124 @@ function validateResearchReferences(script, research) {
   return errors;
 }
 
+export function estimateCoverageFixpointCalls({ uncoveredSegmentCount }) {
+  if (!Number.isSafeInteger(uncoveredSegmentCount) || uncoveredSegmentCount < 0) {
+    throw new Error("Script Agent : nombre de segments non couverts invalide.");
+  }
+
+  return uncoveredSegmentCount * MAX_COVERAGE_FIXPOINT_ITERATIONS;
+}
+
+export function assertCoverageFixpointBudget({
+  uncoveredSegmentCount,
+  preflight = assertRealCallBudget
+}) {
+  return preflight({
+    calls: estimateCoverageFixpointCalls({ uncoveredSegmentCount }),
+    label: "convergence de couverture des claims"
+  });
+}
+
+// Orchestration seule : Repair, Recheck et le coordinateur gardent chacun
+// leur contrat fermé. Une FAIL intermédiaire devient une nouvelle entrée de
+// Repair ; seul un état terminal est transmis au coordinateur.
+export async function convergeCoverageRepair({
+  voiceover,
+  claims,
+  initialCoverage,
+  approvedFacts,
+  id,
+  repair = repairVoiceoverClaimCoverage,
+  recheck = validateVoiceoverClaimCoverage,
+  maxIterations = MAX_COVERAGE_FIXPOINT_ITERATIONS
+}) {
+  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
+    throw new Error("Script Agent : maxIterations de convergence invalide.");
+  }
+
+  let candidate = voiceover;
+  let coverage = initialCoverage;
+  let latestRepair = null;
+  const repairClaims = initialCoverage.claims;
+  const candidateHashes = [sha256(candidate)];
+  const seenCandidateHashes = new Set(candidateHashes);
+
+  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
+    latestRepair = repair({
+      voiceover: candidate,
+      claims: repairClaims,
+      unsupported: coverage.unsupported,
+      approvedFacts
+    });
+
+    if (latestRepair.status !== REPAIR_STATUS.CANDIDATE) {
+      return {
+        voiceover: candidate,
+        coverage,
+        repair: latestRepair,
+        iterations: iteration,
+        candidate_hashes: candidateHashes,
+        terminal_reason: latestRepair.status,
+        outcome: classifyRepairOutcome({
+          repairStatus: latestRepair.status,
+          coverageStatus: null
+        })
+      };
+    }
+
+    candidate = latestRepair.voiceover;
+    const candidateHash = sha256(candidate);
+
+    if (seenCandidateHashes.has(candidateHash)) {
+      return {
+        voiceover: candidate,
+        coverage,
+        repair: latestRepair,
+        iterations: iteration,
+        candidate_hashes: candidateHashes,
+        terminal_reason: "CANDIDATE_HASH_CYCLE",
+        outcome: classifyRepairOutcome({
+          repairStatus: latestRepair.status,
+          coverageStatus: COVERAGE_STATUS.FAIL
+        })
+      };
+    }
+
+    seenCandidateHashes.add(candidateHash);
+    candidateHashes.push(candidateHash);
+
+    coverage = await recheck({ voiceover: candidate, claims, id });
+
+    if (coverage.covered) {
+      return {
+        voiceover: candidate,
+        coverage,
+        repair: latestRepair,
+        iterations: iteration,
+        candidate_hashes: candidateHashes,
+        terminal_reason: COVERAGE_STATUS.PASS,
+        outcome: classifyRepairOutcome({
+          repairStatus: latestRepair.status,
+          coverageStatus: COVERAGE_STATUS.PASS
+        })
+      };
+    }
+  }
+
+  return {
+    voiceover: candidate,
+    coverage,
+    repair: latestRepair,
+    iterations: maxIterations,
+    candidate_hashes: candidateHashes,
+    terminal_reason: "MAX_ITERATIONS",
+    outcome: classifyRepairOutcome({
+      repairStatus: latestRepair.status,
+      coverageStatus: COVERAGE_STATUS.FAIL
+    })
+  };
+}
+
 async function validateGeneratedScript(data, research, options = {}) {
   const validation = validateScriptDossier(data, options);
 
@@ -647,6 +771,31 @@ async function validateGeneratedScript(data, research, options = {}) {
   const initialByLabel = new Map(
     initialBatchCoverage.segments.map(item => [item.label, item])
   );
+  const uncoveredSegmentCount = initialBatchCoverage.segments.filter(
+    item => !item.covered
+  ).length;
+  const fixpointCallsMax = estimateCoverageFixpointCalls({
+    uncoveredSegmentCount
+  });
+
+  // Phase 2 : le premier passage a révélé les segments réellement concernés.
+  // On refuse maintenant avant le premier recheck si le pire cas borné ne
+  // tient pas dans le budget restant ; aucun appel de convergence ne part.
+  if (getCallGuardStatus().configured) {
+    assertCoverageFixpointBudget({
+      uncoveredSegmentCount,
+      preflight: assertRealCallBudget
+    });
+  }
+
+  claimCoverageValidation.estimate = {
+    ...initialBatchCoverage.estimate,
+    fixpoint_max_iterations: MAX_COVERAGE_FIXPOINT_ITERATIONS,
+    uncovered_segment_count: uncoveredSegmentCount,
+    fixpoint_recheck_calls_max: fixpointCallsMax,
+    total_calls_max:
+      initialBatchCoverage.estimate.batch_count + fixpointCallsMax
+  };
 
   for (
     let sectionIndex = 0;
@@ -675,6 +824,7 @@ async function validateGeneratedScript(data, research, options = {}) {
 
       let finalCoverage = initialCoverage;
       let repair = null;
+      let convergence = null;
 
       if (!initialCoverage.covered) {
         const approvedFacts = segment.claims.map((claim, claimIndex) => ({
@@ -682,68 +832,32 @@ async function validateGeneratedScript(data, research, options = {}) {
           key_fact: research.key_facts[claim.research_fact_ref]?.claim
         }));
 
-        repair =
-          repairVoiceoverClaimCoverage({
-            voiceover: segment.voiceover,
-            claims: initialCoverage.claims,
-            unsupported: initialCoverage.unsupported,
-            approvedFacts
-          });
-
-        if (repair.status !== REPAIR_STATUS.CANDIDATE) {
-          const outcome = classifyRepairOutcome({
-            repairStatus: repair.status,
-            coverageStatus: null
-          });
-
-          claimCoverageValidation.valid = false;
-          claimCoverageValidation.protocol_outcome = {
-            status: outcome,
-            segment_id: initialCoverage.id,
-            label,
-            repair_status: repair.status,
-            coverage_status: null,
-            operations: repair.operations,
-            diagnostics: repair.diagnostics,
-            reason: repair.reason ?? null
-          };
-
-          return {
-            validation,
-            research_reference_validation: { valid: true, errors: [] },
-            claim_validation: claimValidation,
-            claim_coverage_validation: claimCoverageValidation,
-            protocol_outcome: claimCoverageValidation.protocol_outcome
-          };
-        }
-
-        segment.voiceover = repair.voiceover;
-
-        finalCoverage =
-          await validateVoiceoverClaimCoverage({
-            voiceover: segment.voiceover,
-            claims: segment.claims,
-            id: initialCoverage.id
-          });
-
-        const outcome = classifyRepairOutcome({
-          repairStatus: repair.status,
-          coverageStatus: finalCoverage.covered
-            ? COVERAGE_STATUS.PASS
-            : COVERAGE_STATUS.FAIL
+        convergence = await convergeCoverageRepair({
+          voiceover: segment.voiceover,
+          claims: segment.claims,
+          initialCoverage,
+          approvedFacts,
+          id: initialCoverage.id
         });
+        repair = convergence.repair;
+        finalCoverage = convergence.coverage;
 
-        if (outcome !== CLAIM_COVERAGE_REPAIR_OUTCOME.REPAIRED) {
+        if (convergence.outcome !== CLAIM_COVERAGE_REPAIR_OUTCOME.REPAIRED) {
           claimCoverageValidation.valid = false;
           claimCoverageValidation.protocol_outcome = {
-            status: outcome,
+            status: convergence.outcome,
             segment_id: initialCoverage.id,
             label,
             repair_status: repair.status,
-            coverage_status: finalCoverage.covered ? COVERAGE_STATUS.PASS : COVERAGE_STATUS.FAIL,
+            coverage_status: repair.status === REPAIR_STATUS.CANDIDATE
+              ? (finalCoverage.covered ? COVERAGE_STATUS.PASS : COVERAGE_STATUS.FAIL)
+              : null,
             operations: repair.operations,
             diagnostics: repair.diagnostics,
-            reason: repair.reason ?? null
+            reason: repair.reason ?? null,
+            fixpoint_iterations: convergence.iterations,
+            candidate_hashes: convergence.candidate_hashes,
+            terminal_reason: convergence.terminal_reason
           };
 
           return {
@@ -754,6 +868,8 @@ async function validateGeneratedScript(data, research, options = {}) {
             protocol_outcome: claimCoverageValidation.protocol_outcome
           };
         }
+
+        segment.voiceover = convergence.voiceover;
       }
 
       claimCoverageValidation.segments.push({
@@ -769,6 +885,8 @@ async function validateGeneratedScript(data, research, options = {}) {
         initial_usage: initialCoverage.usage,
         repair_usage: repair?.usage ?? null,
         repair_operations: repair?.operations ?? [],
+        fixpoint_iterations: convergence?.iterations ?? 0,
+        candidate_hashes: convergence?.candidate_hashes ?? [],
         usage: finalCoverage.usage
       });
 

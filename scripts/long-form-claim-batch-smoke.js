@@ -203,7 +203,7 @@ await test("D1 : plafond égal aux appels nécessaires (génération + 1 lot) �
       const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
       const estimate = result.claim_coverage_validation.estimate;
       assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
-      assert(estimate.batch_count === 1 && estimate.total_calls_max > 2, `estimate conservé : ${JSON.stringify(estimate)}`);
+      assert(estimate.batch_count === 1 && estimate.total_calls_max === 1, `estimate conservé : ${JSON.stringify(estimate)}`);
       assert(getCallGuardStatus().used === 2 && sdkCalls.length === 2, `appels : ${getCallGuardStatus().used}`);
       assert(countStatus(dir, "succeeded") === 2 && countStatus(dir, "cache_hit") === 0, JSON.stringify(journal(dir)));
     });
@@ -212,10 +212,10 @@ await test("D1 : plafond égal aux appels nécessaires (génération + 1 lot) �
   }
 });
 
-await test("D1 : réparation déterministe → 3 appels maximum (génération + juge + recheck)", async () => {
+await test("D1 : convergence bornée → préflight du pire cas avant le premier recheck", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r20-d1-stop-"));
   try {
-    await withRealGuard("script-coverage-repair", dir, 3, async sdkCalls => {
+    await withRealGuard("script-coverage-repair", dir, 12, async sdkCalls => {
       const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
       assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
       assert(getCallGuardStatus().used === 3 && sdkCalls.length === 3, `appels : ${getCallGuardStatus().used} / SDK ${sdkCalls.length}`);
@@ -223,7 +223,7 @@ await test("D1 : réparation déterministe → 3 appels maximum (génération + 
     });
 
     await test("D1 : reprise → génération, juge et recheck servis par cache", async () => {
-      await withRealGuard("script-coverage-repair", dir, 1, async sdkCalls => {
+      await withRealGuard("script-coverage-repair", dir, 12, async sdkCalls => {
         const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
         assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
         assert(result.claim_coverage_validation.segments[0].repaired === true, "réparation attendue");
