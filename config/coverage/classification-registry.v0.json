@@ -1,0 +1,673 @@
+{
+  "registry": "coverage-classification-registry",
+  "version": "v0",
+  "language": "fr",
+  "slot_max_bound": 3,
+  "entries": [
+    {
+      "id": "engagement.decouvrons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "decouvrons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Découvrons-le."
+      ],
+      "counter_examples": [
+        "Découvrons une région où la pluie ne tombe presque jamais.",
+        "Découvrons la côte, où vit la population du pays.",
+        "Découvrons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.ecoutez",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "ecoutez"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Écoutez."
+      ],
+      "counter_examples": [
+        "Écoutez une région où la pluie ne tombe presque jamais.",
+        "Écoutez la côte, où vit la population du pays.",
+        "Écoutez le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.embarquons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "embarquons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Embarquons ensemble."
+      ],
+      "counter_examples": [
+        "Embarquons une région où la pluie ne tombe presque jamais.",
+        "Embarquons la côte, où vit la population du pays.",
+        "Embarquons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.imaginez",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "imaginez"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Imaginez la scène."
+      ],
+      "counter_examples": [
+        "Imaginez une région où la pluie ne tombe presque jamais.",
+        "Imaginez la côte, où vit la population du pays.",
+        "Imaginez le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.imaginons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "imaginons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Imaginons un instant."
+      ],
+      "counter_examples": [
+        "Imaginons une région où la pluie ne tombe presque jamais.",
+        "Imaginons la côte, où vit la population du pays.",
+        "Imaginons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.partons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "partons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Partons."
+      ],
+      "counter_examples": [
+        "Partons une région où la pluie ne tombe presque jamais.",
+        "Partons la côte, où vit la population du pays.",
+        "Partons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.plongeons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "plongeons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Plongeons."
+      ],
+      "counter_examples": [
+        "Plongeons une région où la pluie ne tombe presque jamais.",
+        "Plongeons la côte, où vit la population du pays.",
+        "Plongeons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.regardez",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "regardez"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Regardez bien."
+      ],
+      "counter_examples": [
+        "Regardez une région où la pluie ne tombe presque jamais.",
+        "Regardez la côte, où vit la population du pays.",
+        "Regardez le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.regardons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "regardons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Regardons de près."
+      ],
+      "counter_examples": [
+        "Regardons une région où la pluie ne tombe presque jamais.",
+        "Regardons la côte, où vit la population du pays.",
+        "Regardons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.suivons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "suivons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Suivons-le."
+      ],
+      "counter_examples": [
+        "Suivons une région où la pluie ne tombe presque jamais.",
+        "Suivons la côte, où vit la population du pays.",
+        "Suivons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.visualisez",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "visualisez"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Visualisez la scène."
+      ],
+      "counter_examples": [
+        "Visualisez une région où la pluie ne tombe presque jamais.",
+        "Visualisez la côte, où vit la population du pays.",
+        "Visualisez le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "engagement.voyons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "engagement",
+      "pattern": [
+        {
+          "word": "voyons"
+        },
+        {
+          "slot": {
+            "min": 0,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Voyons cela."
+      ],
+      "counter_examples": [
+        "Voyons une région où la pluie ne tombe presque jamais.",
+        "Voyons la côte, où vit la population du pays.",
+        "Voyons le centre du territoire, aride et immense."
+      ]
+    },
+    {
+      "id": "question.short",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "question",
+      "pattern": [
+        {
+          "slot": {
+            "min": 1,
+            "max": 3
+          }
+        }
+      ],
+      "terminal": [
+        "?"
+      ],
+      "positives": [
+        "Pourquoi ?",
+        "Et alors ?",
+        "Pourquoi donc ?"
+      ],
+      "counter_examples": [
+        "Pourquoi la population vit-elle sur les côtes ?",
+        "Combien de personnes vivent dans le centre du pays ?",
+        "Le centre est-il vraiment vide de toute population ?"
+      ]
+    },
+    {
+      "id": "transition.avant-cela",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "avant"
+        },
+        {
+          "word": "cela"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Avant cela."
+      ],
+      "counter_examples": [
+        "Avant cela, la région était fertile.",
+        "Avant cela vient la saison sèche du centre.",
+        "Avant cela, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.ce-n-est-pas-tout",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "ce"
+        },
+        {
+          "word": "n"
+        },
+        {
+          "word": "est"
+        },
+        {
+          "word": "pas"
+        },
+        {
+          "word": "tout"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Ce n’est pas tout."
+      ],
+      "counter_examples": [
+        "Ce n’est pas tout, la région était fertile.",
+        "Ce n’est pas tout vient la saison sèche du centre.",
+        "Ce n’est pas tout, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.continuons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "continuons"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Continuons."
+      ],
+      "counter_examples": [
+        "Continuons, la région était fertile.",
+        "Continuons vient la saison sèche du centre.",
+        "Continuons, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.et-ce-n-est-pas-tout",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "et"
+        },
+        {
+          "word": "ce"
+        },
+        {
+          "word": "n"
+        },
+        {
+          "word": "est"
+        },
+        {
+          "word": "pas"
+        },
+        {
+          "word": "tout"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Et ce n’est pas tout."
+      ],
+      "counter_examples": [
+        "Et ce n’est pas tout, la région était fertile.",
+        "Et ce n’est pas tout vient la saison sèche du centre.",
+        "Et ce n’est pas tout, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.et-ensuite",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "et"
+        },
+        {
+          "word": "ensuite"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Et ensuite."
+      ],
+      "counter_examples": [
+        "Et ensuite, la région était fertile.",
+        "Et ensuite vient la saison sèche du centre.",
+        "Et ensuite, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.et-pourtant",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "et"
+        },
+        {
+          "word": "pourtant"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Et pourtant."
+      ],
+      "counter_examples": [
+        "Et pourtant, la région était fertile.",
+        "Et pourtant vient la saison sèche du centre.",
+        "Et pourtant, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.mais-alors",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "mais"
+        },
+        {
+          "word": "alors"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Mais alors."
+      ],
+      "counter_examples": [
+        "Mais alors, la région était fertile.",
+        "Mais alors vient la saison sèche du centre.",
+        "Mais alors, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.mais-avant-cela",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "mais"
+        },
+        {
+          "word": "avant"
+        },
+        {
+          "word": "cela"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Mais avant cela."
+      ],
+      "counter_examples": [
+        "Mais avant cela, la région était fertile.",
+        "Mais avant cela vient la saison sèche du centre.",
+        "Mais avant cela, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.mais-ce-n-est-pas-tout",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "mais"
+        },
+        {
+          "word": "ce"
+        },
+        {
+          "word": "n"
+        },
+        {
+          "word": "est"
+        },
+        {
+          "word": "pas"
+        },
+        {
+          "word": "tout"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Mais ce n’est pas tout."
+      ],
+      "counter_examples": [
+        "Mais ce n’est pas tout, la région était fertile.",
+        "Mais ce n’est pas tout vient la saison sèche du centre.",
+        "Mais ce n’est pas tout, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.ou-plutot",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "ou"
+        },
+        {
+          "word": "plutot"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Ou plutôt."
+      ],
+      "counter_examples": [
+        "Ou plutôt, la région était fertile.",
+        "Ou plutôt vient la saison sèche du centre.",
+        "Ou plutôt, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.passons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "passons"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Passons."
+      ],
+      "counter_examples": [
+        "Passons, la région était fertile.",
+        "Passons vient la saison sèche du centre.",
+        "Passons, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.place-a",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "place"
+        },
+        {
+          "word": "a"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Place à."
+      ],
+      "counter_examples": [
+        "Place à, la région était fertile.",
+        "Place à vient la saison sèche du centre.",
+        "Place à, les côtes étaient déjà peuplées."
+      ]
+    },
+    {
+      "id": "transition.revenons",
+      "state": "admitted",
+      "origin": "inherited",
+      "family": "transition",
+      "pattern": [
+        {
+          "word": "revenons"
+        }
+      ],
+      "terminal": null,
+      "positives": [
+        "Revenons."
+      ],
+      "counter_examples": [
+        "Revenons, la région était fertile.",
+        "Revenons vient la saison sèche du centre.",
+        "Revenons, les côtes étaient déjà peuplées."
+      ]
+    }
+  ]
+}
