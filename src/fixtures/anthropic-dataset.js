@@ -132,24 +132,11 @@ const UNDECLARED_WATER = {
     "Caractéristique environnementale supplémentaire absente des claims déclarés."
 };
 
-const UNDECLARED_CAUSALITY = {
-  text:
-    "Ces conditions expliquent pourquoi ces régions restent peu peuplées.",
-  reason:
-    "Relation causale supplémentaire absente des claims déclarés."
-};
-
 const UNDECLARED_RAINFALL = {
   text:
     "Les précipitations y sont inférieures à 250 millimètres par an.",
   reason:
     "Quantité supplémentaire absente des claims déclarés."
-};
-
-const UNDECLARED_RAINFALL_RESIDUAL = {
-  text: "Les précipitations y sont très faibles.",
-  reason:
-    "Caractéristique climatique supplémentaire absente des claims déclarés."
 };
 
 const SCRIPT_VOICEOVER_ARID_BY_SCENARIO = {
@@ -308,7 +295,7 @@ const SMOKE_VISUAL_DIRECTOR_SCRIPT = {
 };
 
 // ------------------------------------------------------------------
-// Voiceover Claim Coverage — juge + repair
+// Voiceover Claim Coverage — juge
 // ------------------------------------------------------------------
 
 const COVERAGE_TABLE = [
@@ -325,16 +312,7 @@ const COVERAGE_TABLE = [
   {
     voiceover: `${VOICEOVER_ARID} ${UNDECLARED_WATER.text}`,
     claims: [CLAIM_ARID],
-    undeclared: [UNDECLARED_WATER],
-    repaired: VOICEOVER_ARID
-  },
-  {
-    voiceover: `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text}`,
-    claims: [CLAIM_ARID],
-    undeclared: [UNDECLARED_RAINFALL],
-    // Réparation volontairement insuffisante.
-    repaired:
-      `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL_RESIDUAL.text}`
+    undeclared: [UNDECLARED_WATER]
   },
   {
     voiceover: UNDECLARED_RAINFALL.text,
@@ -345,12 +323,6 @@ const COVERAGE_TABLE = [
     voiceover: `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL.text} ${UNDECLARED_RAINFALL.text}`,
     claims: [CLAIM_ARID],
     undeclared: [UNDECLARED_RAINFALL]
-  },
-  {
-    voiceover:
-      `${VOICEOVER_ARID} ${UNDECLARED_RAINFALL_RESIDUAL.text}`,
-    claims: [CLAIM_ARID],
-    undeclared: [UNDECLARED_RAINFALL_RESIDUAL]
   },
 
   // Cadre narré (R14B) : hook et conclusion, deux claims chacun.
@@ -363,30 +335,6 @@ const COVERAGE_TABLE = [
     voiceover: VOICEOVER_CONCLUSION,
     claims: [CLAIM_ARID, CLAIM_POPULATION],
     undeclared: []
-  },
-
-  // Entrées de scripts/script-claim-coverage-smoke.js.
-  {
-    voiceover: CLAIM_ARID,
-    claims: [CLAIM_ARID],
-    undeclared: []
-  },
-  {
-    voiceover: CLAIM_POPULATION,
-    claims: [CLAIM_POPULATION],
-    undeclared: []
-  },
-  {
-    voiceover: `${CLAIM_ARID} ${UNDECLARED_WATER.text}`,
-    claims: [CLAIM_ARID],
-    undeclared: [UNDECLARED_WATER],
-    repaired: CLAIM_ARID
-  },
-  {
-    voiceover: `${CLAIM_ARID} ${UNDECLARED_CAUSALITY.text}`,
-    claims: [CLAIM_ARID],
-    undeclared: [UNDECLARED_CAUSALITY],
-    repaired: CLAIM_ARID
   }
 ];
 
@@ -858,25 +806,6 @@ function findCoverageEntry(fixtureId, voiceover, claims) {
   return entry;
 }
 
-function resolveCoverageJudge(fixtureId, scenario, userMessage) {
-  const [, voiceover, claimsText] = matchOrFail(
-    fixtureId,
-    userMessage,
-    /^VOICEOVER :\n\n([\s\S]+?)\n\nCLAIMS FACTUELS DECLARES :\n\n([\s\S]+?)\n\nDétermine si TOUTES /
-  );
-
-  const entry = findCoverageEntry(
-    fixtureId,
-    voiceover,
-    parseJsonOrFail(fixtureId, claimsText, "claims")
-  );
-
-  return json({
-    covered: entry.undeclared.length === 0,
-    undeclared_claims: entry.undeclared
-  });
-}
-
 // R28.10 — juge de couverture v2 (identifiants d'unités) : fonction pure de
 // son entrée. Le voiceover est découpé par le découpeur réel ; une unité
 // désignée dont le texte figure parmi les affirmations non déclarées de la
@@ -917,83 +846,11 @@ function resolveCoverageJudgeV2(fixtureId, scenario, userMessage) {
 }
 
 function resolveCoverageJudgeDispatch(fixtureId, scenario, userMessage) {
-  return userMessage.startsWith(COVERAGE_V2_HEADER)
-    ? resolveCoverageJudgeV2(fixtureId, scenario, userMessage)
-    : resolveCoverageBatchJudge(fixtureId, scenario, userMessage);
-}
-
-function resolveCoverageBatchJudge(fixtureId, scenario, userMessage) {
-  const [, payloadText] = matchOrFail(
-    fixtureId,
-    userMessage,
-    /^ELEMENTS A CONTROLER :\n\n([\s\S]+)$/
-  );
-  const payload = parseJsonOrFail(fixtureId, payloadText, "éléments");
-  const items = payload?.items;
-
-  if (!Array.isArray(items)) {
-    fail(fixtureId, "éléments doit être un tableau.");
+  if (!userMessage.startsWith(COVERAGE_V2_HEADER)) {
+    fail(fixtureId, "message utilisateur non conforme au protocole v2.");
   }
 
-  return json({
-    results: items.map(item => {
-      if (!item || typeof item.id !== "string" || !Array.isArray(item.claims)) {
-        fail(fixtureId, "élément batch invalide.");
-      }
-      const texts = item.claims.map(claim => claim?.text);
-      // Jeu local extensible pour le smoke de charge R15 : une phrase
-      // identique au seul claim est trivialement couverte, sans réseau.
-      const syntheticCovered =
-        texts.length === 1 && texts[0] === item.voiceover;
-      const entry = syntheticCovered
-        ? { undeclared: [] }
-        : findCoverageEntry(fixtureId, item.voiceover, texts);
-      return {
-        id: item.id,
-        covered: entry.undeclared.length === 0,
-        unsupported: entry.undeclared.map(undeclared => ({
-          sentence: undeclared.text,
-          segment_id: item.id,
-          claim_id: item.claims[0]?.claim_id,
-          action: "DELETE"
-        }))
-      };
-    })
-  });
-}
-
-function resolveCoverageRepair(fixtureId, scenario, userMessage) {
-  const [, voiceover, claimsText, rejectedText] = matchOrFail(
-    fixtureId,
-    userMessage,
-    /^VOICEOVER ORIGINAL :\n\n([\s\S]+?)\n\nCLAIMS FACTUELS AUTORISES :\n\n([\s\S]+?)\n\nAFFIRMATIONS FACTUELLES NON DECLAREES A ELIMINER :\n\n([\s\S]+?)\n\nRéécris uniquement le voiceover\.\n/
-  );
-
-  const entry = findCoverageEntry(
-    fixtureId,
-    voiceover,
-    parseJsonOrFail(fixtureId, claimsText, "claims")
-  );
-
-  const rejected = parseJsonOrFail(
-    fixtureId,
-    rejectedText,
-    "affirmations non déclarées"
-  );
-
-  if (
-    typeof entry.repaired !== "string" ||
-    !isDeepStrictEqual(rejected, entry.undeclared)
-  ) {
-    fail(
-      fixtureId,
-      "demande de réparation hors du jeu de données canonique."
-    );
-  }
-
-  return json({
-    voiceover: entry.repaired
-  });
+  return resolveCoverageJudgeV2(fixtureId, scenario, userMessage);
 }
 
 function findGroundingEntry(
@@ -1082,9 +939,7 @@ const RESOLVERS = {
   "script": resolveScript,
   "visual-director": resolveVisualDirector,
   "validate-script-claim-coverage": resolveCoverageJudgeDispatch,
-  "validate-script-claim-coverage-batch": resolveCoverageBatchJudge,
   "validate-visual-factual-grounding": resolveGroundingJudge,
-  "repair-script-claim-coverage": resolveCoverageRepair,
   "repair-visual-factual-grounding": resolveGroundingRepair,
   "judge-title": resolveTitleJudge,
   "judge-evidence": resolveEvidenceJudge,

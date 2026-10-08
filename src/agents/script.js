@@ -28,20 +28,6 @@ import {
 } from "../utils/validate-script-claims.js";
 
 import {
-  validateVoiceoverClaimCoverage
-} from "../utils/validate-script-claim-coverage.js";
-
-import {
-  repairVoiceoverClaimCoverage
-} from "../utils/repair-script-claim-coverage.js";
-
-import {
-  classifyRepairOutcome,
-  REPAIR_STATUS,
-  COVERAGE_STATUS
-} from "../utils/classify-script-claim-coverage-repair-outcome.js";
-
-import {
   discardCachedResponse
 } from "../services/call-guard.js";
 
@@ -175,10 +161,6 @@ CONSIGNES DE STRUCTURE :
 - estimated_seconds doit représenter raisonnablement la durée du texte
   prononcé.
 `.trim();
-
-// Garde purement défensive de convergence : ce n'est pas une règle éditoriale.
-// Une couverture complète doit converger avant cette borne.
-export const MAX_COVERAGE_FIXPOINT_ITERATIONS = 10;
 
 // Règles ajoutées au prompt système quand le cadre narré est demandé
 // (R14B). Sans cadre narré, le prompt historique est inchangé.
@@ -610,165 +592,6 @@ function validateResearchReferences(script, research) {
   });
 
   return errors;
-}
-
-export function estimateCoverageFixpointRemainingCalls({
-  activeIterationsRemaining,
-  remainingUncoveredSegments,
-  maxIterations = MAX_COVERAGE_FIXPOINT_ITERATIONS
-}) {
-  if (
-    !Number.isSafeInteger(maxIterations) || maxIterations < 1 ||
-    !Number.isSafeInteger(activeIterationsRemaining) ||
-    activeIterationsRemaining < 0 || activeIterationsRemaining > maxIterations ||
-    !Number.isSafeInteger(remainingUncoveredSegments) ||
-    remainingUncoveredSegments < 0
-  ) {
-    throw new Error("Script Agent : état de budget de convergence invalide.");
-  }
-
-  return activeIterationsRemaining +
-    remainingUncoveredSegments * maxIterations;
-}
-
-// Orchestration seule : Repair, Recheck et le coordinateur gardent chacun
-// leur contrat fermé. Une FAIL intermédiaire devient une nouvelle entrée de
-// Repair ; seul un état terminal est transmis au coordinateur.
-export async function convergeCoverageRepair({
-  voiceover,
-  claims,
-  initialCoverage,
-  approvedFacts,
-  id,
-  remainingUncoveredSegments = 0,
-  repair = repairVoiceoverClaimCoverage,
-  recheck = validateVoiceoverClaimCoverage,
-  maxIterations = MAX_COVERAGE_FIXPOINT_ITERATIONS
-}) {
-  if (!Number.isSafeInteger(maxIterations) || maxIterations < 1) {
-    throw new Error("Script Agent : maxIterations de convergence invalide.");
-  }
-
-  let candidate = voiceover;
-  let coverage = initialCoverage;
-  let latestRepair = null;
-  const repairClaims = initialCoverage.claims;
-  const candidateHashes = [sha256(candidate)];
-  const seenCandidateHashes = new Set(candidateHashes);
-  const budgetTrace = [];
-
-  const recordBudget = ({ iteration, phase, activeIterationsRemaining }) => {
-    budgetTrace.push({
-      iteration,
-      phase,
-      remaining_calls_max: estimateCoverageFixpointRemainingCalls({
-        activeIterationsRemaining,
-        remainingUncoveredSegments,
-        maxIterations
-      })
-    });
-  };
-
-  for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
-    latestRepair = repair({
-      voiceover: candidate,
-      claims: repairClaims,
-      unsupported: coverage.unsupported,
-      approvedFacts
-    });
-
-    if (latestRepair.status !== REPAIR_STATUS.CANDIDATE) {
-      recordBudget({ iteration, phase: "terminal", activeIterationsRemaining: 0 });
-      return {
-        voiceover: candidate,
-        coverage,
-        repair: latestRepair,
-        iterations: iteration,
-        candidate_hashes: candidateHashes,
-        budget_trace: budgetTrace,
-        terminal_reason: latestRepair.status,
-        outcome: classifyRepairOutcome({
-          repairStatus: latestRepair.status,
-          coverageStatus: null
-        })
-      };
-    }
-
-    candidate = latestRepair.voiceover;
-    const candidateHash = sha256(candidate);
-
-    if (seenCandidateHashes.has(candidateHash)) {
-      recordBudget({ iteration, phase: "terminal", activeIterationsRemaining: 0 });
-      return {
-        voiceover: candidate,
-        coverage,
-        repair: latestRepair,
-        iterations: iteration,
-        candidate_hashes: candidateHashes,
-        budget_trace: budgetTrace,
-        terminal_reason: "CANDIDATE_HASH_CYCLE",
-        outcome: classifyRepairOutcome({
-          repairStatus: latestRepair.status,
-          coverageStatus: COVERAGE_STATUS.FAIL
-        })
-      };
-    }
-
-    seenCandidateHashes.add(candidateHash);
-    candidateHashes.push(candidateHash);
-
-    // validateVoiceoverClaimCoverage atteint createMessage(), dont beginRealCall()
-    // consulte d'abord le cache puis vérifie le plafond juste avant tout SDK call.
-    // Un cache hit consomme donc exactement zéro appel réel.
-    recordBudget({
-      iteration,
-      phase: "before_recheck",
-      activeIterationsRemaining: maxIterations - iteration + 1
-    });
-    coverage = await recheck({ voiceover: candidate, claims, id });
-
-    if (coverage.covered) {
-      recordBudget({ iteration, phase: "terminal", activeIterationsRemaining: 0 });
-      return {
-        voiceover: candidate,
-        coverage,
-        repair: latestRepair,
-        iterations: iteration,
-        candidate_hashes: candidateHashes,
-        budget_trace: budgetTrace,
-        terminal_reason: COVERAGE_STATUS.PASS,
-        outcome: classifyRepairOutcome({
-          repairStatus: latestRepair.status,
-          coverageStatus: COVERAGE_STATUS.PASS
-        })
-      };
-    }
-
-    recordBudget({
-      iteration,
-      phase: "after_recheck_fail",
-      activeIterationsRemaining: maxIterations - iteration
-    });
-  }
-
-  recordBudget({
-    iteration: maxIterations,
-    phase: "terminal",
-    activeIterationsRemaining: 0
-  });
-  return {
-    voiceover: candidate,
-    coverage,
-    repair: latestRepair,
-    iterations: maxIterations,
-    candidate_hashes: candidateHashes,
-    budget_trace: budgetTrace,
-    terminal_reason: "MAX_ITERATIONS",
-    outcome: classifyRepairOutcome({
-      repairStatus: latestRepair.status,
-      coverageStatus: COVERAGE_STATUS.FAIL
-    })
-  };
 }
 
 async function validateGeneratedScript(data, research, options = {}) {

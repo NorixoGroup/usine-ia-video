@@ -1,18 +1,9 @@
-// Smoke long-form du batching de claims — fixtures locales, zéro réseau.
+// Smoke long-form de la couverture (garde d'appels, cache, reprise) — fixtures locales, zéro réseau.
 import { networkGuard } from "./fixture-network-guard.js";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
-import {
-  MAX_CLAIMS_PER_BATCH,
-  MAX_BATCH_ESTIMATED_CHARS,
-  OUTPUT_TOKEN_BUDGET,
-  estimateClaimValidationCalls,
-  planClaimValidationBatches,
-  validateClaimBatchResponse,
-  validateScriptClaimCoverage
-} from "../src/utils/validate-script-claim-coverage.js";
 import {
   configureCallGuard,
   getCallGuardStatus,
@@ -33,134 +24,12 @@ async function test(name, fn) {
   try { await fn(); passed += 1; console.log(`PASS — ${name}`); }
   catch (error) { failed += 1; console.error(`FAIL — ${name}\n       ${error.message}`); }
 }
-function rejects(fn, pattern) {
-  try { fn(); } catch (error) { assert(pattern.test(error.message), error.message); return; }
-  throw new Error("échec attendu");
-}
-function longScript(sectionCount = 6, segmentsPerSection = 8) {
-  let n = 0;
-  return {
-    sections: Array.from({ length: sectionCount }, (_, section) => ({
-      segments: Array.from({ length: segmentsPerSection }, (_, segment) => {
-        n += 1;
-        return {
-          voiceover: `Le fait documentaire ${n} est déclaré dans ce segment.`,
-          claims: [{ text: `Le fait documentaire ${n} est déclaré dans ce segment.` }]
-        };
-      })
-    }))
-  };
-}
 
 console.log("LONG-FORM CLAIM BATCH — SMOKE (ZERO API)");
-const script = longScript(); // 48 segments / 48 claims, représentatif sans média.
-const estimate = estimateClaimValidationCalls({ script });
-
-// R25.7D : la borne de sortie (pire cas, 1 600 tokens) ferme les lots avant
-// la limite de 24 claims : 48 segments d'une phrase → 4 lots (15/15/15/3).
-await test("48 claims → 4 batches déterministes sous la borne de sortie", () => {
-  assert(estimate.batch_count === 4 && estimate.validation_calls_max === 4, JSON.stringify(estimate));
-  assert(estimate.batch_estimated_output_tokens.every(tokens => tokens <= OUTPUT_TOKEN_BUDGET), JSON.stringify(estimate));
-  assert(JSON.stringify(estimate) === JSON.stringify(estimateClaimValidationCalls({ script })), "estimation non déterministe");
-});
-
-function scriptWith(items) {
-  return {
-    sections: [{
-      segments: items.map(({ voiceover, claims }) => ({ voiceover, claims }))
-    }]
-  };
-}
-
-function claims(count, prefix) {
-  return Array.from({ length: count }, (_, index) => ({ text: `${prefix} claim ${index + 1}` }));
-}
-
-await test("la limite de 24 claims ferme le lot sans découper un segment", () => {
-  const plan = planClaimValidationBatches(scriptWith([
-    { voiceover: "A.", claims: claims(10, "A") },
-    { voiceover: "B.", claims: claims(10, "B") },
-    { voiceover: "C.", claims: claims(10, "C") }
-  ]));
-  assert(plan.batches.length === 2, JSON.stringify(plan.batches));
-  assert(plan.batches.map(batch => batch.claim_count).join(",") === "20,10", JSON.stringify(plan.batches));
-  assert(plan.batches[0].items.map(item => item.id).join(",") === "s1-g1,s1-g2", JSON.stringify(plan.batches));
-});
-
-// Entrée lourde (claims longs), sortie légère (voiceover court) : seule la
-// limite de 9 000 caractères d'entrée s'applique.
-await test("la limite de 9 000 caractères ferme le lot sans découper un segment", () => {
-  const plan = planClaimValidationBatches(scriptWith([
-    { voiceover: "A.", claims: [{ text: "A".repeat(4000) }] },
-    { voiceover: "B.", claims: [{ text: "B".repeat(4000) }] },
-    { voiceover: "C.", claims: [{ text: "C".repeat(900) }] }
-  ]));
-  assert(plan.batches.length === 2, JSON.stringify(plan.batches));
-  assert(plan.batches.map(batch => batch.items.map(item => item.id).join(",")).join("|") === "s1-g1,s1-g2|s1-g3", JSON.stringify(plan.batches));
-});
-
-await test("plan identique : ordre stable et aucun lot ne dépasse ses trois plafonds", () => {
-  const first = planClaimValidationBatches(script);
-  const second = planClaimValidationBatches(structuredClone(script));
-  assert(JSON.stringify(first.batches.map(batch => ({ ids: batch.items.map(item => item.id), claims: batch.claim_count, chars: batch.estimated_chars }))) === JSON.stringify(second.batches.map(batch => ({ ids: batch.items.map(item => item.id), claims: batch.claim_count, chars: batch.estimated_chars }))), "plan non déterministe");
-  assert(first.batches.every(batch => batch.claim_count <= MAX_CLAIMS_PER_BATCH && batch.estimated_chars <= MAX_BATCH_ESTIMATED_CHARS && batch.estimated_output_tokens <= OUTPUT_TOKEN_BUDGET), JSON.stringify(first.batches));
-});
-
-await test("contrat batch : aucune perte, doublon ou réordonnancement", () => {
-  const expected = [
-    { id: "s1-g1", claims: [{ claim_id: "s1-g1-c1", text: "A" }] },
-    { id: "s1-g2", claims: [{ claim_id: "s1-g2-c1", text: "B" }] }
-  ];
-  const results = validateClaimBatchResponse({ results: [
-    { id: "s1-g2", covered: true, unsupported: [] },
-    { id: "s1-g1", covered: true, unsupported: [] }
-  ] }, expected);
-  assert(results.map(item => item.id).join(",") === "s1-g2,s1-g1", "réponse valide perdue");
-  rejects(() => validateClaimBatchResponse({ results: [{ id: "s1-g1", covered: true, unsupported: [] }] }, expected), /incomplète/);
-  rejects(() => validateClaimBatchResponse({ results: [
-    { id: "s1-g1", covered: true, unsupported: [] },
-    { id: "s1-g1", covered: true, unsupported: [] }
-  ] }, expected), /dupliqué/);
-  rejects(() => validateClaimBatchResponse({ results: [
-    { id: "s1-g1", covered: true, unsupported: [] },
-    { id: "inconnu", covered: true, unsupported: [] }
-  ] }, expected), /inconnu/);
-});
-
-await test("budget insuffisant → refus pré-call et 0 appel", async () => {
-  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r15-budget-"));
-  const previous = { NO_API: process.env.NO_API, PIPELINE_REAL_CALLS_ACK: process.env.PIPELINE_REAL_CALLS_ACK };
-  try {
-    delete process.env.NO_API;
-    process.env.PIPELINE_REAL_CALLS_ACK = "1";
-    configureCallGuard({ productionDir: dir, cap: 1 });
-    process.env.ANTHROPIC_FIXTURES = "1";
-    let error;
-    try { await validateScriptClaimCoverage(script); } catch (caught) { error = caught; }
-    assert(error && /Budget d'appels réels insuffisant/.test(error.message), error?.message);
-    assert(getCallGuardStatus().used === 0, JSON.stringify(getCallGuardStatus()));
-  } finally {
-    resetCallGuard();
-    process.env.NO_API = previous.NO_API;
-    process.env.PIPELINE_REAL_CALLS_ACK = previous.PIPELINE_REAL_CALLS_ACK;
-    delete process.env.ANTHROPIC_FIXTURES;
-    fs.rmSync(dir, { recursive: true, force: true });
-  }
-});
-
-await test("budget suffisant + fixtures → PASS logique, 48 résultats stables", async () => {
-  process.env.ANTHROPIC_FIXTURES = "1";
-  const result = await validateScriptClaimCoverage(script);
-  delete process.env.ANTHROPIC_FIXTURES;
-  assert(result.valid && result.segments.length === 48, JSON.stringify(result.errors));
-  assert(result.estimate.batch_count === 4 && result.estimate.total_calls_max === 52, JSON.stringify(result.estimate));
-  assert(result.segments.map(item => item.label).at(-1) === "sections[5].segments[7]", "ordre source instable");
-});
-
-// R20.4 D1 — réservation progressive : seuls les lots sont réservés ; les
-// réparations sont bornées appel par appel par le garde et reprises depuis
-// le cache. Le SDK est simulé en mémoire (réponses des fixtures) pour que
-// chaque appel traverse le vrai garde et le vrai cache, sans réseau.
+// R20.4 D1 — chaque appel (génération, jugement, relance) est borné par le
+// garde et les réponses acceptées sont reprises depuis le cache. Le SDK est
+// simulé en mémoire (réponses des fixtures) pour que chaque appel traverse le
+// vrai garde et le vrai cache, sans réseau.
 async function withRealGuard(scenario, productionDir, cap, fn) {
   const previous = { ...process.env };
   const sdkCalls = [];

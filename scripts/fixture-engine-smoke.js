@@ -48,11 +48,6 @@ import { runScriptAgent } from "../src/agents/script.js";
 import { runVisualDirector } from "../src/agents/visual-director.js";
 
 import {
-  validateVoiceoverClaimCoverage
-} from "../src/utils/validate-script-claim-coverage.js";
-
-
-import {
   validateVisualFactualGrounding
 } from "../src/utils/validate-visual-factual-grounding.js";
 
@@ -75,7 +70,7 @@ const PROMPT_FILES = {
   "script": "src/agents/script.js",
   "visual-director": "src/agents/visual-director.js",
   "validate-script-claim-coverage":
-    "src/utils/validate-script-claim-coverage.js",
+    "src/utils/coverage-judge-v2.js",
   "validate-visual-factual-grounding":
     "src/utils/validate-visual-factual-grounding.js",
   "repair-visual-factual-grounding":
@@ -224,6 +219,26 @@ function assertFixtureUsage(usage, fixtureId, label) {
 
 const USER = text => [{ role: "user", content: text }];
 
+// Requête du juge de couverture au format du protocole v2 (R28.6) : seul le
+// voiceover et les claims comptent pour le moteur de fixtures.
+const COVERAGE_V2_HEADER = "SEGMENT A AUDITER :\n\n";
+
+function coverageV2Request({ voiceover, claims }) {
+  return createMessage({
+    system: SYSTEM_PROMPTS["validate-script-claim-coverage"],
+    messages: USER(COVERAGE_V2_HEADER + JSON.stringify({
+      protocol_id: "0".repeat(64),
+      voiceover_sha256: "0".repeat(64),
+      lock_sha256: "0".repeat(64),
+      segment_id: "s1-g1",
+      voiceover,
+      units: [],
+      designated_unit_ids: ["u1"],
+      claims: claims.map((text, index) => ({ claim_id: `s1-g1-c${index + 1}`, text }))
+    }))
+  });
+}
+
 const SYSTEM_PROMPTS = Object.fromEntries(
   Object.entries(PROMPT_FILES).map(
     ([id, file]) => [id, readSystemPrompt(file, id)]
@@ -299,20 +314,6 @@ for (const [id, prompt] of Object.entries(SYSTEM_PROMPTS)) {
     assert(detected === id, `détecté : ${detected}`);
   });
 }
-
-await test("Coverage Judge : le prompt exige un plan complet et minimal", async () => {
-  const prompt = SYSTEM_PROMPTS["validate-script-claim-coverage"].replace(/\s+/g, " ");
-  for (const required of [
-    "inspecte l'intégralité",
-    "évalue chaque phrase indépendamment",
-    "Ne t'arrête jamais après la première",
-    "ensemble minimal et complet",
-    "dernière vérification interne",
-    "aucune phrase non couverte"
-  ]) {
-    assert(prompt.includes(required), `instruction manquante : ${required}`);
-  }
-});
 
 await test("prompt inconnu → FAIL", async () => {
   await expectReject(
@@ -877,17 +878,17 @@ const closedTableCases = [
   ],
   [
     "Claim Coverage : voiceover inconnu",
-    () => validateVoiceoverClaimCoverage({
+    () => coverageV2Request({
       voiceover: "Une phrase absente du jeu de données.",
-      claims: [{ text: CLAIM_ARID }]
+      claims: [CLAIM_ARID]
     }),
     /fixture "validate-script-claim-coverage" : voiceover\/claims hors du jeu de données canonique/
   ],
   [
     "Claim Coverage : claims inconnus pour un voiceover connu",
-    () => validateVoiceoverClaimCoverage({
-      voiceover: CLAIM_ARID,
-      claims: [{ text: "Un autre claim." }]
+    () => coverageV2Request({
+      voiceover: script.sections[0].segments[0].voiceover,
+      claims: ["Un autre claim."]
     }),
     /fixture "validate-script-claim-coverage" : voiceover\/claims hors du jeu de données canonique/
   ],
