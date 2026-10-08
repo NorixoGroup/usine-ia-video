@@ -65,7 +65,7 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: COVERAGE_REPAIR_VERSION, coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.2" });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: COVERAGE_REPAIR_VERSION, coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.3" });
 
 const boundaryOf = voiceover => composeCoverageBoundary({ voiceover, lock: BOUNDARY_LOCK, entities: ENTITIES });
 
@@ -139,7 +139,7 @@ await test("DELETE nominal : un plan, une opération, traçabilité complète", 
     voiceover_sha256: sha256(BASELINE_VOICEOVER),
     lock_sha256: judgeLockSha256(LOCK),
     repair_version: "coverage-repair.v1",
-    baseline: "architecture-baseline-v1.0.2",
+    baseline: "architecture-baseline-v1.0.3",
     repair_plan: [{ unit_id: "u4", action: "DELETE", reason: "JUDGED_UNCOVERED", claim_ids: [] }],
     repaired_unit_ids: ["u4"],
     untouched_unit_ids: ["u1", "u2", "u3"],
@@ -270,7 +270,7 @@ await test("verrou mal formé — chaque élément absent ou vide", () => {
 });
 
 await test("verrou divergent — baseline, juge, composant de la frontière", () => {
-  expectRefused(plan(J_U4, { lock: { ...LOCK, baseline: "architecture-baseline-v1.0.1" } }), "LOCK_MISMATCH");
+  expectRefused(plan(J_U4, { lock: { ...LOCK, baseline: "architecture-baseline-v1.0.2" } }), "LOCK_MISMATCH");
   expectRefused(plan(J_U4, { lock: { ...LOCK, judge: "coverage-judge.v2+prompt.0" } }), "LOCK_MISMATCH");
   for (const key of ["splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint", "classification", "language"]) {
     expectRefused(plan(J_U4, { lock: { ...LOCK, [key]: `${LOCK[key]}x` } }), "LOCK_MISMATCH");
@@ -316,7 +316,7 @@ await test("DELETE seul et aucun texte généré : seules des valeurs fermées e
       deepStrictEqual(Object.keys(item), ["unit_id", "action", "reason", "claim_ids"]);
     }
     for (const value of Object.values(result)) {
-      if (typeof value === "string" && !/^([0-9a-f]{64}|coverage-repair\.v1|architecture-baseline-v1\.0\.2|PLANNED|NO_REPAIR|NOT_REPAIRABLE|INPUT_REFUSED)$/.test(value)) {
+      if (typeof value === "string" && !/^([0-9a-f]{64}|coverage-repair\.v1|architecture-baseline-v1\.0\.3|PLANNED|NO_REPAIR|NOT_REPAIRABLE|INPUT_REFUSED)$/.test(value)) {
         throw new Error(`valeur libre : ${value}`);
       }
     }

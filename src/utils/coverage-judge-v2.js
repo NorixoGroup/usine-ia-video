@@ -37,7 +37,7 @@ import { extractText } from "../services/anthropic.js";
 
 export const COVERAGE_JUDGE_V2_PROTOCOL = "coverage-judge.v2-unit-ids";
 export const COVERAGE_JUDGE_V2_RULES_VERSION = "coverage-judge.v2";
-export const ARCHITECTURE_BASELINE_VERSION = "architecture-baseline-v1.0.2";
+export const ARCHITECTURE_BASELINE_VERSION = "architecture-baseline-v1.0.3";
 
 export const JUDGE_STATUS = Object.freeze({
   JUDGED: "JUDGED",

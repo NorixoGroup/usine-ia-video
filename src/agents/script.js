@@ -28,7 +28,6 @@ import {
 } from "../utils/validate-script-claims.js";
 
 import {
-  validateScriptClaimCoverage,
   validateVoiceoverClaimCoverage
 } from "../utils/validate-script-claim-coverage.js";
 
@@ -39,13 +38,18 @@ import {
 import {
   classifyRepairOutcome,
   REPAIR_STATUS,
-  COVERAGE_STATUS,
-  CLAIM_COVERAGE_REPAIR_OUTCOME
+  COVERAGE_STATUS
 } from "../utils/classify-script-claim-coverage-repair-outcome.js";
 
 import {
   discardCachedResponse
 } from "../services/call-guard.js";
+
+import {
+  buildCoverageLock,
+  researchEntitiesOf,
+  runScriptCoverageGate
+} from "../utils/script-coverage-gate.js";
 
 const SYSTEM_PROMPT = `
 Tu es le Script Agent de la chaîne YouTube
@@ -325,7 +329,9 @@ function quarantineCheckpoint(directory, index) {
 }
 
 // Gates du script complet dont les erreurs désignent un chapitre (section).
-const ATTRIBUTABLE_GATES = ["Script Gate", "références Research invalides", "Claim Gate", "Voiceover Claim Coverage Gate"];
+// R28.10 : la couverture ne met jamais un chapitre en quarantaine (D1, I24) ;
+// un NOT_PASS de couverture arrête l'étape Script sans toucher aux checkpoints.
+const ATTRIBUTABLE_GATES = ["Script Gate", "références Research invalides", "Claim Gate"];
 
 function blamedChapters(message, total) {
   if (!ATTRIBUTABLE_GATES.some(gate => message.includes(gate))) return [];
@@ -795,144 +801,54 @@ async function validateGeneratedScript(data, research, options = {}) {
     );
   }
 
+  // R28.10 — couverture factuelle : coordinateur de convergence (R28.9) pour
+  // chaque segment, à travers la porte de couverture. Script PASS si et
+  // seulement si chaque segment est PASS ; au premier NOT_PASS, arrêt.
+  const coverage = await runScriptCoverageGate({
+    script: data,
+    research,
+    ...(options.coverageTransport ? { transport: options.coverageTransport } : {})
+  });
+
+  // Métadonnées autorisées (R28.10A D8, R28.11) : valid et errors (contrat des
+  // verdicts persistés du validateur de qualité), statut, protocole, empreinte
+  // et contenu du verrou, et par segment les métadonnées de la porte.
   const claimCoverageValidation = {
-    valid: true,
+    valid: coverage.status === "PASS",
     errors: [],
-    segments: [],
-    estimate: null
+    status: coverage.status,
+    protocol_id: coverage.protocol_id,
+    lock_sha256: coverage.lock_sha256,
+    // R28.11 : verrou complet (11 éléments), enregistré au premier passage et
+    // contrôlé à la reprise (assertReusedScriptLock).
+    lock: { ...buildCoverageLock({ entities: researchEntitiesOf(research) }) },
+    segments: coverage.segments.map(segment => ({ ...segment }))
   };
 
-  // Le premier contrôle couvre tous les segments par batches déterministes.
-  // Les seules requêtes unitaires restantes sont les réparations et leur
-  // recontrôle, déjà incluses dans le budget maximal estimé par le batcher.
-  const initialBatchCoverage = await validateScriptClaimCoverage(data);
-  claimCoverageValidation.estimate = initialBatchCoverage.estimate;
-  const initialByLabel = new Map(
-    initialBatchCoverage.segments.map(item => [item.label, item])
-  );
-  const uncoveredSegmentCount = initialBatchCoverage.segments.filter(
-    item => !item.covered
-  ).length;
-  let remainingUncoveredSegments = uncoveredSegmentCount;
+  if (coverage.status !== "PASS") {
+    claimCoverageValidation.protocol_outcome = {
+      status: "NOT_PASS",
+      segment_id: coverage.failure?.segment_id ?? null,
+      label: coverage.failure?.label ?? null,
+      reason: coverage.failure?.reason ?? null,
+      category: coverage.failure?.category ?? null,
+      unit_ids: coverage.failure?.unit_ids ?? [],
+      detail: coverage.failure?.detail ?? null
+    };
 
-  for (
-    let sectionIndex = 0;
-    sectionIndex < data.sections.length;
-    sectionIndex += 1
-  ) {
-    const section = data.sections[sectionIndex];
-
-    for (
-      let segmentIndex = 0;
-      segmentIndex < section.segments.length;
-      segmentIndex += 1
-    ) {
-      const segment = section.segments[segmentIndex];
-
-      const label =
-        `sections[${sectionIndex}].segments[${segmentIndex}]`;
-
-      const initialCoverage = initialByLabel.get(label);
-
-      if (!initialCoverage) {
-        throw new Error(
-          `Script Agent : résultat batch absent pour ${label}.`
-        );
-      }
-
-      let finalCoverage = initialCoverage;
-      let repair = null;
-      let convergence = null;
-
-      if (!initialCoverage.covered) {
-        remainingUncoveredSegments -= 1;
-        const approvedFacts = segment.claims.map((claim, claimIndex) => ({
-          claim_id: `${initialCoverage.id}-c${claimIndex + 1}`,
-          key_fact: research.key_facts[claim.research_fact_ref]?.claim
-        }));
-
-        convergence = await convergeCoverageRepair({
-          voiceover: segment.voiceover,
-          claims: segment.claims,
-          initialCoverage,
-          approvedFacts,
-          id: initialCoverage.id,
-          remainingUncoveredSegments
-        });
-        repair = convergence.repair;
-        finalCoverage = convergence.coverage;
-
-        if (convergence.outcome !== CLAIM_COVERAGE_REPAIR_OUTCOME.REPAIRED) {
-          claimCoverageValidation.valid = false;
-          claimCoverageValidation.protocol_outcome = {
-            status: convergence.outcome,
-            segment_id: initialCoverage.id,
-            label,
-            repair_status: repair.status,
-            coverage_status: repair.status === REPAIR_STATUS.CANDIDATE
-              ? (finalCoverage.covered ? COVERAGE_STATUS.PASS : COVERAGE_STATUS.FAIL)
-              : null,
-            operations: repair.operations,
-            diagnostics: repair.diagnostics,
-            reason: repair.reason ?? null,
-            fixpoint_iterations: convergence.iterations,
-            candidate_hashes: convergence.candidate_hashes,
-            budget_trace: convergence.budget_trace,
-            terminal_reason: convergence.terminal_reason
-          };
-
-          return {
-            validation,
-            research_reference_validation: { valid: true, errors: [] },
-            claim_validation: claimValidation,
-            claim_coverage_validation: claimCoverageValidation,
-            protocol_outcome: claimCoverageValidation.protocol_outcome
-          };
-        }
-
-        segment.voiceover = convergence.voiceover;
-      }
-
-      claimCoverageValidation.segments.push({
-        label,
-        covered: finalCoverage.covered,
-        repaired: repair !== null,
-        initial_undeclared_claims:
-          initialCoverage.undeclared_claims,
-        initial_unsupported: initialCoverage.unsupported,
-        undeclared_claims:
-          finalCoverage.undeclared_claims,
-        unsupported: finalCoverage.unsupported,
-        initial_usage: initialCoverage.usage,
-        repair_usage: repair?.usage ?? null,
-        repair_operations: repair?.operations ?? [],
-        fixpoint_iterations: convergence?.iterations ?? 0,
-        candidate_hashes: convergence?.candidate_hashes ?? [],
-        budget_trace: convergence?.budget_trace ?? [],
-        usage: finalCoverage.usage
-      });
-
-      if (!finalCoverage.covered) {
-        claimCoverageValidation.valid = false;
-
-        const undeclared =
-          finalCoverage.undeclared_claims
-            .map(item => item.text)
-            .join(" || ");
-
-        claimCoverageValidation.errors.push(
-          `${label}: affirmations factuelles non déclarées après réparation` +
-          (undeclared ? ` — ${undeclared}` : "")
-        );
-      }
-    }
+    return {
+      validation,
+      research_reference_validation: { valid: true, errors: [] },
+      claim_validation: claimValidation,
+      claim_coverage_validation: claimCoverageValidation,
+      protocol_outcome: claimCoverageValidation.protocol_outcome
+    };
   }
 
-  if (!claimCoverageValidation.valid) {
-    throw new Error(
-      "Script Agent : dossier rejeté par le Voiceover Claim Coverage Gate. " +
-      claimCoverageValidation.errors.join(" | ")
-    );
+  // PASS : chaque segment reçoit le voiceover final du coordinateur (texte
+  // d'origine moins les unités supprimées, jamais réécrit).
+  for (const item of coverage.final_voiceovers) {
+    data.sections[item.section_index].segments[item.segment_index].voiceover = item.voiceover;
   }
 
   // Cadre narré : hook et conclusion sont dérivés de leurs segments, qui
@@ -947,8 +863,10 @@ async function validateGeneratedScript(data, research, options = {}) {
 
     if (!finalValidation.valid) {
       throw new Error(
-        "Script Agent : dossier rejeté par le Script Gate après " +
-        "réparation. " +
+        // R28.10A D10 : libellé hors ATTRIBUTABLE_GATES, la couverture ne
+        // met jamais un chapitre en quarantaine.
+        "Script Agent : dossier rejeté par la revalidation du cadre " +
+        "narré après couverture. " +
         finalValidation.errors.join(" | ")
       );
     }
@@ -1181,12 +1099,14 @@ export async function runScriptAgent({
   testMode = false,
   durationProfile,
   narratedFrame = false,
-  productionDir
+  productionDir,
+  coverageTransport
 }) {
   const profile = agentDurationProfile(durationProfile);
   const validationOptions = {
     durationRange: { min: profile.min, max: profile.max },
-    requireNarratedFrame: narratedFrame === true
+    requireNarratedFrame: narratedFrame === true,
+    ...(coverageTransport ? { coverageTransport } : {})
   };
 
   const researchValidation =

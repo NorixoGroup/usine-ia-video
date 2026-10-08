@@ -67,7 +67,7 @@ const LOCK = Object.freeze({
   language: "fr",
   judge: coverageJudgeV2Version(),
   repair: "coverage-repair.v1",
-  baseline: "architecture-baseline-v1.0.2",
+  baseline: "architecture-baseline-v1.0.3",
   coordinator: POLICY.version
 });
 const CLAIMS = Object.freeze([{ text: "Le bassin couvre environ un million de kilomètres carrés." }]);
@@ -172,7 +172,7 @@ await test("classement PASS : aucune raison, aucune catégorie, aucune unité", 
 await test("traçabilité : protocol_id, lock_sha256, baseline, politique", () => {
   deepStrictEqual(
     [IMMEDIATE.protocol_id, IMMEDIATE.lock_sha256, IMMEDIATE.baseline, IMMEDIATE.policy_version],
-    [IMMEDIATE.history[0].boundary.protocol_id, judgeLockSha256(LOCK), "architecture-baseline-v1.0.2", POLICY.version]
+    [IMMEDIATE.history[0].boundary.protocol_id, judgeLockSha256(LOCK), "architecture-baseline-v1.0.3", POLICY.version]
   );
 });
 
@@ -320,7 +320,7 @@ const LOCK_CASES = [
   ["découpeur divergent", { ...LOCK, splitter: `${LOCK.splitter}x` }, "LOCK_INVALID"],
   ["empreinte d'entités divergente", { ...LOCK, entities_fingerprint: "0".repeat(64) }, "LOCK_INVALID"],
   ["juge absent du verrou", (({ judge, ...rest }) => rest)(LOCK), "JUDGE_REFUSED"],
-  ["baseline divergente", { ...LOCK, baseline: "architecture-baseline-v1.0.1" }, "JUDGE_REFUSED"]
+  ["baseline divergente", { ...LOCK, baseline: "architecture-baseline-v1.0.2" }, "JUDGE_REFUSED"]
 ];
 
 for (const [name, lock, reason] of LOCK_CASES) {

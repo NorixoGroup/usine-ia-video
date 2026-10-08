@@ -1,5 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 
+import { coverageUnitSplitterVersion, splitCoverageUnits } from "../utils/coverage-unit-splitter.js";
+
 // Jeu de données canonique du Fixture Engine.
 //
 // Table FERMÉE : toute entrée absente de ce fichier est rejetée.
@@ -875,6 +877,51 @@ function resolveCoverageJudge(fixtureId, scenario, userMessage) {
   });
 }
 
+// R28.10 — juge de couverture v2 (identifiants d'unités) : fonction pure de
+// son entrée. Le voiceover est découpé par le découpeur réel ; une unité
+// désignée dont le texte figure parmi les affirmations non déclarées de la
+// table est non couverte : DELETE, ou DECLARE dans le scénario
+// « script-coverage-unrepairable » (DECLARE n'est pas pris en charge par la
+// réparation : NOT_PASS). Toute autre unité est couverte.
+const COVERAGE_V2_HEADER = "SEGMENT A AUDITER :\n\n";
+
+function resolveCoverageJudgeV2(fixtureId, scenario, userMessage) {
+  const payload = parseJsonOrFail(fixtureId, userMessage.slice(COVERAGE_V2_HEADER.length), "segment");
+  if (
+    !payload || typeof payload.voiceover !== "string" || !Array.isArray(payload.claims) ||
+    !Array.isArray(payload.designated_unit_ids) || !Array.isArray(payload.units)
+  ) {
+    fail(fixtureId, "segment v2 invalide.");
+  }
+  const voiceover = payload.voiceover.trim();
+  const texts = payload.claims.map(claim => claim?.text);
+  const synthetic = texts.length === 1 && texts[0] === voiceover;
+  const entry = synthetic ? { undeclared: [] } : findCoverageEntry(fixtureId, voiceover, texts);
+  const split = splitCoverageUnits({ voiceover: payload.voiceover, version: coverageUnitSplitterVersion(), language: "fr" });
+  const textById = new Map(split.units.map(unit => [unit.id, unit.text.trim()]));
+  const undeclared = new Set(entry.undeclared.map(item => item.text));
+
+  return json({
+    protocol_id: payload.protocol_id,
+    voiceover_sha256: payload.voiceover_sha256,
+    lock_sha256: payload.lock_sha256,
+    segment_id: payload.segment_id,
+    results: payload.designated_unit_ids.map(unit_id => {
+      if (!undeclared.has(textById.get(unit_id))) return { unit_id, verdict: "COVERED", operations: [] };
+      const operation = scenario === "script-coverage-unrepairable"
+        ? { action: "DECLARE", claim_id: payload.claims[0]?.claim_id }
+        : { action: "DELETE" };
+      return { unit_id, verdict: "UNCOVERED", operations: [operation] };
+    })
+  });
+}
+
+function resolveCoverageJudgeDispatch(fixtureId, scenario, userMessage) {
+  return userMessage.startsWith(COVERAGE_V2_HEADER)
+    ? resolveCoverageJudgeV2(fixtureId, scenario, userMessage)
+    : resolveCoverageBatchJudge(fixtureId, scenario, userMessage);
+}
+
 function resolveCoverageBatchJudge(fixtureId, scenario, userMessage) {
   const [, payloadText] = matchOrFail(
     fixtureId,
@@ -1034,7 +1081,7 @@ const RESOLVERS = {
   "research": resolveResearch,
   "script": resolveScript,
   "visual-director": resolveVisualDirector,
-  "validate-script-claim-coverage": resolveCoverageBatchJudge,
+  "validate-script-claim-coverage": resolveCoverageJudgeDispatch,
   "validate-script-claim-coverage-batch": resolveCoverageBatchJudge,
   "validate-visual-factual-grounding": resolveGroundingJudge,
   "repair-script-claim-coverage": resolveCoverageRepair,

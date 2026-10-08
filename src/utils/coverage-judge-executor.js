@@ -1,12 +1,15 @@
 // R28.7 — exécuteur du juge de couverture (baseline v1.0.2, contrat 4.8 pour
-// la partie transport). Aucun appelant à ce stade.
+// la partie transport). R28.10 : retrait des réponses rejetées du cache.
 //
 // Il reçoit la requête préparée par le juge et un transport injecté,
 // applique les bornes, exécute EXACTEMENT un appel et renvoie la réponse
 // brute, intacte. Il ne décide rien, ne recalcule rien (ni protocol_id, ni
 // lock_sha256, ni voiceover_sha256), ne lit pas le JSON métier, ne répare
-// rien, ne classe rien et ne met rien en cache. Il n'importe aucun composant
-// de couverture ni le pipeline.
+// rien, ne classe rien et n'écrit jamais dans le cache. Seul propriétaire du
+// cache pour la couverture (4.8), il en RETIRE les réponses signalées comme
+// rejetées (discardRejectedJudgeResponses), avec la fonction de retrait
+// injectée par le pipeline (garde d'appels existant). Il n'importe aucun
+// composant de couverture ni le pipeline.
 //
 // Sortie : OK (réponse brute transmise telle quelle) ou NOT_JUDGED avec une
 // erreur qualifiée. Échec fermé : aucune exception ne s'échappe, jamais de
@@ -148,4 +151,28 @@ export async function executeJudgeRequest({ request, transport, limits = EXECUTO
   } catch (error) {
     return notJudged(EXECUTOR_FAILURE.TRANSPORT_ERROR, `erreur inattendue — ${String(error?.message ?? error)}`, 1);
   }
+}
+
+// R28.10 (contrat 4.8) — retire du cache les réponses signalées comme rejetées,
+// identifiées par leur empreinte de requête, avec la fonction de retrait
+// injectée (discardCachedResponse du garde d'appels). Ne lève jamais : une
+// empreinte invalide ou une fonction absente est ignorée et signalée.
+export function discardRejectedJudgeResponses({ requestSha256s, discard } = {}) {
+  const valid = Array.isArray(requestSha256s)
+    ? [...new Set(requestSha256s.filter(hash => typeof hash === "string" && /^[0-9a-f]{64}$/.test(hash)))].sort()
+    : [];
+  if (typeof discard !== "function") {
+    return Object.freeze({ discarded: Object.freeze([]), skipped: Object.freeze(valid) });
+  }
+  const discarded = [];
+  const skipped = [];
+  for (const hash of valid) {
+    try {
+      discard(hash);
+      discarded.push(hash);
+    } catch {
+      skipped.push(hash);
+    }
+  }
+  return Object.freeze({ discarded: Object.freeze(discarded), skipped: Object.freeze(skipped) });
 }

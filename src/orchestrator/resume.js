@@ -17,6 +17,7 @@ import crypto from "node:crypto";
 
 import { writeJsonArtifact } from "./artifacts.js";
 import { CACHE_DIR } from "../services/call-guard.js";
+import { LOCK_CHECK_STATUS, checkPersistedCoverageLock } from "../utils/coverage-lock-persistence.js";
 
 export const AGENT_ORDER = [
   "research",
@@ -253,6 +254,56 @@ export function planReuse({ productionDir, production }) {
   return reuse;
 }
 
+// R28.11 (baseline v1.0.3, sections 7 et 8) : le Script réutilisé est
+// toujours produit sous le verrou de couverture enregistré dans son
+// script.json au premier passage. Avant tout appel et toute écriture de la
+// reprise, ce verrou est comparé strictement au verrou courant : versions du
+// code, langue, baseline et empreinte des entités Research du truth.json
+// scellé. Toute divergence refuse la reprise (LOCK_MISSING, LOCK_INVALID,
+// LOCK_SHA_MISMATCH ou LOCK_MISMATCH) ; ni migration ni repli. Une montée de
+// version est une action explicite : --regenerate=script (ou research).
+// buildLock(research) construit le verrou courant (injecté par l'appelant).
+export function assertReusedScriptLock({ productionDir, production, buildLock }) {
+  const refuse = (code, category, detail) => fail(`verrou de couverture — ${code} (${category}) : ${detail}`);
+
+  let coverage = null;
+
+  try {
+    coverage = JSON.parse(fs.readFileSync(path.join(productionDir, ARTIFACT_OF.script), "utf8"))?.claim_coverage_validation ?? null;
+  } catch {
+    refuse("LOCK_INVALID", "script.json", "illisible");
+  }
+
+  let research = null;
+
+  try {
+    const raw = fs.readFileSync(path.join(productionDir, "truth.json"));
+    const seal = production.artifact_sha256?.["truth.json"];
+
+    if (typeof seal !== "string" || sha256Of(raw) !== seal) throw new Error("scellé absent ou différent");
+
+    research = JSON.parse(raw.toString("utf8"))?.data?.research_dossier;
+
+    if (!research || typeof research !== "object") throw new Error("research_dossier absent");
+  } catch (error) {
+    refuse("LOCK_INVALID", "ENTITIES_UNAVAILABLE", `truth.json scellé inutilisable (${error.message})`);
+  }
+
+  let currentLock = null;
+
+  try {
+    currentLock = buildLock(research);
+  } catch (error) {
+    refuse("LOCK_INVALID", "CURRENT_LOCK", `verrou courant non construit (${String(error?.message ?? error).slice(0, 200)})`);
+  }
+
+  const check = checkPersistedCoverageLock({ coverage, currentLock });
+
+  if (check.status !== LOCK_CHECK_STATUS.OK) refuse(check.code, check.category, check.detail);
+
+  return check;
+}
+
 // Régénération volontaire (--regenerate=<agent>), transactionnelle : la
 // version active reste en place pendant la tentative ; le candidat n'est
 // promu (archivage de l'ancienne version) qu'après validation complète.
@@ -288,6 +339,21 @@ export function planRegeneration({ reuse, regenerate }) {
     archived_artifacts: agents.length,
     timestamp: new Date().toISOString()
   };
+}
+
+// R28.10B (R28.10A D1) : un résultat d'agent portant un protocol_outcome
+// (NOT_PASS de couverture) est un échec, jamais un succès. Erreur levée par
+// l'orchestrateur, en production comme en régénération (rollback identique).
+export function protocolOutcomeError(outcome) {
+  const reason = outcome?.reason ? `, ${outcome.reason}` : "";
+  const error = new Error(
+    `Script Agent : ${outcome?.status ?? "NOT_PASS"} ` +
+    `(${outcome?.segment_id ?? "aucun segment"}${reason}).`
+  );
+
+  error.protocol_outcome = outcome;
+
+  return error;
 }
 
 // Promotion : appelée seulement quand le candidat a passé tous ses gates.

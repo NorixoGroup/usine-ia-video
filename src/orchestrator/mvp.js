@@ -11,6 +11,11 @@ import {
 } from "../agents/script.js";
 
 import {
+  buildCoverageLock,
+  researchEntitiesOf
+} from "../utils/script-coverage-gate.js";
+
+import {
   buildTruthReport,
   renderTruthMarkdown,
   validateTruthReport
@@ -133,6 +138,7 @@ import {
   STOP_AFTER_VALUES,
   acquireProductionLock,
   applyResume,
+  assertReusedScriptLock,
   archiveRegeneratedArtifacts,
   describeMediaNeeds,
   rollbackRegenerationCache,
@@ -140,6 +146,7 @@ import {
   planReuse,
   planRegeneration,
   productionMode,
+  protocolOutcomeError,
   sealAndWriteArtifact
 } from "./resume.js";
 
@@ -435,6 +442,12 @@ async function runAgent(agentId, run) {
 
   try {
     candidate = await run();
+
+    // R28.10A D1 : un NOT_PASS renvoyé (protocol_outcome) suit le chemin du
+    // rejet : aucune promotion, aucun archivage, rollback du cache.
+    if (candidate?.protocol_outcome) {
+      throw protocolOutcomeError(candidate.protocol_outcome);
+    }
   } catch (error) {
     setCacheBypass(false);
 
@@ -771,6 +784,17 @@ if (researchScriptMode) {
 
     if (regenerate) {
       regeneration = planRegeneration({ reuse, regenerate });
+    }
+
+    // R28.11 : le Script réutilisé doit l'avoir été sous le verrou de
+    // couverture courant. Refus avant tout appel ou écriture de la reprise.
+    // Un Script régénéré est recalculé : son ancien verrou n'est plus en jeu.
+    if (reuse.script) {
+      assertReusedScriptLock({
+        productionDir,
+        production,
+        buildLock: research => buildCoverageLock({ entities: researchEntitiesOf(research) })
+      });
     }
   }
 
@@ -1299,12 +1323,7 @@ if (dryRun) {
       }));
 
       if (scriptResult.protocol_outcome) {
-        const error = new Error(
-          `Script Agent : ${scriptResult.protocol_outcome.status} ` +
-          `(${scriptResult.protocol_outcome.segment_id}).`
-        );
-        error.protocol_outcome = scriptResult.protocol_outcome;
-        throw error;
+        throw protocolOutcomeError(scriptResult.protocol_outcome);
       }
 
       sealAndWriteArtifact({

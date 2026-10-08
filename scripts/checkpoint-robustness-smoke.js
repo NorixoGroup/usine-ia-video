@@ -34,6 +34,7 @@ import {
 import { runVisualDirector } from "../src/agents/visual-director.js";
 import { runResearchAgent } from "../src/agents/research.js";
 import { CANONICAL_TITLE, CANONICAL_PROMPT } from "../src/fixtures/anthropic-dataset.js";
+import { coverageUnitSplitterVersion, splitCoverageUnits } from "../src/utils/coverage-unit-splitter.js";
 
 const networkGuard = globalThis.__fixtureNetworkGuard;
 
@@ -155,6 +156,22 @@ function makeHandler({ research, faults }) {
       if (fault === "uncovered") delete faults.chapter[i];
 
       return text({ title: `Chapitre ${i}`, purpose: `Objectif ${i}/${total}`, ...(i === 1 ? { thesis: "Thèse factuelle." } : {}), segments });
+    }
+
+    // R28.10 : juge de couverture v2 (identifiants d'unités), un segment par appel.
+    if (system.startsWith("Tu es un auditeur de couverture factuelle") && user.startsWith("SEGMENT A AUDITER :\n\n")) {
+      const payload = JSON.parse(user.slice("SEGMENT A AUDITER :\n\n".length));
+      const units = splitCoverageUnits({ voiceover: payload.voiceover, version: coverageUnitSplitterVersion(), language: "fr" }).units;
+      const textOf = id => units.find(unit => unit.id === id)?.text ?? "";
+      return text({
+        protocol_id: payload.protocol_id,
+        voiceover_sha256: payload.voiceover_sha256,
+        lock_sha256: payload.lock_sha256,
+        segment_id: payload.segment_id,
+        results: payload.designated_unit_ids.map(unit_id => textOf(unit_id).includes("NONCOUVERT")
+          ? { unit_id, verdict: "UNCOVERED", operations: [{ action: "DELETE" }] }
+          : { unit_id, verdict: "COVERED", operations: [] })
+      });
     }
 
     if (system.startsWith("Tu es un auditeur de couverture factuelle")) {

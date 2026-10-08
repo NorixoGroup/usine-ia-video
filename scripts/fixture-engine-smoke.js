@@ -468,20 +468,22 @@ await test("chaîne Research → Script → Visual Director (happy)", async () =
 
     assertFixtureUsage(scriptResult.usage, "script", "script");
 
+    // R28.10 : couverture par le coordinateur, un segment à la fois.
     assert(
       scriptResult.claim_coverage_validation.valid &&
+      scriptResult.claim_coverage_validation.status === "PASS" &&
       scriptResult.claim_coverage_validation.segments.length === 2 &&
       scriptResult.claim_coverage_validation.segments.every(
-        segment => segment.covered && !segment.repaired
+        segment => segment.covered && segment.status === "PASS" && segment.rounds === 1 && segment.repair_count === 0
       ),
       "Claim Coverage : aucun repair attendu en happy path"
     );
 
     for (const segment of scriptResult.claim_coverage_validation.segments) {
-      assertFixtureUsage(
-        segment.usage,
-        "validate-script-claim-coverage",
-        segment.label
+      assert(
+        /^[0-9a-f]{64}$/.test(segment.protocol_id) && /^[0-9a-f]{64}$/.test(segment.lock_sha256) &&
+        /^[0-9a-f]{64}$/.test(segment.voiceover_sha256),
+        `${segment.label} : métadonnées de couverture incomplètes`
       );
     }
 
@@ -525,7 +527,7 @@ await test("chaîne Research → Script → Visual Director (happy)", async () =
       isDeepStrictEqual(counts, {
         "research": 1,
         "script": 1,
-        "validate-script-claim-coverage": 1,
+        "validate-script-claim-coverage": 2,
         "visual-director": 1,
         "validate-visual-factual-grounding": 5
       }),
@@ -612,50 +614,48 @@ await test("script-coverage-repair : FAIL → repair → revalidation PASS", asy
     const [first, second] =
       result.claim_coverage_validation.segments;
 
+    // R28.10 : l'unité « L'eau y est rare. » est supprimée (DELETE par
+    // identifiant), puis le texte restant est rejugé et couvert.
     assert(
-      first.repaired === true &&
-      first.covered === true &&
-      first.initial_undeclared_claims.length === 1 &&
-      first.initial_undeclared_claims[0].text === "L'eau y est rare." &&
-      first.undeclared_claims.length === 0,
-      "segment 0 : détection + repair + revalidation attendus"
+      first.covered === true && first.status === "PASS" &&
+      first.repair_count === 1 && first.rounds === 2,
+      "segment 0 : détection + suppression + rejugement attendus"
     );
 
     assert(
-      first.repair_usage === null,
-      "la réparation déterministe ne doit pas appeler le fournisseur"
-    );
-
-    assert(
-      second.repaired === false && second.covered === true,
+      second.repair_count === 0 && second.covered === true && second.rounds === 1,
       "segment 1 : aucun repair attendu"
     );
 
+    // Le texte restant est conservé octet pour octet : l'espace qui suivait
+    // l'unité gardée lui appartient (partition R28.2).
+    const expected = structuredClone(script);
+    expected.sections[0].segments[0].voiceover = `${script.sections[0].segments[0].voiceover} `;
     assert(
-      isDeepStrictEqual(result.data, script),
-      "le script réparé doit être identique au script happy"
+      isDeepStrictEqual(result.data, expected),
+      "le script réparé doit être le script happy, à l'espace final près"
     );
 
     assert(
       isDeepStrictEqual(logSince(start), {
         "script": 1,
-        "validate-script-claim-coverage": 2
+        "validate-script-claim-coverage": 3
       }),
       `journal d'appels inattendu : ${JSON.stringify(logSince(start))}`
     );
   });
 });
 
-await test("script-coverage-unrepairable : HARD_FAILURE structuré sans recheck ni retry", async () => {
+await test("script-coverage-unrepairable : NOT_PASS structuré (DECLARE non pris en charge), sans relance", async () => {
   await fixtures("script-coverage-unrepairable", async () => {
     const start = getFixtureCallLog().length;
     const result = await runScriptAgent({ research, title: CANONICAL_TITLE, testMode: true });
 
-    assert(result.protocol_outcome?.status === "HARD_FAILURE", JSON.stringify(result.protocol_outcome));
-    assert(result.protocol_outcome.repair_status === "HARD_FAILURE", JSON.stringify(result.protocol_outcome));
-    assert(result.protocol_outcome.coverage_status === null, JSON.stringify(result.protocol_outcome));
-    assert(result.protocol_outcome.reason?.includes("phrase introuvable ou ambiguë"), JSON.stringify(result.protocol_outcome));
-    assert(!("data" in result), "un résultat HARD_FAILURE ne doit pas exposer de script publiable");
+    assert(result.protocol_outcome?.status === "NOT_PASS", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.reason === "REPAIR_REFUSED", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.category === "DECLARE_NOT_SUPPORTED", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.segment_id === "s1-g1", JSON.stringify(result.protocol_outcome));
+    assert(!("data" in result), "un résultat NOT_PASS ne doit pas exposer de script publiable");
 
     assert(
       isDeepStrictEqual(logSince(start), {
@@ -667,12 +667,13 @@ await test("script-coverage-unrepairable : HARD_FAILURE structuré sans recheck 
   });
 });
 
-await test("script-coverage-empty : l'exécuteur reçoit IRREPARABLE_EMPTY sans recheck ni retry", async () => {
+await test("script-coverage-empty : NOT_PASS NOT_REPAIRABLE sans relance", async () => {
   await fixtures("script-coverage-empty", async () => {
     const start = getFixtureCallLog().length;
     const result = await runScriptAgent({ research, title: CANONICAL_TITLE, testMode: true });
 
-    assert(result.protocol_outcome?.status === "IRREPARABLE_EMPTY", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome?.status === "NOT_PASS", JSON.stringify(result.protocol_outcome));
+    assert(result.protocol_outcome.reason === "NOT_REPAIRABLE", JSON.stringify(result.protocol_outcome));
     assert(result.protocol_outcome.segment_id === "s1-g1", JSON.stringify(result.protocol_outcome));
     assert(!("data" in result), "un résultat irréparable ne doit pas exposer de script publiable");
     assert(

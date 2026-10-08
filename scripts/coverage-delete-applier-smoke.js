@@ -64,7 +64,7 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: "coverage-repair.v1", coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.2" });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: "coverage-repair.v1", coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.3" });
 const boundaryOf = voiceover => composeCoverageBoundary({ voiceover, lock: BOUNDARY_LOCK, entities: ENTITIES });
 
 async function repairOf(boundary, deletes = []) {
@@ -129,7 +129,7 @@ function expectApplied(result, repair, voiceover, deleted, remaining) {
     remaining_unit_ids: remaining,
     lock_sha256: repair.lock_sha256,
     repair_version: "coverage-repair.v1",
-    baseline: "architecture-baseline-v1.0.2",
+    baseline: "architecture-baseline-v1.0.3",
     status: deleted.length > 0 ? "APPLIED" : "UNCHANGED",
     refusal: null
   });
@@ -253,7 +253,7 @@ const REPAIR_CASES = [
   ["réparation refusée (INPUT_REFUSED)", { ...clone(R.u4), status: "INPUT_REFUSED" }, "REPAIR_NOT_APPLICABLE"],
   ["statut de réparation inconnu", { ...clone(R.u4), status: "DONE" }, "REPAIR_NOT_APPLICABLE"],
   ["lock_sha256 absent", { ...clone(R.u4), lock_sha256: null }, "REPAIR_MALFORMED"],
-  ["baseline de la réparation différente du verrou", { ...clone(R.u4), baseline: "architecture-baseline-v1.0.1" }, "LOCK_MISMATCH"],
+  ["baseline de la réparation différente du verrou", { ...clone(R.u4), baseline: "architecture-baseline-v1.0.2" }, "LOCK_MISMATCH"],
   ["protocol_id différent de la frontière", { ...clone(R.u4), protocol_id: "f".repeat(64) }, "PROTOCOL_MISMATCH"],
   ["protocol_id absent", { ...clone(R.u4), protocol_id: null }, "PROTOCOL_MISMATCH"],
   ["voiceover_sha256 différent de la frontière", { ...clone(R.u4), voiceover_sha256: "0".repeat(64) }, "VOICEOVER_MISMATCH"],

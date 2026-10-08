@@ -75,7 +75,7 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: V2, repair: "coverage-repair.v1", coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.2" });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: V2, repair: "coverage-repair.v1", coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.3" });
 
 // Exemple de la baseline (section 11), segment s2-g4.
 const BASELINE_VOICEOVER =
@@ -141,7 +141,7 @@ async function expectNotJudged(transportOptions, reasonPrefix) {
 await test("constantes publiques : protocole, version, verrou, bornes, statuts", () => {
   deepStrictEqual(COVERAGE_JUDGE_V2_PROTOCOL, "coverage-judge.v2-unit-ids");
   deepStrictEqual(COVERAGE_JUDGE_V2_RULES_VERSION, "coverage-judge.v2");
-  deepStrictEqual(ARCHITECTURE_BASELINE_VERSION, "architecture-baseline-v1.0.2");
+  deepStrictEqual(ARCHITECTURE_BASELINE_VERSION, "architecture-baseline-v1.0.3");
   deepStrictEqual(coverageJudgeV2Version(), V2);
   deepStrictEqual([...JUDGE_LOCK_KEYS], [
     "splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint",
@@ -307,7 +307,7 @@ await test("verrou absent ou incomplet (dont version du juge absente) → refus 
 
 await test("versions divergentes : juge, baseline et chaque composant de la frontière", async () => {
   await expectRefused({ lock: { ...LOCK, judge: `${V2}x` } }, "version divergente : judge");
-  await expectRefused({ lock: { ...LOCK, baseline: "architecture-baseline-v1.0.1" } }, "version divergente : baseline");
+  await expectRefused({ lock: { ...LOCK, baseline: "architecture-baseline-v1.0.2" } }, "version divergente : baseline");
   for (const key of ["splitter", "normalization", "protection", "classification", "entities_rule_version", "language"]) {
     await expectRefused({ lock: { ...LOCK, [key]: `${LOCK[key]}x` } }, `version divergente : ${key}`);
   }

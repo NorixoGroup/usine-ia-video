@@ -676,16 +676,14 @@ await test("cadre narré : les mêmes gates factuels que les autres segments (cl
   assert(framed.claim_validation.valid, "Claim Gate");
   assert(framed.claim_coverage_validation.valid, "Coverage Gate");
 
-  const labels = framed.claim_coverage_validation.segments.map(s => s.label);
+  // R28.10B (D8) : plus de label persisté ; un enregistrement par segment,
+  // dans l'ordre du script, hook et conclusion compris.
+  const statuses = framed.claim_coverage_validation.segments.map(s => s.status);
 
   assert(
-    JSON.stringify(labels) === JSON.stringify([
-      "sections[0].segments[0]",
-      "sections[0].segments[1]",
-      "sections[1].segments[0]",
-      "sections[1].segments[1]"
-    ]),
-    `segments jugés : ${labels}`
+    JSON.stringify(statuses) === JSON.stringify(["PASS", "PASS", "PASS", "PASS"]) &&
+      framed.data.sections.flatMap(section => section.segments).length === statuses.length,
+    `segments jugés : ${statuses}`
   );
   assert(
     framed.claim_coverage_validation.segments.every(s => s.covered === true),
@@ -708,23 +706,26 @@ await test("cadre narré + réparation de couverture : segment réparé, hook et
 
   const segments = repaired.claim_coverage_validation.segments;
 
-  assert(segments[1].repaired === true, "le segment aride devait être réparé");
+  // R28.10 : réparation par le coordinateur (DELETE par identifiant).
+  assert(segments[1].repair_count === 1, "le segment aride devait être réparé");
   assert(
-    segments.filter(s => s.repaired).length === 1,
+    segments.filter(s => s.repair_count > 0).length === 1,
     "seul ce segment doit être réparé"
   );
   assert(repaired.data.hook === flatten(repaired.data)[0].voiceover, "hook");
   assert(repaired.validation.valid, "validation finale");
 });
 
-await test("cadre narré + réparation impossible → rejet par le Coverage Gate", async () => {
-  await expectReject(
-    () => buildScript({
-      narratedFrame: true,
-      scenario: "script-coverage-unrepairable"
-    }),
-    /Voiceover Claim Coverage Gate/
-  );
+// R28.10 : un échec de couverture est un NOT_PASS structuré (sans exception),
+// qui arrête l'étape Script sans exposer de script publiable.
+await test("cadre narré + réparation impossible → NOT_PASS de la couverture", async () => {
+  const result = await buildScript({
+    narratedFrame: true,
+    scenario: "script-coverage-unrepairable"
+  });
+  assert(result.protocol_outcome?.status === "NOT_PASS", JSON.stringify(result.protocol_outcome));
+  assert(result.protocol_outcome.reason === "REPAIR_REFUSED", JSON.stringify(result.protocol_outcome));
+  assert(!("data" in result), "aucun script publiable sur NOT_PASS");
 });
 
 function framedClone() {

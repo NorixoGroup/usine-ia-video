@@ -30,6 +30,16 @@ export function getAnthropicClient() {
   return client;
 }
 
+// Refus avant tout envoi (NO_API, garde d'appels : autorisation, plafond,
+// double appel, journal). Marqué pour l'appelant ; aucun appel n'est parti.
+function refusedCall(error) {
+  const refused = error instanceof Error ? error : new Error(String(error));
+
+  refused.call_refused = true;
+
+  return refused;
+}
+
 export async function createMessage({
   system,
   messages,
@@ -52,9 +62,9 @@ export async function createMessage({
   }
 
   if (process.env.NO_API === "1") {
-    throw new Error(
+    throw refusedCall(new Error(
       "NO_API=1 — appel Anthropic interdit par le coupe-circuit local."
-    );
+    ));
   }
 
   if (!Array.isArray(messages) || messages.length === 0) {
@@ -78,8 +88,16 @@ export async function createMessage({
     request.tools = tools;
   }
 
-  // Garde des appels réels : autorisation, plafond, journal, cache.
-  const reservation = beginRealCall(request);
+  // Garde des appels réels : autorisation, plafond, journal, cache. Un refus
+  // du garde survient avant tout envoi ; il est marqué (call_refused) pour
+  // ne pas être confondu avec une panne du transport (R28.10B).
+  let reservation;
+
+  try {
+    reservation = beginRealCall(request);
+  } catch (error) {
+    throw refusedCall(error);
+  }
 
   // R23-D : l'empreinte de la requête accompagne la réponse, pour qu'un
   // appelant puisse écarter du cache une réponse qu'il rejette.

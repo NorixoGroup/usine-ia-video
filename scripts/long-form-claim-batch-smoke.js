@@ -196,40 +196,41 @@ process.env.ANTHROPIC_FIXTURES = "1";
 const fixtureResearch = (await runResearchAgent({ title: CANONICAL_TITLE, prompt: CANONICAL_PROMPT, testMode: true })).data;
 delete process.env.ANTHROPIC_FIXTURES;
 
-await test("D1 : plafond égal aux appels nécessaires (génération + 1 lot) → PASS sans réparation", async () => {
+// R28.10 : la couverture passe par le coordinateur, un appel au juge par
+// segment et par ronde (2 segments dans le script de test).
+await test("D1 : plafond égal aux appels nécessaires (génération + 1 juge par segment) → PASS sans réparation", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r20-d1-happy-"));
   try {
-    await withRealGuard("happy", dir, 2, async sdkCalls => {
+    await withRealGuard("happy", dir, 3, async sdkCalls => {
       const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
-      const estimate = result.claim_coverage_validation.estimate;
-      assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
-      assert(estimate.batch_count === 1 && estimate.total_calls_max > 2, `estimate conservé : ${JSON.stringify(estimate)}`);
-      assert(getCallGuardStatus().used === 2 && sdkCalls.length === 2, `appels : ${getCallGuardStatus().used}`);
-      assert(countStatus(dir, "succeeded") === 2 && countStatus(dir, "cache_hit") === 0, JSON.stringify(journal(dir)));
+      assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation));
+      assert(result.claim_coverage_validation.segments.every(segment => segment.rounds === 1 && segment.repair_count === 0), JSON.stringify(result.claim_coverage_validation.segments));
+      assert(getCallGuardStatus().used === 3 && sdkCalls.length === 3, `appels : ${getCallGuardStatus().used}`);
+      assert(countStatus(dir, "succeeded") === 3 && countStatus(dir, "cache_hit") === 0, JSON.stringify(journal(dir)));
     });
   } finally {
     fs.rmSync(dir, { recursive: true, force: true });
   }
 });
 
-await test("D1 : réparation déterministe → 3 appels maximum (génération + juge + recheck)", async () => {
+await test("D1 : réparation déterministe → 4 appels (génération + 2 rondes sur le segment réparé + 1 juge)", async () => {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r20-d1-stop-"));
   try {
-    await withRealGuard("script-coverage-repair", dir, 3, async sdkCalls => {
+    await withRealGuard("script-coverage-repair", dir, 4, async sdkCalls => {
       const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
-      assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
-      assert(getCallGuardStatus().used === 3 && sdkCalls.length === 3, `appels : ${getCallGuardStatus().used} / SDK ${sdkCalls.length}`);
-      assert(countStatus(dir, "succeeded") === 3 && countStatus(dir, "started") === 0, JSON.stringify(journal(dir)));
+      assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation));
+      assert(getCallGuardStatus().used === 4 && sdkCalls.length === 4, `appels : ${getCallGuardStatus().used} / SDK ${sdkCalls.length}`);
+      assert(countStatus(dir, "succeeded") === 4 && countStatus(dir, "started") === 0, JSON.stringify(journal(dir)));
     });
 
-    await test("D1 : reprise → génération, juge et recheck servis par cache", async () => {
+    await test("D1 : reprise → génération et jugements acceptés servis par cache", async () => {
       await withRealGuard("script-coverage-repair", dir, 1, async sdkCalls => {
         const result = await runScriptAgent({ research: fixtureResearch, title: CANONICAL_TITLE, testMode: true });
-        assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation.errors));
-        assert(result.claim_coverage_validation.segments[0].repaired === true, "réparation attendue");
-        assert(getCallGuardStatus().used === 0 && getCallGuardStatus().cache_hits === 3, JSON.stringify(getCallGuardStatus()));
+        assert(result.claim_coverage_validation.valid, JSON.stringify(result.claim_coverage_validation));
+        assert(result.claim_coverage_validation.segments[0].repair_count === 1, "réparation attendue");
+        assert(getCallGuardStatus().used === 0 && getCallGuardStatus().cache_hits === 4, JSON.stringify(getCallGuardStatus()));
         assert(sdkCalls.length === 0, `SDK appelé ${sdkCalls.length} fois`);
-        assert(countStatus(dir, "cache_hit") === 3 && countStatus(dir, "succeeded") === 3, JSON.stringify(journal(dir)));
+        assert(countStatus(dir, "cache_hit") === 4 && countStatus(dir, "succeeded") === 4, JSON.stringify(journal(dir)));
       });
     });
   } finally {
