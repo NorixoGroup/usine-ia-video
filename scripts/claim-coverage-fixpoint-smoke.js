@@ -1,7 +1,7 @@
 // Smoke R26 : convergence bornée, sans fournisseur ni mutation de production.
 import {
-  assertCoverageFixpointBudget,
   convergeCoverageRepair,
+  estimateCoverageFixpointRemainingCalls,
   MAX_COVERAGE_FIXPOINT_ITERATIONS
 } from "../src/agents/script.js";
 
@@ -86,6 +86,11 @@ await test("PASS avant la limite : deux repairs, puis REPAIRED", async () => {
   assert(result.iterations === 2, JSON.stringify(result));
   assert(rechecked.join("|") === "candidat-1|candidat-2", JSON.stringify(rechecked));
   assert(repairCalls === 2, `repairCalls=${repairCalls}`);
+  assert(
+    JSON.stringify(result.budget_trace.map(item => item.remaining_calls_max)) ===
+      JSON.stringify([10, 9, 9, 0]),
+    JSON.stringify(result.budget_trace)
+  );
 });
 
 await test("hash candidat répété : arrêt sans recheck supplémentaire", async () => {
@@ -105,6 +110,7 @@ await test("hash candidat répété : arrêt sans recheck supplémentaire", asyn
   assert(result.outcome === CLAIM_COVERAGE_REPAIR_OUTCOME.IRREPARABLE_UNCOVERED, JSON.stringify(result));
   assert(result.terminal_reason === "CANDIDATE_HASH_CYCLE", JSON.stringify(result));
   assert(rechecks === 0, `rechecks=${rechecks}`);
+  assert(result.budget_trace.at(-1).remaining_calls_max === 0, JSON.stringify(result.budget_trace));
 });
 
 await test("limite défensive : dix rechecks maximum, puis IRREPARABLE_UNCOVERED", async () => {
@@ -161,13 +167,44 @@ await test("reprise dans une itération : mêmes candidats, cache réutilisé", 
   assert(providerCalls === 2, `appels fournisseur=${providerCalls}`);
 });
 
-await test("budget insuffisant : arrêt avant tout recheck", async () => {
+await test("borne restante : segment complété, hash répété, EMPTY et HARD_FAILURE réduisent le maximum", async () => {
+  assert(
+    estimateCoverageFixpointRemainingCalls({ activeIterationsRemaining: 10, remainingUncoveredSegments: 2 }) === 30,
+    "borne initiale"
+  );
+  assert(
+    estimateCoverageFixpointRemainingCalls({ activeIterationsRemaining: 0, remainingUncoveredSegments: 2 }) === 20,
+    "segment terminé"
+  );
+  for (const status of [REPAIR_STATUS.EMPTY_CANDIDATE, REPAIR_STATUS.HARD_FAILURE]) {
+    const result = await convergeCoverageRepair({
+      voiceover: "origine",
+      claims: CLAIMS,
+      initialCoverage: INITIAL_COVERAGE,
+      approvedFacts: [],
+      id: "s1-g1",
+      remainingUncoveredSegments: 2,
+      repair: () => ({ status, operations: [], diagnostics: {}, usage: null }),
+      recheck: async () => { throw new Error("recheck interdit"); }
+    });
+    assert(result.budget_trace.at(-1).remaining_calls_max === 20, JSON.stringify(result.budget_trace));
+  }
+});
+
+await test("budget insuffisant : refus immédiat avant le fournisseur", async () => {
   let providerCalls = 0;
   let rejected = false;
   try {
-    assertCoverageFixpointBudget({
-      uncoveredSegmentCount: 1,
-      preflight: () => { throw new Error("budget insuffisant"); }
+    await convergeCoverageRepair({
+      voiceover: "origine",
+      claims: CLAIMS,
+      initialCoverage: INITIAL_COVERAGE,
+      approvedFacts: [],
+      id: "s1-g1",
+      repair: candidateRepair(new Map([["origine", "candidat"]])),
+      recheck: async () => {
+        throw new Error("budget insuffisant");
+      }
     });
   } catch (error) {
     rejected = error.message === "budget insuffisant";

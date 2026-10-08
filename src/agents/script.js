@@ -44,9 +44,7 @@ import {
 } from "../utils/classify-script-claim-coverage-repair-outcome.js";
 
 import {
-  assertRealCallBudget,
-  discardCachedResponse,
-  getCallGuardStatus
+  discardCachedResponse
 } from "../services/call-guard.js";
 
 const SYSTEM_PROMPT = `
@@ -608,22 +606,23 @@ function validateResearchReferences(script, research) {
   return errors;
 }
 
-export function estimateCoverageFixpointCalls({ uncoveredSegmentCount }) {
-  if (!Number.isSafeInteger(uncoveredSegmentCount) || uncoveredSegmentCount < 0) {
-    throw new Error("Script Agent : nombre de segments non couverts invalide.");
+export function estimateCoverageFixpointRemainingCalls({
+  activeIterationsRemaining,
+  remainingUncoveredSegments,
+  maxIterations = MAX_COVERAGE_FIXPOINT_ITERATIONS
+}) {
+  if (
+    !Number.isSafeInteger(maxIterations) || maxIterations < 1 ||
+    !Number.isSafeInteger(activeIterationsRemaining) ||
+    activeIterationsRemaining < 0 || activeIterationsRemaining > maxIterations ||
+    !Number.isSafeInteger(remainingUncoveredSegments) ||
+    remainingUncoveredSegments < 0
+  ) {
+    throw new Error("Script Agent : état de budget de convergence invalide.");
   }
 
-  return uncoveredSegmentCount * MAX_COVERAGE_FIXPOINT_ITERATIONS;
-}
-
-export function assertCoverageFixpointBudget({
-  uncoveredSegmentCount,
-  preflight = assertRealCallBudget
-}) {
-  return preflight({
-    calls: estimateCoverageFixpointCalls({ uncoveredSegmentCount }),
-    label: "convergence de couverture des claims"
-  });
+  return activeIterationsRemaining +
+    remainingUncoveredSegments * maxIterations;
 }
 
 // Orchestration seule : Repair, Recheck et le coordinateur gardent chacun
@@ -635,6 +634,7 @@ export async function convergeCoverageRepair({
   initialCoverage,
   approvedFacts,
   id,
+  remainingUncoveredSegments = 0,
   repair = repairVoiceoverClaimCoverage,
   recheck = validateVoiceoverClaimCoverage,
   maxIterations = MAX_COVERAGE_FIXPOINT_ITERATIONS
@@ -649,6 +649,19 @@ export async function convergeCoverageRepair({
   const repairClaims = initialCoverage.claims;
   const candidateHashes = [sha256(candidate)];
   const seenCandidateHashes = new Set(candidateHashes);
+  const budgetTrace = [];
+
+  const recordBudget = ({ iteration, phase, activeIterationsRemaining }) => {
+    budgetTrace.push({
+      iteration,
+      phase,
+      remaining_calls_max: estimateCoverageFixpointRemainingCalls({
+        activeIterationsRemaining,
+        remainingUncoveredSegments,
+        maxIterations
+      })
+    });
+  };
 
   for (let iteration = 1; iteration <= maxIterations; iteration += 1) {
     latestRepair = repair({
@@ -659,12 +672,14 @@ export async function convergeCoverageRepair({
     });
 
     if (latestRepair.status !== REPAIR_STATUS.CANDIDATE) {
+      recordBudget({ iteration, phase: "terminal", activeIterationsRemaining: 0 });
       return {
         voiceover: candidate,
         coverage,
         repair: latestRepair,
         iterations: iteration,
         candidate_hashes: candidateHashes,
+        budget_trace: budgetTrace,
         terminal_reason: latestRepair.status,
         outcome: classifyRepairOutcome({
           repairStatus: latestRepair.status,
@@ -677,12 +692,14 @@ export async function convergeCoverageRepair({
     const candidateHash = sha256(candidate);
 
     if (seenCandidateHashes.has(candidateHash)) {
+      recordBudget({ iteration, phase: "terminal", activeIterationsRemaining: 0 });
       return {
         voiceover: candidate,
         coverage,
         repair: latestRepair,
         iterations: iteration,
         candidate_hashes: candidateHashes,
+        budget_trace: budgetTrace,
         terminal_reason: "CANDIDATE_HASH_CYCLE",
         outcome: classifyRepairOutcome({
           repairStatus: latestRepair.status,
@@ -694,15 +711,25 @@ export async function convergeCoverageRepair({
     seenCandidateHashes.add(candidateHash);
     candidateHashes.push(candidateHash);
 
+    // validateVoiceoverClaimCoverage atteint createMessage(), dont beginRealCall()
+    // consulte d'abord le cache puis vérifie le plafond juste avant tout SDK call.
+    // Un cache hit consomme donc exactement zéro appel réel.
+    recordBudget({
+      iteration,
+      phase: "before_recheck",
+      activeIterationsRemaining: maxIterations - iteration + 1
+    });
     coverage = await recheck({ voiceover: candidate, claims, id });
 
     if (coverage.covered) {
+      recordBudget({ iteration, phase: "terminal", activeIterationsRemaining: 0 });
       return {
         voiceover: candidate,
         coverage,
         repair: latestRepair,
         iterations: iteration,
         candidate_hashes: candidateHashes,
+        budget_trace: budgetTrace,
         terminal_reason: COVERAGE_STATUS.PASS,
         outcome: classifyRepairOutcome({
           repairStatus: latestRepair.status,
@@ -710,14 +737,26 @@ export async function convergeCoverageRepair({
         })
       };
     }
+
+    recordBudget({
+      iteration,
+      phase: "after_recheck_fail",
+      activeIterationsRemaining: maxIterations - iteration
+    });
   }
 
+  recordBudget({
+    iteration: maxIterations,
+    phase: "terminal",
+    activeIterationsRemaining: 0
+  });
   return {
     voiceover: candidate,
     coverage,
     repair: latestRepair,
     iterations: maxIterations,
     candidate_hashes: candidateHashes,
+    budget_trace: budgetTrace,
     terminal_reason: "MAX_ITERATIONS",
     outcome: classifyRepairOutcome({
       repairStatus: latestRepair.status,
@@ -774,28 +813,7 @@ async function validateGeneratedScript(data, research, options = {}) {
   const uncoveredSegmentCount = initialBatchCoverage.segments.filter(
     item => !item.covered
   ).length;
-  const fixpointCallsMax = estimateCoverageFixpointCalls({
-    uncoveredSegmentCount
-  });
-
-  // Phase 2 : le premier passage a révélé les segments réellement concernés.
-  // On refuse maintenant avant le premier recheck si le pire cas borné ne
-  // tient pas dans le budget restant ; aucun appel de convergence ne part.
-  if (getCallGuardStatus().configured) {
-    assertCoverageFixpointBudget({
-      uncoveredSegmentCount,
-      preflight: assertRealCallBudget
-    });
-  }
-
-  claimCoverageValidation.estimate = {
-    ...initialBatchCoverage.estimate,
-    fixpoint_max_iterations: MAX_COVERAGE_FIXPOINT_ITERATIONS,
-    uncovered_segment_count: uncoveredSegmentCount,
-    fixpoint_recheck_calls_max: fixpointCallsMax,
-    total_calls_max:
-      initialBatchCoverage.estimate.batch_count + fixpointCallsMax
-  };
+  let remainingUncoveredSegments = uncoveredSegmentCount;
 
   for (
     let sectionIndex = 0;
@@ -827,6 +845,7 @@ async function validateGeneratedScript(data, research, options = {}) {
       let convergence = null;
 
       if (!initialCoverage.covered) {
+        remainingUncoveredSegments -= 1;
         const approvedFacts = segment.claims.map((claim, claimIndex) => ({
           claim_id: `${initialCoverage.id}-c${claimIndex + 1}`,
           key_fact: research.key_facts[claim.research_fact_ref]?.claim
@@ -837,7 +856,8 @@ async function validateGeneratedScript(data, research, options = {}) {
           claims: segment.claims,
           initialCoverage,
           approvedFacts,
-          id: initialCoverage.id
+          id: initialCoverage.id,
+          remainingUncoveredSegments
         });
         repair = convergence.repair;
         finalCoverage = convergence.coverage;
@@ -857,6 +877,7 @@ async function validateGeneratedScript(data, research, options = {}) {
             reason: repair.reason ?? null,
             fixpoint_iterations: convergence.iterations,
             candidate_hashes: convergence.candidate_hashes,
+            budget_trace: convergence.budget_trace,
             terminal_reason: convergence.terminal_reason
           };
 
@@ -887,6 +908,7 @@ async function validateGeneratedScript(data, research, options = {}) {
         repair_operations: repair?.operations ?? [],
         fixpoint_iterations: convergence?.iterations ?? 0,
         candidate_hashes: convergence?.candidate_hashes ?? [],
+        budget_trace: convergence?.budget_trace ?? [],
         usage: finalCoverage.usage
       });
 
