@@ -75,7 +75,7 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: V2, baseline: "architecture-baseline-v1.0.2" });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: V2, repair: "coverage-repair.v1", coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.2" });
 
 // Exemple de la baseline (section 11), segment s2-g4.
 const BASELINE_VOICEOVER =
@@ -145,7 +145,7 @@ await test("constantes publiques : protocole, version, verrou, bornes, statuts",
   deepStrictEqual(coverageJudgeV2Version(), V2);
   deepStrictEqual([...JUDGE_LOCK_KEYS], [
     "splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint",
-    "classification", "language", "judge", "baseline"
+    "classification", "judge", "repair", "coordinator", "language", "baseline"
   ]);
   deepStrictEqual(plain(JUDGE_BOUNDS), {
     max_tokens: 2000, output_token_budget: 1400, output_envelope_chars: 340, output_entry_chars: 140,
@@ -471,6 +471,56 @@ await test("version de la frontière composée divergente → refusée", async (
   await expectRefused({ boundary: { ...BOUNDARY, versions: { ...BOUNDARY.versions, composite: "composite-coverage-boundary.v2" } } }, "version divergente : composite");
 });
 
+// R28.9A — verrou complet : éléments 9 (réparation) et 10 (coordinateur).
+const OLD_LOCK = Object.freeze((({ repair, coordinator, ...rest }) => rest)(LOCK));
+const stable = value => (value === null || typeof value !== "object")
+  ? JSON.stringify(value ?? null)
+  : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
+
+await test("R28.9A — empreinte du verrou : SHA-256 du JSON stable des 11 champs, recalculée indépendamment", () => {
+  const expected = sha256(stable(Object.fromEntries(JUDGE_LOCK_KEYS.map(key => [key, LOCK[key]]))));
+  deepStrictEqual(judgeLockSha256(LOCK), expected);
+  deepStrictEqual(JUDGE_LOCK_KEYS.length, 11);
+  if (judgeLockSha256(LOCK) === judgeLockSha256(OLD_LOCK)) throw new Error("ancien verrou indiscernable");
+});
+
+await test("R28.9A — réparation absente du verrou → refus explicite", async () => {
+  const { repair: _removed, ...partial } = LOCK;
+  await expectRefused({ lock: partial }, "verrou incomplet : repair");
+});
+
+await test("R28.9A — coordinateur absent du verrou → refus explicite", async () => {
+  const { coordinator: _removed, ...partial } = LOCK;
+  await expectRefused({ lock: partial }, "verrou incomplet : coordinator");
+});
+
+await test("R28.9A — version de réparation ou de coordinateur modifiée : lock_sha256 change", () => {
+  for (const key of ["repair", "coordinator"]) {
+    if (judgeLockSha256({ ...LOCK, [key]: `${LOCK[key]}x` }) === judgeLockSha256(LOCK)) throw new Error(`élément ${key} non couvert`);
+  }
+});
+
+await test("R28.9A — version de réparation modifiée : jugement lié au nouveau verrou, pas à l'ancien", async () => {
+  const modified = { ...LOCK, repair: "coverage-repair.v2" };
+  const result = await judge({ lock: modified });
+  deepStrictEqual([result.status, result.lock_sha256], ["JUDGED", judgeLockSha256(modified)]);
+  if (result.lock_sha256 === judgeLockSha256(LOCK)) throw new Error("lock_sha256 inchangé");
+});
+
+await test("R28.9A — protocol_id inchangé : il ne dépend que du protocole de frontière", () => {
+  deepStrictEqual(boundaryProtocolIdFromLock(LOCK), boundaryProtocolIdFromLock(OLD_LOCK));
+  deepStrictEqual(boundaryProtocolIdFromLock({ ...LOCK, repair: "x", coordinator: "y" }), BOUNDARY.protocol_id);
+});
+
+await test("R28.9A — rejeu avec l'ancien verrou (9 champs) refusé", async () => {
+  await expectRefused({ lock: OLD_LOCK }, "verrou incomplet : repair, coordinator");
+});
+
+await test("R28.9A — rejeu avec le verrou complet accepté, empreinte du verrou complet", async () => {
+  const result = await judge();
+  deepStrictEqual([result.status, result.lock_sha256, result.protocol_id], ["JUDGED", judgeLockSha256(LOCK), BOUNDARY.protocol_id]);
+});
+
 // Copie isolée hors dépôt du juge, avec une mutation textuelle facultative.
 // Le service fournisseur est importé depuis le dépôt (chemin absolu), mais
 // n'est jamais appelé : le transport est toujours simulé.
@@ -517,6 +567,11 @@ async function behaviourFailures(module) {
     boundary: BOUNDARY, lock: { ...lock, baseline: undefined }, claims: BASELINE_CLAIMS, segmentId: "s2-g4", send: model().send
   });
   check("raison du verrou incomplet", incomplete.failure?.reason, "verrou incomplet : baseline");
+  // R28.9A : un verrou sans réparation ou sans coordinateur est incomplet.
+  for (const key of ["repair", "coordinator"]) {
+    const { [key]: _removed, ...partial } = lock;
+    check(`verrou sans ${key}`, await run({ lock: partial }), ["FAILED", "INPUT_REFUSED", 0]);
+  }
   check("version divergente", await run({ lock: { ...lock, classification: "x" } }), ["FAILED", "INPUT_REFUSED", 0]);
   const divergent = await module.judgeSegmentCoverageV2({
     boundary: BOUNDARY, lock: { ...lock, classification: "x" }, claims: BASELINE_CLAIMS, segmentId: "s2-g4", send: model().send
@@ -542,6 +597,8 @@ const MUTATIONS = [
   ["désignation non vérifiée", { from: 'if (!sameJson(designated, expected)) return "analysed_unit_ids incomplets ou désordonnés";', to: "" }],
   ["composant absent accepté", { from: 'if (typeof send !== "function") return "composant absent : transport";', to: "" }],
   ["bornes non vérifiées", { from: "if (outOfBounds) return", to: "if (false) return" }],
+  ["réparation hors du verrou", { from: '  "repair",\n', to: "" }],
+  ["coordinateur hors du verrou", { from: '  "coordinator",\n', to: "" }],
   ["protocol_id non recalculé", { from: "if (boundary.protocol_id !== expectedProtocolId) {", to: "if (false) {" }],
   ["algorithme du protocol_id altéré", { from: "composite: EXPECTED_BOUNDARY_VERSION,", to: "" }],
   ["version composite non vérifiée", { from: "if (boundary.version !== EXPECTED_BOUNDARY_VERSION || boundary.versions?.composite !== EXPECTED_BOUNDARY_VERSION) {", to: "if (false) {" }]

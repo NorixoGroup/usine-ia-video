@@ -101,6 +101,8 @@ function checkLock(lock) {
   if (!isObject(lock)) refuse(REPAIR_REFUSAL.LOCK_MISSING);
   if (JUDGE_LOCK_KEYS.some(key => typeof lock[key] !== "string" || lock[key] === "")) refuse(REPAIR_REFUSAL.LOCK_INCOMPLETE);
   if (lock.baseline !== ARCHITECTURE_BASELINE_VERSION || lock.judge !== coverageJudgeV2Version()) refuse(REPAIR_REFUSAL.LOCK_MISMATCH);
+  // Élément 9 du verrou : la version de la réparation.
+  if (lock.repair !== COVERAGE_REPAIR_VERSION) refuse(REPAIR_REFUSAL.LOCK_MISMATCH);
 }
 
 function checkBoundary(boundary, lock) {

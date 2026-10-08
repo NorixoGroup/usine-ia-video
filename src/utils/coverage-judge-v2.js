@@ -53,8 +53,10 @@ export const JUDGE_FAILURE = Object.freeze({
 
 export const JUDGE_VERDICT = Object.freeze({ COVERED: "COVERED", UNCOVERED: "UNCOVERED" });
 
-// Éléments du verrou exigés par le juge (section 8) : ceux de la frontière,
-// la version du juge et la version de la baseline.
+// Verrou complet (section 8, éléments 1 à 12, dans leur ordre) : frontière
+// (1 à 6), juge (7 et 8 : prompt, format et bornes), réparation (9),
+// politique du coordinateur (10), langue (11), baseline (12). lock_sha256 est
+// calculé sur ces seuls éléments.
 export const JUDGE_LOCK_KEYS = Object.freeze([
   "splitter",
   "normalization",
@@ -62,8 +64,10 @@ export const JUDGE_LOCK_KEYS = Object.freeze([
   "entities_rule_version",
   "entities_fingerprint",
   "classification",
-  "language",
   "judge",
+  "repair",
+  "coordinator",
+  "language",
   "baseline"
 ]);
 

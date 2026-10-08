@@ -65,7 +65,7 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), baseline: "architecture-baseline-v1.0.2" });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: COVERAGE_REPAIR_VERSION, coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.2" });
 
 const boundaryOf = voiceover => composeCoverageBoundary({ voiceover, lock: BOUNDARY_LOCK, entities: ENTITIES });
 
@@ -343,6 +343,34 @@ await test("imports limités, aucun réseau, aucun cache, aucune réécriture", 
   deepStrictEqual(networkGuard.attempts().length, 0);
 });
 
+// R28.9A — verrou complet : éléments 9 (réparation) et 10 (coordinateur).
+const OLD_LOCK = Object.freeze((({ repair, coordinator, ...rest }) => rest)(LOCK));
+
+await test("R28.9A — version de réparation absente du verrou → LOCK_INCOMPLETE", () => {
+  const { repair: _removed, ...partial } = LOCK;
+  expectRefused(plan(J_U4, { lock: partial }), "LOCK_INCOMPLETE");
+});
+
+await test("R28.9A — version de réparation modifiée → LOCK_MISMATCH", () => {
+  expectRefused(plan(J_U4, { lock: { ...LOCK, repair: "coverage-repair.v2" } }), "LOCK_MISMATCH");
+});
+
+await test("R28.9A — version du coordinateur absente du verrou → LOCK_INCOMPLETE", () => {
+  const { coordinator: _removed, ...partial } = LOCK;
+  expectRefused(plan(J_U4, { lock: partial }), "LOCK_INCOMPLETE");
+});
+
+await test("R28.9A — version du coordinateur modifiée → LOCK_SHA_MISMATCH (verdict lié à l'autre verrou)", () => {
+  expectRefused(plan(J_U4, { lock: { ...LOCK, coordinator: "coverage-coordinator-policy.v2" } }), "LOCK_SHA_MISMATCH");
+});
+
+await test("R28.9A — rejeu avec l'ancien verrou refusé, verrou complet accepté", () => {
+  expectRefused(plan(J_U4, { lock: OLD_LOCK }), "LOCK_INCOMPLETE");
+  const result = plan(J_U4);
+  deepStrictEqual([result.status, result.lock_sha256], ["PLANNED", judgeLockSha256(LOCK)]);
+  if (judgeLockSha256(LOCK) === judgeLockSha256(OLD_LOCK)) throw new Error("empreinte inchangée");
+});
+
 // Copie isolée hors dépôt du module de réparation, avec des remplacements
 // textuels facultatifs. Le juge v2 est importé depuis le dépôt.
 async function isolatedRepair(prefix, replacements = []) {
@@ -380,6 +408,7 @@ function behaviourFailures(module) {
   const excludedForged = withResults(J_MIXED_NONE, results => [...results, { unit_id: "u1", verdict: "UNCOVERED", operation: { action: "DELETE", claim_id: null } }]);
   check("exclue refusée", run(excludedForged, { boundary: clone(MIXED) }), ["INPUT_REFUSED", "EXCLUDED_UNIT", []]);
   check("doublon refusé", run(VERDICT_CASES[5][1]), ["INPUT_REFUSED", "DUPLICATE_UNIT", []]);
+  check("version de réparation verrouillée", run(J_U4, { lock: { ...clone(LOCK), repair: "coverage-repair.v2" } }), ["INPUT_REFUSED", "LOCK_MISMATCH", []]);
   const inputs = { boundary: clone(BOUNDARY), judgment: clone(J_TWO), lock: clone(LOCK) };
   const snapshot = JSON.stringify(inputs);
   try {
@@ -403,6 +432,7 @@ const MUTATIONS = [
   ["verrou de la frontière ignoré", [{ from: "if (boundary.lock_divergences.length > 0 || BOUNDARY_LOCK_ECHO.some(key => boundary.lock[key] !== lock[key])) {", to: "if (false) {" }]],
   ["unité exclue réparée", [{ from: 'if (states.get(unitId) === "excluded") refuse(REPAIR_REFUSAL.EXCLUDED_UNIT, unitId);', to: "" }, { from: "if (!designated.has(unitId)) refuse(REPAIR_REFUSAL.UNKNOWN_UNIT, unitId);", to: "" }]],
   ["doublons acceptés", [{ from: "if (seen.has(unitId)) refuse(REPAIR_REFUSAL.DUPLICATE_UNIT, unitId);", to: "" }]],
+  ["version de réparation non verrouillée", [{ from: "if (lock.repair !== COVERAGE_REPAIR_VERSION) refuse(REPAIR_REFUSAL.LOCK_MISMATCH);", to: "" }]],
   ["entrées modifiées", [{ from: "    checkLock(lock);\n", to: "    if (lock && typeof lock === \"object\" && !Object.isFrozen(lock)) lock.repaired = true;\n    checkLock(lock);\n" }]]
 ];
 
