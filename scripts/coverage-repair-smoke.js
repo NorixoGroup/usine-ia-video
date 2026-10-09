@@ -23,7 +23,8 @@ import {
   REPAIR_STATUS,
   planCoverageRepair
 } from "../src/utils/coverage-repair.js";
-import { coverageJudgeV2Version, judgeLockSha256, judgeSegmentCoverageV2, JUDGE_LOCK_KEYS } from "../src/utils/coverage-judge-v2.js";
+import { coverageJudgeV2Version, judgeSegmentCoverageV2 } from "../src/utils/coverage-judge-v2.js";
+import { COVERAGE_LOCK_KEYS, lockSha256 } from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageUnitSplitterVersion } from "../src/utils/coverage-unit-splitter.js";
@@ -137,7 +138,7 @@ await test("DELETE nominal : un plan, une opération, traçabilité complète", 
   deepStrictEqual(clone(result), {
     protocol_id: BOUNDARY.protocol_id,
     voiceover_sha256: sha256(BASELINE_VOICEOVER),
-    lock_sha256: judgeLockSha256(LOCK),
+    lock_sha256: lockSha256(LOCK),
     repair_version: "coverage-repair.v1",
     baseline: "architecture-baseline-v1.0.3",
     repair_plan: [{ unit_id: "u4", action: "DELETE", reason: "JUDGED_UNCOVERED", claim_ids: [] }],
@@ -262,7 +263,7 @@ await test("verrou mal formé — absent", () => {
 });
 
 await test("verrou mal formé — chaque élément absent ou vide", () => {
-  for (const key of JUDGE_LOCK_KEYS) {
+  for (const key of COVERAGE_LOCK_KEYS) {
     const { [key]: _removed, ...partial } = LOCK;
     expectRefused(plan(J_U4, { lock: partial }), "LOCK_INCOMPLETE");
     expectRefused(plan(J_U4, { lock: { ...LOCK, [key]: "" } }), "LOCK_INCOMPLETE");
@@ -334,7 +335,8 @@ await test("imports limités, aucun réseau, aucun cache, aucune réécriture", 
   deepStrictEqual(source.split("\n").filter(line => line.startsWith("import ") || line.startsWith("} from ")), [
     'import crypto from "node:crypto";',
     "import {",
-    '} from "./coverage-judge-v2.js";'
+    '} from "./coverage-judge-v2.js";',
+    'import { ARCHITECTURE_BASELINE_VERSION, BOUNDARY_LOCK_KEYS, boundaryProtocolIdFromLock, invalidLockElements, lockSha256 } from "./coverage-lock.js";'
   ]);
   const code = source.split("\n").filter(line => !line.trim().startsWith("//")).join("\n");
   for (const forbidden of ["fetch(", "http", "createMessage", "call-guard", "discardCachedResponse", "cache", "splitCoverageUnits", "normalizeCoverageText", "protectCoverageUnit", "classifyCoverageUnit", "composeCoverageBoundary", "judgeSegmentCoverageV2", "replace(", "key_fact", "REWRITE", "INSERT"]) {
@@ -367,8 +369,8 @@ await test("R28.9A — version du coordinateur modifiée → LOCK_SHA_MISMATCH (
 await test("R28.9A — rejeu avec l'ancien verrou refusé, verrou complet accepté", () => {
   expectRefused(plan(J_U4, { lock: OLD_LOCK }), "LOCK_INCOMPLETE");
   const result = plan(J_U4);
-  deepStrictEqual([result.status, result.lock_sha256], ["PLANNED", judgeLockSha256(LOCK)]);
-  if (judgeLockSha256(LOCK) === judgeLockSha256(OLD_LOCK)) throw new Error("empreinte inchangée");
+  deepStrictEqual([result.status, result.lock_sha256], ["PLANNED", lockSha256(LOCK)]);
+  if (lockSha256(LOCK) === lockSha256(OLD_LOCK)) throw new Error("empreinte inchangée");
 });
 
 // Copie isolée hors dépôt du module de réparation, avec des remplacements
@@ -376,7 +378,8 @@ await test("R28.9A — rejeu avec l'ancien verrou refusé, verrou complet accept
 async function isolatedRepair(prefix, replacements = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   let source = fs.readFileSync(new URL("../src/utils/coverage-repair.js", import.meta.url), "utf8")
-    .replace('"./coverage-judge-v2.js"', JSON.stringify(pathToFileURL(new URL("../src/utils/coverage-judge-v2.js", import.meta.url).pathname).href));
+    .replace('"./coverage-judge-v2.js"', JSON.stringify(pathToFileURL(new URL("../src/utils/coverage-judge-v2.js", import.meta.url).pathname).href))
+    .replace('"./coverage-lock.js"', JSON.stringify(pathToFileURL(new URL("../src/utils/coverage-lock.js", import.meta.url).pathname).href));
   for (const { from, to } of replacements) {
     if (source.split(from).length !== 2) throw new Error(`mutation non applicable : ${from}`);
     source = source.replace(from, to);
@@ -428,8 +431,8 @@ const MUTATIONS = [
   ]],
   ["action inconnue acceptée", [{ from: "if (action !== \"DELETE\") refuse(REPAIR_REFUSAL.UNKNOWN_ACTION, unitId);", to: "" }]],
   ["protocole ignoré", [{ from: "if (judgment.protocol_id !== boundary.protocol_id || boundary.protocol_id !== expectedProtocolId) {", to: "if (false) {" }]],
-  ["empreinte du verrou ignorée", [{ from: "if (judgment.lock_sha256 !== judgeLockSha256(lock)) refuse(REPAIR_REFUSAL.LOCK_SHA_MISMATCH);", to: "" }]],
-  ["verrou de la frontière ignoré", [{ from: "if (boundary.lock_divergences.length > 0 || BOUNDARY_LOCK_ECHO.some(key => boundary.lock[key] !== lock[key])) {", to: "if (false) {" }]],
+  ["empreinte du verrou ignorée", [{ from: "if (judgment.lock_sha256 !== lockSha256(lock)) refuse(REPAIR_REFUSAL.LOCK_SHA_MISMATCH);", to: "" }]],
+  ["verrou de la frontière ignoré", [{ from: "if (boundary.lock_divergences.length > 0 || BOUNDARY_LOCK_KEYS.some(key => boundary.lock[key] !== lock[key])) {", to: "if (false) {" }]],
   ["unité exclue réparée", [{ from: 'if (states.get(unitId) === "excluded") refuse(REPAIR_REFUSAL.EXCLUDED_UNIT, unitId);', to: "" }, { from: "if (!designated.has(unitId)) refuse(REPAIR_REFUSAL.UNKNOWN_UNIT, unitId);", to: "" }]],
   ["doublons acceptés", [{ from: "if (seen.has(unitId)) refuse(REPAIR_REFUSAL.DUPLICATE_UNIT, unitId);", to: "" }]],
   ["version de réparation non verrouillée", [{ from: "if (lock.repair !== COVERAGE_REPAIR_VERSION) refuse(REPAIR_REFUSAL.LOCK_MISMATCH);", to: "" }]],

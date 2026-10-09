@@ -32,8 +32,7 @@ import { COVERAGE_NORMALIZATION_VERSION, normalizeCoverageText } from "./coverag
 import { coverageUnitSplitterVersion, splitCoverageUnits } from "./coverage-unit-splitter.js";
 import { coverageProtectionVersion, protectCoverageUnit } from "./coverage-protection.js";
 import { coverageClassificationVersion, classifyCoverageUnit } from "./coverage-classification.js";
-
-export const COMPOSITE_COVERAGE_BOUNDARY_VERSION = "composite-coverage-boundary.v1";
+import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION, protocolIdFromVersions } from "./coverage-lock.js";
 
 export const BOUNDARY_STATUS = Object.freeze({
   OK: "OK",
@@ -42,18 +41,6 @@ export const BOUNDARY_STATUS = Object.freeze({
 });
 
 export const BOUNDARY_UNIT_STATES = Object.freeze(["protected", "excluded", "analysed"]);
-
-// Éléments du verrou consommés par la frontière (section 8, éléments 1 à 6
-// et 11).
-export const BOUNDARY_LOCK_KEYS = Object.freeze([
-  "splitter",
-  "normalization",
-  "protection",
-  "entities_rule_version",
-  "entities_fingerprint",
-  "classification",
-  "language"
-]);
 
 export const DEFAULT_COVERAGE_COMPONENTS = Object.freeze({
   normalization: Object.freeze({ version: () => COVERAGE_NORMALIZATION_VERSION, normalize: normalizeCoverageText }),
@@ -64,12 +51,6 @@ export const DEFAULT_COVERAGE_COMPONENTS = Object.freeze({
 
 const sha256 = value => crypto.createHash("sha256").update(value, "utf8").digest("hex");
 const message = error => String(error?.message ?? error);
-
-function stableJson(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-}
 
 function present(components, name, functionName) {
   return typeof components?.[name]?.[functionName] === "function" &&
@@ -273,7 +254,7 @@ export function composeCoverageBoundary({ voiceover, lock, entities, components 
     reason,
     voiceover_sha256: fingerprints.voiceover_sha256,
     // I10 : identifiant de protocole combinant toutes les versions et empreintes.
-    protocol_id: sha256(stableJson({ versions, entities_fingerprint: entitiesFingerprint })),
+    protocol_id: protocolIdFromVersions({ versions, entitiesFingerprint }),
     versions,
     fingerprints,
     lock: BOUNDARY_LOCK_KEYS.reduce((record, key) => ({ ...record, [key]: lockValue(key) ?? null }), {}),

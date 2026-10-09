@@ -22,7 +22,8 @@ import {
   applyCoverageDeletePlan
 } from "../src/utils/coverage-delete-applier.js";
 import { planCoverageRepair } from "../src/utils/coverage-repair.js";
-import { coverageJudgeV2Version, judgeLockSha256, judgeSegmentCoverageV2 } from "../src/utils/coverage-judge-v2.js";
+import { coverageJudgeV2Version, judgeSegmentCoverageV2 } from "../src/utils/coverage-judge-v2.js";
+import { lockSha256 } from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageUnitSplitterVersion } from "../src/utils/coverage-unit-splitter.js";
@@ -279,7 +280,7 @@ await test("empreinte réparée : SHA-256 UTF-8 du voiceover réparé, différen
 
 await test("propagation : protocol_id, lock_sha256, version et baseline repris de la réparation", () => {
   const result = apply(R.u4);
-  deepStrictEqual([result.protocol_id, result.lock_sha256, result.repair_version, result.baseline], [BOUNDARY.protocol_id, judgeLockSha256(LOCK), "coverage-repair.v1", LOCK.baseline]);
+  deepStrictEqual([result.protocol_id, result.lock_sha256, result.repair_version, result.baseline], [BOUNDARY.protocol_id, lockSha256(LOCK), "coverage-repair.v1", LOCK.baseline]);
 });
 
 const plannedPlan = () => clone(R.u4);
@@ -420,9 +421,8 @@ await test("imports limités, aucun réseau, aucun cache, aucune réécriture", 
   const source = fs.readFileSync(new URL("../src/utils/coverage-delete-applier.js", import.meta.url), "utf8");
   deepStrictEqual(source.split("\n").filter(line => line.startsWith("import ")), [
     'import crypto from "node:crypto";',
-    'import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION } from "./composite-coverage-boundary.js";',
     'import { COVERAGE_REPAIR_VERSION, REPAIR_STATUS } from "./coverage-repair.js";',
-    'import { JUDGE_LOCK_KEYS, judgeLockSha256 } from "./coverage-judge-v2.js";'
+    'import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION, invalidLockElements, lockSha256 } from "./coverage-lock.js";'
   ]);
   const code = source.split("\n").filter(line => !line.trim().startsWith("//")).join("\n");
   for (const forbidden of ["fetch(", "http", "createMessage", "call-guard", "cache", "replace(", "trim(", "normalize", "toLowerCase", "boundaryProtocolIdFromLock", "composeCoverageBoundary", "planCoverageRepair", "+ \" \"", "join(\" \")"]) {
@@ -459,14 +459,14 @@ await test("R28.9A — lock_sha256 de la réparation falsifié → LOCK_SHA_MISM
 await test("R28.9A — rejeu avec l'ancien verrou refusé, verrou complet accepté", () => {
   expectRefused(apply(R.u4, { lock: OLD_LOCK }), "LOCK_INCOMPLETE");
   const result = apply(R.u4);
-  deepStrictEqual([result.status, result.lock_sha256], ["APPLIED", judgeLockSha256(LOCK)]);
+  deepStrictEqual([result.status, result.lock_sha256], ["APPLIED", lockSha256(LOCK)]);
 });
 
 // Copie isolée hors dépôt de l'applicateur, avec des remplacements textuels.
 async function isolatedApplier(prefix, replacements = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   let source = fs.readFileSync(new URL("../src/utils/coverage-delete-applier.js", import.meta.url), "utf8");
-  for (const name of ["composite-coverage-boundary.js", "coverage-repair.js", "coverage-judge-v2.js"]) {
+  for (const name of ["coverage-repair.js", "coverage-lock.js"]) {
     source = source.replace(`"./${name}"`, JSON.stringify(pathToFileURL(new URL(`../src/utils/${name}`, import.meta.url).pathname).href));
   }
   for (const { from, to } of replacements) {
@@ -550,7 +550,7 @@ const MUTATIONS = [
   ["verrou recalculé", [{ from: "lock_sha256: repair.lock_sha256,", to: "lock_sha256: sha256(JSON.stringify(lock))," }]],
   ["sortie modifiable", [{ from: "    return freezeAll({\n      protocol_id: repair.protocol_id,", to: "    return ({\n      protocol_id: repair.protocol_id," }]],
   ["entrées modifiées", [{ from: "    checkLock(lock);\n", to: "    if (lock && typeof lock === \"object\" && !Object.isFrozen(lock)) lock.applied = true;\n    checkLock(lock);\n" }]],
-  ["lock_sha256 non vérifié", [{ from: "if (repair.lock_sha256 !== judgeLockSha256(lock)) refuse(APPLY_REFUSAL.LOCK_SHA_MISMATCH);", to: "" }]],
+  ["lock_sha256 non vérifié", [{ from: "if (repair.lock_sha256 !== lockSha256(lock)) refuse(APPLY_REFUSAL.LOCK_SHA_MISMATCH);", to: "" }]],
   ["version de réparation non verrouillée", [{ from: " || lock.repair !== repair.repair_version", to: "" }]],
   ["espace de jonction conservé (I4)", [{ from: "if (deleted.includes(boundary.units.at(-1).unit_id)) {", to: "if (false) {" }]],
   ["espace de jonction retiré même sans suppression de la dernière unité", [{ from: "if (deleted.includes(boundary.units.at(-1).unit_id)) {", to: "if (true) {" }]],

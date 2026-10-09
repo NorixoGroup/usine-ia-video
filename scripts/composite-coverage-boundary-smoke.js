@@ -15,13 +15,12 @@ import path from "node:path";
 import { deepStrictEqual, notDeepStrictEqual } from "node:assert/strict";
 
 import {
-  BOUNDARY_LOCK_KEYS,
   BOUNDARY_STATUS,
   BOUNDARY_UNIT_STATES,
-  COMPOSITE_COVERAGE_BOUNDARY_VERSION,
   DEFAULT_COVERAGE_COMPONENTS,
   composeCoverageBoundary
 } from "../src/utils/composite-coverage-boundary.js";
+import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION } from "../src/utils/coverage-lock.js";
 import { normalizeCoverageText } from "../src/utils/coverage-normalization.js";
 import { coverageUnitSplitterVersion, splitCoverageUnits } from "../src/utils/coverage-unit-splitter.js";
 import { coverageProtectionVersion, extractResearchEntities, protectCoverageUnit } from "../src/utils/coverage-protection.js";
@@ -333,7 +332,8 @@ await test("indépendance : composants R28.1 à R28.4 seulement, aucune référe
     'import { COVERAGE_NORMALIZATION_VERSION, normalizeCoverageText } from "./coverage-normalization.js";',
     'import { coverageUnitSplitterVersion, splitCoverageUnits } from "./coverage-unit-splitter.js";',
     'import { coverageProtectionVersion, protectCoverageUnit } from "./coverage-protection.js";',
-    'import { coverageClassificationVersion, classifyCoverageUnit } from "./coverage-classification.js";'
+    'import { coverageClassificationVersion, classifyCoverageUnit } from "./coverage-classification.js";',
+    'import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION, protocolIdFromVersions } from "./coverage-lock.js";'
   ]);
   const code = source.split("\n").filter(line => !line.trim().startsWith("//")).join("\n").toLowerCase();
   for (const forbidden of ["judge", "juge", "repair", "répar", "coordinat", "pipeline", "script", "claim", "verdict", "prompt", "research", "fs.", "readfile"]) {
@@ -359,7 +359,7 @@ async function isolatedBoundary(prefix, mutation = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   fs.mkdirSync(path.join(root, "src", "utils"), { recursive: true });
   fs.mkdirSync(path.join(root, "config", "coverage"), { recursive: true });
-  for (const file of ["coverage-normalization.js", "coverage-unit-splitter.js", "coverage-protection.js", "coverage-classification.js"]) {
+  for (const file of ["coverage-normalization.js", "coverage-unit-splitter.js", "coverage-protection.js", "coverage-classification.js", "coverage-lock.js"]) {
     fs.copyFileSync(new URL(`../src/utils/${file}`, import.meta.url), path.join(root, "src", "utils", file));
   }
   for (const file of fs.readdirSync(new URL("../config/coverage/", import.meta.url))) {

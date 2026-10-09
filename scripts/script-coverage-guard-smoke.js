@@ -23,10 +23,11 @@ import { deepStrictEqual } from "node:assert/strict";
 
 import Anthropic from "@anthropic-ai/sdk";
 
-import { runScriptCoverageGate, buildCoverageLock, researchEntitiesOf, SCRIPT_COVERAGE_POLICY } from "../src/utils/script-coverage-gate.js";
+import { runScriptCoverageGate } from "../src/utils/script-coverage-gate.js";
+import { SCRIPT_COVERAGE_POLICY, buildCoverageLock, researchEntitiesOf } from "../src/utils/coverage-lock-builder.js";
 import { coordinateCoverage } from "../src/utils/coverage-coordinator.js";
 import { EXECUTOR_LIMITS } from "../src/utils/coverage-judge-executor.js";
-import { boundaryProtocolIdFromLock, judgeLockSha256 } from "../src/utils/coverage-judge-v2.js";
+import { boundaryProtocolIdFromLock, lockSha256 } from "../src/utils/coverage-lock.js";
 import { CACHE_DIR, JOURNAL_FILE, configureCallGuard, getCallGuardStatus, resetCallGuard, setCacheBypass } from "../src/services/call-guard.js";
 import { previewMessageCost } from "../src/services/anthropic.js";
 import { estimateCoverageBudget } from "../src/utils/coverage-budget-preflight.js";
@@ -528,7 +529,7 @@ await test("R29.3 — le préflight ne change ni le verrou ni le protocole ni le
   const lock = buildCoverageLock({ entities: researchEntitiesOf(RESEARCH) });
   await withGuard({ cap: 20 }, async () => {
     const result = await gate(scriptOf(V));
-    deepStrictEqual([result.lock_sha256, result.protocol_id], [judgeLockSha256(lock), boundaryProtocolIdFromLock(lock)]);
+    deepStrictEqual([result.lock_sha256, result.protocol_id], [lockSha256(lock), boundaryProtocolIdFromLock(lock)]);
     deepStrictEqual(Object.keys(result.segments[0]), ["status", "covered", "undeclared_claims", "protocol_id", "lock_sha256", "voiceover_sha256", "rounds", "repair_count"]);
   });
 });
@@ -545,7 +546,7 @@ await test("R29.3 — déterministe : mêmes entrées et même état, mêmes oct
 // ---------------------------------------------------------------------------
 console.log("--- 4. Verrou, protocole, erreurs inattendues (D7, D13, D14) ---");
 
-const LOCK_SHA = judgeLockSha256(LOCK);
+const LOCK_SHA = lockSha256(LOCK);
 const PROTOCOL = boundaryProtocolIdFromLock(LOCK);
 
 await test("D7 — NOT_PASS avant tout jugement : verrou et protocole présents (Script et segment)", async () => {

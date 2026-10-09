@@ -24,6 +24,7 @@
 import { composeCoverageBoundary } from "./composite-coverage-boundary.js";
 import { judgeSegmentCoverageV2 } from "./coverage-judge-v2.js";
 import { executeJudgeRequest } from "./coverage-judge-executor.js";
+import { lockMatchesPolicy } from "./coverage-lock.js";
 
 export const COVERAGE_BUDGET_PREFLIGHT_VERSION = "coverage-budget-preflight.v1";
 
@@ -65,7 +66,7 @@ const SENTINEL = Object.freeze({ probe: "captured" });
 // n'en envoie aucune. N'envoie rien.
 async function roundOneRequest({ segment, lock, entities, policy }) {
   if (!isObject(segment) || typeof segment.segment_id !== "string" || typeof segment.voiceover !== "string") return null;
-  if (!isObject(lock) || lock.coordinator !== policy.version) return null;
+  if (!lockMatchesPolicy(lock, policy)) return null;
 
   const boundary = composeCoverageBoundary({ voiceover: segment.voiceover, lock, entities });
   if (boundary.status === "FAILED" || boundary.lock_divergences.length > 0) return null;

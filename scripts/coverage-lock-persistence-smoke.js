@@ -27,8 +27,8 @@ import {
   LOCK_REFUSAL,
   checkPersistedCoverageLock
 } from "../src/utils/coverage-lock-persistence.js";
-import { buildCoverageLock, researchEntitiesOf } from "../src/utils/script-coverage-gate.js";
-import { JUDGE_LOCK_KEYS, judgeLockSha256 } from "../src/utils/coverage-judge-v2.js";
+import { buildCoverageLock, researchEntitiesOf } from "../src/utils/coverage-lock-builder.js";
+import { COVERAGE_LOCK_KEYS, lockSha256 } from "../src/utils/coverage-lock.js";
 import { assertReusedScriptLock, sealAndWriteArtifact } from "../src/orchestrator/resume.js";
 import { runScriptAgent } from "../src/agents/script.js";
 import { runResearchAgent } from "../src/agents/research.js";
@@ -83,13 +83,13 @@ const CURRENT = buildLock(research);
 console.log("--- 1. Premier passage : le verrou est enregistré ---");
 
 await test("script.json : le verrou complet (11 éléments, dans l'ordre de la section 8) est enregistré", () => {
-  deepStrictEqual(Object.keys(COVERAGE.lock), [...JUDGE_LOCK_KEYS]);
-  deepStrictEqual(JUDGE_LOCK_KEYS.length, 11);
-  for (const key of JUDGE_LOCK_KEYS) if (typeof COVERAGE.lock[key] !== "string" || COVERAGE.lock[key] === "") throw new Error(key);
+  deepStrictEqual(Object.keys(COVERAGE.lock), [...COVERAGE_LOCK_KEYS]);
+  deepStrictEqual(COVERAGE_LOCK_KEYS.length, 11);
+  for (const key of COVERAGE_LOCK_KEYS) if (typeof COVERAGE.lock[key] !== "string" || COVERAGE.lock[key] === "") throw new Error(key);
 });
 
 await test("script.json : l'empreinte enregistrée est celle du verrou enregistré, reprise par chaque segment", () => {
-  deepStrictEqual(COVERAGE.lock_sha256, judgeLockSha256(COVERAGE.lock));
+  deepStrictEqual(COVERAGE.lock_sha256, lockSha256(COVERAGE.lock));
   if (!HEX64.test(COVERAGE.lock_sha256)) throw new Error("empreinte invalide");
   for (const segment of COVERAGE.segments) deepStrictEqual(segment.lock_sha256, COVERAGE.lock_sha256);
 });
@@ -118,7 +118,7 @@ const check = (coverage, currentLock = CURRENT) => checkPersistedCoverageLock({ 
 function coverageWith(key, value) {
   const coverage = clone(COVERAGE);
   coverage.lock[key] = value;
-  coverage.lock_sha256 = judgeLockSha256(coverage.lock);
+  coverage.lock_sha256 = lockSha256(coverage.lock);
   for (const segment of coverage.segments) segment.lock_sha256 = coverage.lock_sha256;
   return coverage;
 }
@@ -141,7 +141,7 @@ await test("sortie figée, sans état : appels répétés identiques", () => {
   deepStrictEqual(JSON.stringify(check(coverageWith("repair", "autre"))), JSON.stringify(results[2]));
 });
 
-for (const key of JUDGE_LOCK_KEYS) {
+for (const key of COVERAGE_LOCK_KEYS) {
   await test(`élément divergent (enregistré) : ${key} → LOCK_MISMATCH (${key})`, () => {
     expectRefusal(check(coverageWith(key, `${CURRENT[key]}-ancien`)), "LOCK_MISMATCH", key);
   });
@@ -160,7 +160,7 @@ for (const key of JUDGE_LOCK_KEYS) {
 await test("plusieurs éléments divergents : la catégorie est le premier dans l'ordre de la section 8", () => {
   const coverage = coverageWith("baseline", "architecture-baseline-v1.0.2");
   coverage.lock.splitter = "autre";
-  coverage.lock_sha256 = judgeLockSha256(coverage.lock);
+  coverage.lock_sha256 = lockSha256(coverage.lock);
   for (const segment of coverage.segments) segment.lock_sha256 = coverage.lock_sha256;
   expectRefusal(check(coverage), "LOCK_MISMATCH", "splitter");
 });
@@ -211,7 +211,7 @@ for (const [name, coverage] of [
   await test(`verrou absent (${name}) → LOCK_MISSING`, () => expectRefusal(check(coverage), "LOCK_MISSING", "LOCK"));
 }
 
-for (const key of JUDGE_LOCK_KEYS) {
+for (const key of COVERAGE_LOCK_KEYS) {
   await test(`verrou incomplet : ${key} absent → LOCK_INVALID (${key})`, () => {
     const coverage = clone(COVERAGE);
     delete coverage.lock[key];
@@ -250,7 +250,7 @@ await test("aucune exception : entrées absentes ou aberrantes → refus qualifi
 });
 
 await test("aucun faux OK : toute modification d'un seul élément, d'un côté ou de l'autre, refuse", () => {
-  for (const key of JUDGE_LOCK_KEYS) {
+  for (const key of COVERAGE_LOCK_KEYS) {
     deepStrictEqual(check(coverageWith(key, "x")).status, "REFUSED");
     deepStrictEqual(check(COVERAGE, { ...CURRENT, [key]: "x" }).status, "REFUSED");
   }
@@ -317,12 +317,12 @@ await test("reprise : lock_sha256 différent → LOCK_SHA_MISMATCH", () => {
   expectReprise(productionDirectory({ coverageOf: coverage => { coverage.lock_sha256 = "a".repeat(64); return coverage; } }), /LOCK_SHA_MISMATCH \(STORED_LOCK\)/);
 });
 
-for (const key of JUDGE_LOCK_KEYS) {
+for (const key of COVERAGE_LOCK_KEYS) {
   await test(`reprise : ${key} différent (rescellé) → LOCK_MISMATCH (${key}), rien d'écrit`, () => {
     expectReprise(productionDirectory({
       coverageOf: coverage => {
         coverage.lock[key] = `${coverage.lock[key]}-ancien`;
-        coverage.lock_sha256 = judgeLockSha256(coverage.lock);
+        coverage.lock_sha256 = lockSha256(coverage.lock);
         for (const segment of coverage.segments) segment.lock_sha256 = coverage.lock_sha256;
         return coverage;
       }
@@ -365,7 +365,7 @@ await test("reprise : constructeur du verrou courant en échec → LOCK_INVALID 
 await test("reprise déterministe : mêmes entrées, même décision et même message", () => {
   const messages = [0, 1].map(() => {
     try {
-      reprise(productionDirectory({ coverageOf: coverage => { coverage.lock.baseline = "architecture-baseline-v1.0.2"; coverage.lock_sha256 = judgeLockSha256(coverage.lock); for (const segment of coverage.segments) segment.lock_sha256 = coverage.lock_sha256; return coverage; } }));
+      reprise(productionDirectory({ coverageOf: coverage => { coverage.lock.baseline = "architecture-baseline-v1.0.2"; coverage.lock_sha256 = lockSha256(coverage.lock); for (const segment of coverage.segments) segment.lock_sha256 = coverage.lock_sha256; return coverage; } }));
       return "accepté";
     } catch (error) {
       return error.message;
@@ -406,7 +406,7 @@ const readScript = () => JSON.parse(fs.readFileSync(path.join(productionDir, "sc
 await test("orchestrateur — premier passage : script.json enregistre le verrou complet, scellé", () => {
   if (firstRun.status !== 0 || !productionDir) throw new Error(`exit ${firstRun.status}\n${firstRun.stdout.slice(-500)}\n${firstRun.stderr.slice(-500)}`);
   const coverage = readScript().claim_coverage_validation;
-  deepStrictEqual([Object.keys(coverage.lock), coverage.lock_sha256 === judgeLockSha256(coverage.lock), coverage.lock.baseline], [[...JUDGE_LOCK_KEYS], true, "architecture-baseline-v1.0.3"]);
+  deepStrictEqual([Object.keys(coverage.lock), coverage.lock_sha256 === lockSha256(coverage.lock), coverage.lock.baseline], [[...COVERAGE_LOCK_KEYS], true, "architecture-baseline-v1.0.3"]);
   const production = JSON.parse(fs.readFileSync(path.join(productionDir, "production.json"), "utf8"));
   deepStrictEqual(production.artifact_sha256["script.json"], sha256(fs.readFileSync(path.join(productionDir, "script.json"))));
   deepStrictEqual(firstRun.blocked, 0);
@@ -445,9 +445,9 @@ for (const [name, mutate, pattern] of [
   ["verrou absent", coverage => { delete coverage.lock; }, /LOCK_MISSING/],
   ["verrou incomplet", coverage => { delete coverage.lock.coordinator; }, /LOCK_INVALID \(coordinator\)/],
   ["empreinte différente", coverage => { coverage.lock_sha256 = "b".repeat(64); }, /LOCK_SHA_MISMATCH/],
-  ["baseline différente", coverage => { coverage.lock.baseline = "architecture-baseline-v1.0.2"; coverage.lock_sha256 = judgeLockSha256(coverage.lock); coverage.segments.forEach(segment => { segment.lock_sha256 = coverage.lock_sha256; }); }, /LOCK_MISMATCH \(baseline\)/],
-  ["réparation différente", coverage => { coverage.lock.repair = "coverage-repair.v0"; coverage.lock_sha256 = judgeLockSha256(coverage.lock); coverage.segments.forEach(segment => { segment.lock_sha256 = coverage.lock_sha256; }); }, /LOCK_MISMATCH \(repair\)/],
-  ["coordinateur différent", coverage => { coverage.lock.coordinator = "coverage-coordinator-policy.v0"; coverage.lock_sha256 = judgeLockSha256(coverage.lock); coverage.segments.forEach(segment => { segment.lock_sha256 = coverage.lock_sha256; }); }, /LOCK_MISMATCH \(coordinator\)/]
+  ["baseline différente", coverage => { coverage.lock.baseline = "architecture-baseline-v1.0.2"; coverage.lock_sha256 = lockSha256(coverage.lock); coverage.segments.forEach(segment => { segment.lock_sha256 = coverage.lock_sha256; }); }, /LOCK_MISMATCH \(baseline\)/],
+  ["réparation différente", coverage => { coverage.lock.repair = "coverage-repair.v0"; coverage.lock_sha256 = lockSha256(coverage.lock); coverage.segments.forEach(segment => { segment.lock_sha256 = coverage.lock_sha256; }); }, /LOCK_MISMATCH \(repair\)/],
+  ["coordinateur différent", coverage => { coverage.lock.coordinator = "coverage-coordinator-policy.v0"; coverage.lock_sha256 = lockSha256(coverage.lock); coverage.segments.forEach(segment => { segment.lock_sha256 = coverage.lock_sha256; }); }, /LOCK_MISMATCH \(coordinator\)/]
 ]) {
   await test(`orchestrateur — reprise refusée (${name}) : sortie ≠ 0, message qualifié, aucun fichier modifié, aucun réseau`, () => {
     restore();
@@ -491,7 +491,7 @@ async function isolated(replacements = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), "r28-11-mutant-"));
   tempDirs.push(root);
   let source = fs.readFileSync(path.join(ROOT, "src/utils/coverage-lock-persistence.js"), "utf8");
-  source = source.replace('"./coverage-judge-v2.js"', JSON.stringify(pathToFileURL(path.join(ROOT, "src/utils/coverage-judge-v2.js")).href));
+  source = source.replace('"./coverage-lock.js"', JSON.stringify(pathToFileURL(path.join(ROOT, "src/utils/coverage-lock.js")).href));
   for (const { from, to } of replacements) {
     if (source.split(from).length !== 2) throw new Error(`mutation non applicable : ${from.slice(0, 60)}`);
     source = source.replace(from, to);
@@ -509,7 +509,7 @@ function behaviourFailures(module) {
   };
   const run = (coverage, current = CURRENT) => module.checkPersistedCoverageLock({ coverage, currentLock: current });
   if (run(COVERAGE).status !== "OK") failures.push("nominal");
-  for (const key of JUDGE_LOCK_KEYS) {
+  for (const key of COVERAGE_LOCK_KEYS) {
     expectCode(`élément ${key} ignoré`, run(coverageWith(key, "x")), "LOCK_MISMATCH", key);
     expectCode(`élément courant ${key} ignoré`, run(COVERAGE, { ...CURRENT, [key]: "x" }), "LOCK_MISMATCH", key);
   }
@@ -542,13 +542,13 @@ function behaviourFailures(module) {
 }
 
 const MUTATIONS = [
-  ["comparaison des éléments supprimée", [{ from: "    const divergent = JUDGE_LOCK_KEYS.find(key => stored[key] !== currentLock[key]);", to: "    const divergent = undefined;" }]],
-  ["baseline exclue de la comparaison", [{ from: "    const divergent = JUDGE_LOCK_KEYS.find(key => stored[key] !== currentLock[key]);", to: "    const divergent = JUDGE_LOCK_KEYS.filter(key => key !== \"baseline\").find(key => stored[key] !== currentLock[key]);" }]],
-  ["repair exclu de la comparaison", [{ from: "    const divergent = JUDGE_LOCK_KEYS.find(key => stored[key] !== currentLock[key]);", to: "    const divergent = JUDGE_LOCK_KEYS.filter(key => key !== \"repair\").find(key => stored[key] !== currentLock[key]);" }]],
-  ["coordinator exclu de la comparaison", [{ from: "    const divergent = JUDGE_LOCK_KEYS.find(key => stored[key] !== currentLock[key]);", to: "    const divergent = JUDGE_LOCK_KEYS.filter(key => key !== \"coordinator\").find(key => stored[key] !== currentLock[key]);" }]],
+  ["comparaison des éléments supprimée", [{ from: "    const divergent = firstDifferingLockElement(stored, currentLock);", to: "    const divergent = undefined;" }]],
+  ["baseline exclue de la comparaison", [{ from: "    const divergent = firstDifferingLockElement(stored, currentLock);", to: "    const divergent = firstDifferingLockElement({ ...stored, baseline: currentLock.baseline }, currentLock);" }]],
+  ["repair exclu de la comparaison", [{ from: "    const divergent = firstDifferingLockElement(stored, currentLock);", to: "    const divergent = firstDifferingLockElement({ ...stored, repair: currentLock.repair }, currentLock);" }]],
+  ["coordinator exclu de la comparaison", [{ from: "    const divergent = firstDifferingLockElement(stored, currentLock);", to: "    const divergent = firstDifferingLockElement({ ...stored, coordinator: currentLock.coordinator }, currentLock);" }]],
   ["verrou absent accepté", [{ from: "    if (!isObject(coverage) || coverage.lock === undefined || coverage.lock === null) {\n      return refused(LOCK_REFUSAL.LOCK_MISSING, \"LOCK\", \"aucun verrou de couverture enregistré dans script.json\");\n    }", to: "    if (!isObject(coverage)) return refused(LOCK_REFUSAL.LOCK_MISSING, \"LOCK\", \"x\");\n    if (coverage.lock === undefined || coverage.lock === null) return outcome(LOCK_CHECK_STATUS.OK);" }]],
   ["forme du verrou non contrôlée", [{ from: "    const storedIssue = shapeIssue(stored);", to: "    const storedIssue = null;" }]],
-  ["empreinte enregistrée non vérifiée", [{ from: "    if (judgeLockSha256(stored) !== coverage.lock_sha256) {", to: "    if (false) {" }]],
+  ["empreinte enregistrée non vérifiée", [{ from: "    if (lockSha256(stored) !== coverage.lock_sha256) {", to: "    if (false) {" }]],
   ["empreintes de segments non vérifiées", [{ from: "    if (strayIndex !== -1) {", to: "    if (false) {" }]],
   ["verrou courant non vérifié", [{ from: "    if (currentIssue) return", to: "    if (false) return" }]],
   ["exception propagée", [{ from: "  } catch (error) {\n    return refused(LOCK_REFUSAL.LOCK_INVALID, \"UNEXPECTED\"", to: "  } catch (error) {\n    throw error;\n    return refused(LOCK_REFUSAL.LOCK_INVALID, \"UNEXPECTED\"" }]]

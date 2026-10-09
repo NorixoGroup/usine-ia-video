@@ -25,7 +25,7 @@ import {
   estimateCoverageBudget,
   evaluateCoverageBudget
 } from "../src/utils/coverage-budget-preflight.js";
-import { SCRIPT_COVERAGE_POLICY, buildCoverageLock, researchEntitiesOf } from "../src/utils/script-coverage-gate.js";
+import { SCRIPT_COVERAGE_POLICY, buildCoverageLock, researchEntitiesOf } from "../src/utils/coverage-lock-builder.js";
 import { coordinateCoverage } from "../src/utils/coverage-coordinator.js";
 
 const networkGuard = globalThis.__fixtureNetworkGuard;

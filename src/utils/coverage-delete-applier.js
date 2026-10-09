@@ -15,7 +15,7 @@
 //
 // Elle ne normalise, ne protège, ne classe, ne juge et ne génère rien. Elle
 // ne recalcule pas protocol_id et propage lock_sha256 après l'avoir vérifié
-// avec la fonction du juge (judgeLockSha256), sans autre algorithme. Seule
+// avec la fonction du verrou (lockSha256, coverage-lock.js), sans autre algorithme. Seule
 // l'empreinte du voiceover réparé est calculée, avec l'algorithme de la
 // frontière (SHA-256 hexadécimal du texte UTF-8).
 //
@@ -25,9 +25,8 @@
 
 import crypto from "node:crypto";
 
-import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION } from "./composite-coverage-boundary.js";
 import { COVERAGE_REPAIR_VERSION, REPAIR_STATUS } from "./coverage-repair.js";
-import { JUDGE_LOCK_KEYS, judgeLockSha256 } from "./coverage-judge-v2.js";
+import { BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION, invalidLockElements, lockSha256 } from "./coverage-lock.js";
 
 export const COVERAGE_DELETE_APPLIER_VERSION = "coverage-delete-applier.v1";
 
@@ -58,8 +57,6 @@ export const APPLY_REFUSAL = Object.freeze({
   EMPTY_RESULT: "EMPTY_RESULT"
 });
 
-// Verrou complet (section 8) : la définition du juge fait foi.
-const LOCK_KEYS = JUDGE_LOCK_KEYS;
 const WHITESPACE = new Set([" ", "\t", "\n", "\r", "\f", "\v", " ", " ", " ", " ", " ", " "]);
 
 const sha256 = value => crypto.createHash("sha256").update(value, "utf8").digest("hex");
@@ -87,7 +84,7 @@ function freezeAll(value) {
 
 function checkLock(lock) {
   if (!isObject(lock)) refuse(APPLY_REFUSAL.LOCK_MISSING);
-  if (LOCK_KEYS.some(key => typeof lock[key] !== "string" || lock[key] === "")) refuse(APPLY_REFUSAL.LOCK_INCOMPLETE);
+  if (invalidLockElements(lock).length > 0) refuse(APPLY_REFUSAL.LOCK_INCOMPLETE);
 }
 
 // Voiceover source reconstitué depuis les unités, contrôlé contre l'empreinte
@@ -125,7 +122,7 @@ function checkRepair(repair, boundary, lock) {
   }
   if (repair.baseline !== lock.baseline || lock.repair !== repair.repair_version) refuse(APPLY_REFUSAL.LOCK_MISMATCH);
   if (typeof repair.lock_sha256 !== "string" || repair.lock_sha256 === "") refuse(APPLY_REFUSAL.REPAIR_MALFORMED);
-  if (repair.lock_sha256 !== judgeLockSha256(lock)) refuse(APPLY_REFUSAL.LOCK_SHA_MISMATCH);
+  if (repair.lock_sha256 !== lockSha256(lock)) refuse(APPLY_REFUSAL.LOCK_SHA_MISMATCH);
   if (repair.protocol_id !== boundary.protocol_id) refuse(APPLY_REFUSAL.PROTOCOL_MISMATCH);
   if (repair.voiceover_sha256 !== boundary.voiceover_sha256) refuse(APPLY_REFUSAL.VOICEOVER_MISMATCH);
 }

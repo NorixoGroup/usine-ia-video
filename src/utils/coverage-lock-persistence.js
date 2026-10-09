@@ -1,5 +1,5 @@
 // R28.11 — contrôle du verrou de couverture persisté, à la reprise (baseline
-// v1.0.3, sections 7 et 8). Le verrou complet (11 éléments, JUDGE_LOCK_KEYS)
+// v1.0.3, sections 7 et 8). Le verrou complet (11 éléments, COVERAGE_LOCK_KEYS)
 // est enregistré dans les métadonnées Script (script.json,
 // claim_coverage_validation.lock) lors du premier passage ; à la reprise, il
 // est relu et comparé strictement au verrou courant.
@@ -18,7 +18,7 @@
 // empreinte (verrou, puis segments), puis comparaison élément par élément au
 // verrou courant, puis empreinte courante.
 
-import { JUDGE_LOCK_KEYS, judgeLockSha256 } from "./coverage-judge-v2.js";
+import { firstDifferingLockElement, invalidLockElements, isLockRecord, lockSha256, unexpectedLockElements } from "./coverage-lock.js";
 
 export const COVERAGE_LOCK_CHECK_VERSION = "coverage-lock-persistence.v1";
 
@@ -34,7 +34,6 @@ export const LOCK_REFUSAL = Object.freeze({
 const HEX64 = /^[0-9a-f]{64}$/;
 
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
-const validElement = value => typeof value === "string" && value !== "";
 
 const outcome = (status, code = null, category = null, detail = null) =>
   Object.freeze({ version: COVERAGE_LOCK_CHECK_VERSION, status, code, category, detail });
@@ -44,11 +43,10 @@ const refused = (code, category, detail) => outcome(LOCK_CHECK_STATUS.REFUSED, c
 // Première anomalie de forme d'un verrou : élément absent, vide ou non chaîne,
 // puis élément superflu. Renvoie [catégorie, détail] ou null.
 function shapeIssue(lock) {
-  if (!isObject(lock)) return ["LOCK", "verrou absent ou illisible"];
-  for (const key of JUDGE_LOCK_KEYS) {
-    if (!validElement(lock[key])) return [key, `élément ${key} absent ou invalide`];
-  }
-  const extra = Object.keys(lock).find(key => !JUDGE_LOCK_KEYS.includes(key));
+  if (!isLockRecord(lock)) return ["LOCK", "verrou absent ou illisible"];
+  const [invalid] = invalidLockElements(lock);
+  if (invalid !== undefined) return [invalid, `élément ${invalid} absent ou invalide`];
+  const [extra] = unexpectedLockElements(lock);
   if (extra !== undefined) return [extra, `élément ${extra} inconnu`];
   return null;
 }
@@ -75,7 +73,7 @@ export function checkPersistedCoverageLock(input) {
     const currentIssue = shapeIssue(currentLock);
     if (currentIssue) return refused(LOCK_REFUSAL.LOCK_INVALID, "CURRENT_LOCK", `verrou courant : ${currentIssue[1]}`);
 
-    if (judgeLockSha256(stored) !== coverage.lock_sha256) {
+    if (lockSha256(stored) !== coverage.lock_sha256) {
       return refused(LOCK_REFUSAL.LOCK_SHA_MISMATCH, "STORED_LOCK", "l'empreinte enregistrée ne correspond pas au verrou enregistré");
     }
     const strayIndex = coverage.segments.findIndex(segment => !isObject(segment) || segment.lock_sha256 !== coverage.lock_sha256);
@@ -83,11 +81,11 @@ export function checkPersistedCoverageLock(input) {
       return refused(LOCK_REFUSAL.LOCK_SHA_MISMATCH, "SEGMENT", `segments[${strayIndex}] : empreinte différente de celle du verrou`);
     }
 
-    const divergent = JUDGE_LOCK_KEYS.find(key => stored[key] !== currentLock[key]);
+    const divergent = firstDifferingLockElement(stored, currentLock);
     if (divergent !== undefined) {
       return refused(LOCK_REFUSAL.LOCK_MISMATCH, divergent, `élément ${divergent} : enregistré ${stored[divergent]}, courant ${currentLock[divergent]}`);
     }
-    if (judgeLockSha256(currentLock) !== coverage.lock_sha256) {
+    if (lockSha256(currentLock) !== coverage.lock_sha256) {
       return refused(LOCK_REFUSAL.LOCK_SHA_MISMATCH, "CURRENT_LOCK", "l'empreinte enregistrée diffère de celle du verrou courant");
     }
 

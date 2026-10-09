@@ -10,7 +10,7 @@
 // jusqu'à la convergence ou la limite de la politique. Il ne découpe, ne
 // normalise, ne protège, ne classe, ne juge, ne répare et ne réécrit rien ; il
 // ne calcule aucune empreinte : il propage celles des modules, et vérifie
-// lock_sha256 avec la fonction du juge (judgeLockSha256), sans autre algorithme. Il n'écrit
+// lock_sha256 avec la fonction du verrou (lockSha256, coverage-lock.js), sans autre algorithme. Il n'écrit
 // aucun checkpoint et ne déclenche aucune régénération (I24).
 //
 // Classement :
@@ -29,7 +29,8 @@
 // chacun de ses segments l'est (section 11), agrégation hors de ce module.
 
 import { composeCoverageBoundary } from "./composite-coverage-boundary.js";
-import { judgeLockSha256, judgeSegmentCoverageV2 } from "./coverage-judge-v2.js";
+import { judgeSegmentCoverageV2 } from "./coverage-judge-v2.js";
+import { lockMatchesPolicy, lockSha256 } from "./coverage-lock.js";
 import { executeJudgeRequest } from "./coverage-judge-executor.js";
 import { planCoverageRepair } from "./coverage-repair.js";
 import { applyCoverageDeletePlan } from "./coverage-delete-applier.js";
@@ -123,7 +124,7 @@ export async function coordinateCoverage({ segment, claims, lock, transport, pol
     }
     if (!validPolicy(policy)) return notPass(NOT_PASS_REASON.POLICY_INVALID);
     // Élément 10 du verrou : la politique du coordinateur.
-    if (!isObject(lock) || lock.coordinator !== policy.version) return notPass(NOT_PASS_REASON.LOCK_INVALID);
+    if (!lockMatchesPolicy(lock, policy)) return notPass(NOT_PASS_REASON.LOCK_INVALID);
 
     for (let round = 1; round <= policy.max_rounds; round += 1) {
       const entry = { round, voiceover_sha256: null, protocol_id: null, boundary: null, judgment: null, repair: null, delete: null };
@@ -171,7 +172,7 @@ export async function coordinateCoverage({ segment, claims, lock, transport, pol
         }
         if (state.calls >= policy.max_total_judge_calls) return notPass(NOT_PASS_REASON.JUDGE_BUDGET_EXHAUSTED, transportFailure);
       }
-      if (judgment.lock_sha256 !== judgeLockSha256(lock)) return notPass(NOT_PASS_REASON.LOCK_INVALID, "lock_sha256");
+      if (judgment.lock_sha256 !== lockSha256(lock)) return notPass(NOT_PASS_REASON.LOCK_INVALID, "lock_sha256");
       state.lockSha256 = judgment.lock_sha256;
 
       const repair = planCoverageRepair({ boundary, judgment, lock });

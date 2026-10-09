@@ -26,11 +26,11 @@ import crypto from "node:crypto";
 import {
   buildCoverageLock,
   researchEntitiesOf
-} from "../src/utils/script-coverage-gate.js";
+} from "../src/utils/coverage-lock-builder.js";
 import {
   boundaryProtocolIdFromLock,
-  judgeLockSha256
-} from "../src/utils/coverage-judge-v2.js";
+  lockSha256 as lockShaOf
+} from "../src/utils/coverage-lock.js";
 import { runAssetAgent } from "../src/agents/asset.js";
 import { runVoiceAgent } from "../src/agents/voice.js";
 import { runAssemblyAgent } from "../src/agents/assembly.js";
@@ -298,7 +298,7 @@ function buildScriptEnvelope(mode) {
   const lock = buildCoverageLock({
     entities: researchEntitiesOf(buildResearch())
   });
-  const lockSha256 = judgeLockSha256(lock);
+  const lockSha256 = lockShaOf(lock);
   const protocolId = boundaryProtocolIdFromLock(lock);
 
   data.sections.forEach(section => {

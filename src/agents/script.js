@@ -32,10 +32,12 @@ import {
 } from "../services/call-guard.js";
 
 import {
-  buildCoverageLock,
-  researchEntitiesOf,
   runScriptCoverageGate
 } from "../utils/script-coverage-gate.js";
+
+import {
+  currentCoverageLock
+} from "../utils/coverage-lock-builder.js";
 
 const SYSTEM_PROMPT = `
 Tu es le Script Agent de la chaîne YouTube
@@ -644,7 +646,7 @@ async function validateGeneratedScript(data, research, options = {}) {
     lock_sha256: coverage.lock_sha256,
     // R28.11 : verrou complet (11 éléments), enregistré au premier passage et
     // contrôlé à la reprise (assertReusedScriptLock).
-    lock: { ...buildCoverageLock({ entities: researchEntitiesOf(research) }) },
+    lock: { ...currentCoverageLock(research) },
     segments: coverage.segments.map(segment => ({ ...segment }))
   };
 

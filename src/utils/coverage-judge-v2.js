@@ -34,10 +34,10 @@
 import crypto from "node:crypto";
 
 import { extractText } from "../services/anthropic.js";
+import { ARCHITECTURE_BASELINE_VERSION, BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION, boundaryProtocolIdFromLock, invalidLockElements, lockSha256 } from "./coverage-lock.js";
 
 export const COVERAGE_JUDGE_V2_PROTOCOL = "coverage-judge.v2-unit-ids";
 export const COVERAGE_JUDGE_V2_RULES_VERSION = "coverage-judge.v2";
-export const ARCHITECTURE_BASELINE_VERSION = "architecture-baseline-v1.0.3";
 
 export const JUDGE_STATUS = Object.freeze({
   JUDGED: "JUDGED",
@@ -52,24 +52,6 @@ export const JUDGE_FAILURE = Object.freeze({
 });
 
 export const JUDGE_VERDICT = Object.freeze({ COVERED: "COVERED", UNCOVERED: "UNCOVERED" });
-
-// Verrou complet (section 8, éléments 1 à 12, dans leur ordre) : frontière
-// (1 à 6), juge (7 et 8 : prompt, format et bornes), réparation (9),
-// politique du coordinateur (10), langue (11), baseline (12). lock_sha256 est
-// calculé sur ces seuls éléments.
-export const JUDGE_LOCK_KEYS = Object.freeze([
-  "splitter",
-  "normalization",
-  "protection",
-  "entities_rule_version",
-  "entities_fingerprint",
-  "classification",
-  "judge",
-  "repair",
-  "coordinator",
-  "language",
-  "baseline"
-]);
 
 // Bornes (section 8, élément 8), fixées avant tout appel. Sortie dans le pire
 // cas : chaque unité désignée non couverte avec DECLARE et un claim_id.
@@ -127,12 +109,6 @@ const HEX64 = /^[0-9a-f]{64}$/;
 const SEGMENT_ID = /^s[1-9][0-9]*-g[1-9][0-9]*$/;
 const REQUEST_HEADER = "SEGMENT A AUDITER :\n\n";
 
-function stableJson(value) {
-  if (value === null || typeof value !== "object") return JSON.stringify(value ?? null);
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  return `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(",")}}`;
-}
-
 // Version (section 8, éléments 7 et 8) : empreinte du prompt, du format et
 // des bornes.
 export const COVERAGE_JUDGE_V2_VERSION =
@@ -144,30 +120,6 @@ export const COVERAGE_JUDGE_V2_VERSION =
 
 export function coverageJudgeV2Version() {
   return COVERAGE_JUDGE_V2_VERSION;
-}
-
-// Version de la frontière composée dont le juge consomme la sortie (R28.5).
-export const EXPECTED_BOUNDARY_VERSION = "composite-coverage-boundary.v1";
-
-// R28.6A — protocol_id attendu, dérivé du verrou validé avec le même
-// algorithme que la frontière composée (I10) : SHA-256 du JSON stable de ses
-// versions et de l'empreinte des entités.
-export function boundaryProtocolIdFromLock(lock) {
-  const versions = {
-    composite: EXPECTED_BOUNDARY_VERSION,
-    splitter: lock?.splitter ?? null,
-    normalization: lock?.normalization ?? null,
-    protection: lock?.protection ?? null,
-    classification: lock?.classification ?? null,
-    entities_rule_version: lock?.entities_rule_version ?? null,
-    language: lock?.language ?? null
-  };
-  return sha256(stableJson({ versions, entities_fingerprint: lock?.entities_fingerprint ?? null }));
-}
-
-// Empreinte du verrou complet (éléments JUDGE_LOCK_KEYS uniquement).
-export function judgeLockSha256(lock) {
-  return sha256(stableJson(Object.fromEntries(JUDGE_LOCK_KEYS.map(key => [key, lock?.[key] ?? null]))));
 }
 
 function freezeDeep(value) {
@@ -206,7 +158,7 @@ function inputIssue({ boundary, lock, claims, segmentId, send }) {
   if (typeof send !== "function") return "composant absent : transport";
   if (!SEGMENT_ID.test(segmentId ?? "")) return "segment_id invalide";
   if (!lock || typeof lock !== "object") return "verrou absent";
-  const missing = JUDGE_LOCK_KEYS.filter(key => typeof lock[key] !== "string" || lock[key] === "");
+  const missing = invalidLockElements(lock);
   if (missing.length > 0) return `verrou incomplet : ${missing.join(", ")}`;
   if (lock.judge !== COVERAGE_JUDGE_V2_VERSION) return "version divergente : judge";
   if (lock.baseline !== ARCHITECTURE_BASELINE_VERSION) return "version divergente : baseline";
@@ -214,7 +166,7 @@ function inputIssue({ boundary, lock, claims, segmentId, send }) {
   if (!boundary || typeof boundary !== "object") return "composant absent : frontière";
   if (boundary.status === "FAILED") return `frontière en échec (${boundary.reason ?? "sans raison"})`;
   if (!HEX64.test(boundary.protocol_id ?? "")) return "protocol_id absent ou invalide";
-  if (boundary.version !== EXPECTED_BOUNDARY_VERSION || boundary.versions?.composite !== EXPECTED_BOUNDARY_VERSION) {
+  if (boundary.version !== COMPOSITE_COVERAGE_BOUNDARY_VERSION || boundary.versions?.composite !== COMPOSITE_COVERAGE_BOUNDARY_VERSION) {
     return "version divergente : composite";
   }
 
@@ -225,7 +177,7 @@ function inputIssue({ boundary, lock, claims, segmentId, send }) {
   if (!Array.isArray(boundary.lock_divergences) || boundary.lock_divergences.length > 0) {
     return `incohérence de verrou dans la frontière : ${(boundary.lock_divergences ?? []).map(item => item.element).join(", ") || "divergences illisibles"}`;
   }
-  for (const key of BOUNDARY_LOCK_ECHO) {
+  for (const key of BOUNDARY_LOCK_KEYS) {
     if (boundary.lock?.[key] !== lock[key]) return `incohérence de verrou dans la frontière : ${key}`;
   }
   const fingerprints = boundary.fingerprints ?? {};
@@ -264,11 +216,6 @@ function inputIssue({ boundary, lock, claims, segmentId, send }) {
   // Le nombre de claims est une borne : son dépassement est OUT_OF_BOUNDS.
   return null;
 }
-
-// Éléments du verrou que la frontière recopie dans sa sortie (R28.5).
-const BOUNDARY_LOCK_ECHO = Object.freeze([
-  "splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint", "classification", "language"
-]);
 
 function buildRequest({ boundary, claims, segmentId, lockSha256 }) {
   const units = boundary.units.map(item => item.unit);
@@ -369,7 +316,7 @@ export function validateJudgeV2Response(data, { protocolId, voiceoverSha256, loc
   return { results: designated.map(id => byId.get(id)) };
 }
 
-// Juge un segment. `lock` : verrou complet (JUDGE_LOCK_KEYS) ; `send` :
+// Juge un segment. `lock` : verrou complet (COVERAGE_LOCK_KEYS) ; `send` :
 // transport obligatoire, fourni par l'exécuteur (createMessage en
 // production, transport simulé dans les tests). Sans transport : refus.
 export async function judgeSegmentCoverageV2({ boundary, lock, claims, segmentId, send }) {
@@ -380,7 +327,7 @@ export async function judgeSegmentCoverageV2({ boundary, lock, claims, segmentId
 
   context.protocolId = boundary.protocol_id;
   context.voiceoverSha256 = boundary.voiceover_sha256;
-  context.lockSha256 = judgeLockSha256(lock);
+  context.lockSha256 = lockSha256(lock);
 
   const request = buildRequest({ boundary, claims, segmentId, lockSha256: context.lockSha256 });
   context.designated = request.designated;

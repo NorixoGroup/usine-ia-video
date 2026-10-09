@@ -11,9 +11,8 @@ import {
 } from "../agents/script.js";
 
 import {
-  buildCoverageLock,
-  researchEntitiesOf
-} from "../utils/script-coverage-gate.js";
+  currentCoverageLock
+} from "../utils/coverage-lock-builder.js";
 
 import {
   buildTruthReport,
@@ -793,7 +792,7 @@ if (researchScriptMode) {
       assertReusedScriptLock({
         productionDir,
         production,
-        buildLock: research => buildCoverageLock({ entities: researchEntitiesOf(research) })
+        buildLock: research => currentCoverageLock(research)
       });
     }
   }

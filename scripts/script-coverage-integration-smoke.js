@@ -20,15 +20,14 @@ import { deepStrictEqual } from "node:assert/strict";
 
 import {
   SCRIPT_COVERAGE_GATE_VERSION,
-  SCRIPT_COVERAGE_POLICY,
   SCRIPT_COVERAGE_STATUS,
-  buildCoverageLock,
-  researchEntitiesOf,
   runScriptCoverageGate
 } from "../src/utils/script-coverage-gate.js";
+import { SCRIPT_COVERAGE_POLICY, buildCoverageLock, researchEntitiesOf } from "../src/utils/coverage-lock-builder.js";
 import { coordinateCoverage } from "../src/utils/coverage-coordinator.js";
 import { discardRejectedJudgeResponses } from "../src/utils/coverage-judge-executor.js";
-import { ARCHITECTURE_BASELINE_VERSION, boundaryProtocolIdFromLock, coverageJudgeV2Version, judgeLockSha256 } from "../src/utils/coverage-judge-v2.js";
+import { coverageJudgeV2Version } from "../src/utils/coverage-judge-v2.js";
+import { ARCHITECTURE_BASELINE_VERSION, boundaryProtocolIdFromLock, lockSha256 } from "../src/utils/coverage-lock.js";
 import { coverageUnitSplitterVersion, splitCoverageUnits } from "../src/utils/coverage-unit-splitter.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageClassificationVersion } from "../src/utils/coverage-classification.js";
@@ -221,8 +220,8 @@ await test("verrou propagé : le même verrou complet à chaque segment", () => 
 });
 
 await test("verrou propagé : lock_sha256 des segments et du Script = empreinte du verrou complet", () => {
-  for (const segment of NOMINAL.result.segments) deepStrictEqual(segment.lock_sha256, judgeLockSha256(LOCK));
-  deepStrictEqual(NOMINAL.result.lock_sha256, judgeLockSha256(LOCK));
+  for (const segment of NOMINAL.result.segments) deepStrictEqual(segment.lock_sha256, lockSha256(LOCK));
+  deepStrictEqual(NOMINAL.result.lock_sha256, lockSha256(LOCK));
 });
 
 await test("protocole propagé : protocol_id des segments et du Script", () => {
@@ -359,7 +358,7 @@ for (const [name, segment] of [
     const script = { sections: [{ segments: [segment, segmentOf(S.a)] }] };
     const { result, calls, coordinatorCalls } = await gate({ script });
     deepStrictEqual([result.status, result.failure.segment_id, calls.length, coordinatorCalls.length, result.final_voiceovers.length], ["NOT_PASS", "s1-g1", 0, 1, 0]);
-    deepStrictEqual([result.lock_sha256, result.protocol_id], [judgeLockSha256(LOCK), boundaryProtocolIdFromLock(LOCK)]);
+    deepStrictEqual([result.lock_sha256, result.protocol_id], [lockSha256(LOCK), boundaryProtocolIdFromLock(LOCK)]);
   });
 }
 
@@ -525,7 +524,7 @@ await test("NOT_PASS : checkpoint du segment en échec complet (statut, verrou, 
 });
 
 await test("NOT_PASS : verrou et protocole du Script conservés", () => {
-  deepStrictEqual([DECLARED.result.lock_sha256, DECLARED.result.protocol_id], [judgeLockSha256(LOCK), boundaryProtocolIdFromLock(LOCK)]);
+  deepStrictEqual([DECLARED.result.lock_sha256, DECLARED.result.protocol_id], [lockSha256(LOCK), boundaryProtocolIdFromLock(LOCK)]);
 });
 
 // Branchement dans le pipeline Script (script.js).
@@ -630,13 +629,9 @@ await test("imports de la porte : composants de couverture (versions, coordinate
     '"../services/anthropic.js";',
     '"../services/call-guard.js";',
     '"./coverage-budget-preflight.js";',
-    '"./coverage-normalization.js";',
-    '"./coverage-unit-splitter.js";',
-    '"./coverage-protection.js";',
-    '"./coverage-classification.js";',
-    '"./coverage-judge-v2.js";',
+    '"./coverage-lock.js";',
+    '"./coverage-lock-builder.js";',
     '"./coverage-judge-executor.js";',
-    '"./coverage-repair.js";',
     '"./coverage-coordinator.js";'
   ]);
   const code = source.split("\n").filter(line => !line.trim().startsWith("//")).join("\n");
@@ -651,7 +646,7 @@ await test("imports de la porte : composants de couverture (versions, coordinate
 async function isolatedGate(prefix, replacements = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   let source = fs.readFileSync(new URL("../src/utils/script-coverage-gate.js", import.meta.url), "utf8");
-  for (const relative of ["../services/anthropic.js", "../services/call-guard.js", "./coverage-budget-preflight.js", "./coverage-normalization.js", "./coverage-unit-splitter.js", "./coverage-protection.js", "./coverage-classification.js", "./coverage-judge-v2.js", "./coverage-judge-executor.js", "./coverage-repair.js", "./coverage-coordinator.js"]) {
+  for (const relative of ["../services/anthropic.js", "../services/call-guard.js", "./coverage-budget-preflight.js", "./coverage-lock.js", "./coverage-lock-builder.js", "./coverage-judge-executor.js", "./coverage-coordinator.js"]) {
     source = source.replace(`"${relative}"`, JSON.stringify(pathToFileURL(new URL(relative.startsWith("../") ? `../src/${relative.slice(3)}` : `../src/utils/${relative.slice(2)}`, import.meta.url).pathname).href));
   }
   for (const { from, to } of replacements) {
@@ -691,7 +686,7 @@ async function behaviourFailures(module) {
   check("un coordinateur par segment", nominal.coordinatorCalls, 3);
   check("checkpoint complet", nominal.result.segments?.map(segment => [segment.status, HEX64.test(segment.lock_sha256 ?? ""), HEX64.test(segment.protocol_id ?? ""), segment.rounds]), [["PASS", true, true, 1], ["PASS", true, true, 1], ["PASS", true, true, 1]]);
   check("protocole conservé", nominal.result.protocol_id, boundaryProtocolIdFromLock(LOCK));
-  check("verrou conservé", nominal.result.lock_sha256, judgeLockSha256(LOCK));
+  check("verrou conservé", nominal.result.lock_sha256, lockSha256(LOCK));
   const declared = await run(MODELS.declare);
   check("NOT_PASS conservé", [declared.result.status, declared.coordinatorCalls], ["NOT_PASS", 2]);
   const retried = await run(MODELS.allCovered, { transportOptions: { fail: n => (n === 1 ? "throw" : null) } });

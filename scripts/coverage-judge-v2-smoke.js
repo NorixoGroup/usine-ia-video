@@ -18,19 +18,21 @@ import { pathToFileURL } from "node:url";
 import { deepStrictEqual, notEqual } from "node:assert/strict";
 
 import {
-  ARCHITECTURE_BASELINE_VERSION,
   COVERAGE_JUDGE_V2_PROTOCOL,
-  EXPECTED_BOUNDARY_VERSION,
-  boundaryProtocolIdFromLock,
   COVERAGE_JUDGE_V2_RULES_VERSION,
   JUDGE_BOUNDS,
   JUDGE_FAILURE,
-  JUDGE_LOCK_KEYS,
   JUDGE_STATUS,
   coverageJudgeV2Version,
-  judgeLockSha256,
   judgeSegmentCoverageV2
 } from "../src/utils/coverage-judge-v2.js";
+import {
+  ARCHITECTURE_BASELINE_VERSION,
+  COMPOSITE_COVERAGE_BOUNDARY_VERSION,
+  COVERAGE_LOCK_KEYS,
+  boundaryProtocolIdFromLock,
+  lockSha256
+} from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageUnitSplitterVersion } from "../src/utils/coverage-unit-splitter.js";
@@ -143,7 +145,7 @@ await test("constantes publiques : protocole, version, verrou, bornes, statuts",
   deepStrictEqual(COVERAGE_JUDGE_V2_RULES_VERSION, "coverage-judge.v2");
   deepStrictEqual(ARCHITECTURE_BASELINE_VERSION, "architecture-baseline-v1.0.3");
   deepStrictEqual(coverageJudgeV2Version(), V2);
-  deepStrictEqual([...JUDGE_LOCK_KEYS], [
+  deepStrictEqual([...COVERAGE_LOCK_KEYS], [
     "splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint",
     "classification", "judge", "repair", "coordinator", "language", "baseline"
   ]);
@@ -167,18 +169,18 @@ await test("fonctionnement nominal : exemple de la baseline, u4 non couverte (DE
   ]);
   deepStrictEqual(
     [result.protocol_id, result.voiceover_sha256, result.lock_sha256, result.segment_id, result.version],
-    [BOUNDARY.protocol_id, sha256(BASELINE_VOICEOVER), judgeLockSha256(LOCK), "s2-g4", V2]
+    [BOUNDARY.protocol_id, sha256(BASELINE_VOICEOVER), lockSha256(LOCK), "s2-g4", V2]
   );
   deepStrictEqual(result.request_sha256, sha256(JSON.stringify(transport.calls[0])));
 });
 
 await test("liaison au verrou complet : lock_sha256 couvre chaque élément du verrou", () => {
-  const base = judgeLockSha256(LOCK);
+  const base = lockSha256(LOCK);
   if (!/^[0-9a-f]{64}$/.test(base)) throw new Error("format");
-  for (const key of JUDGE_LOCK_KEYS) {
-    if (judgeLockSha256({ ...LOCK, [key]: `${LOCK[key]}x` }) === base) throw new Error(`élément non couvert : ${key}`);
+  for (const key of COVERAGE_LOCK_KEYS) {
+    if (lockSha256({ ...LOCK, [key]: `${LOCK[key]}x` }) === base) throw new Error(`élément non couvert : ${key}`);
   }
-  deepStrictEqual(judgeLockSha256({ ...LOCK, extra: "ignoré" }), base);
+  deepStrictEqual(lockSha256({ ...LOCK, extra: "ignoré" }), base);
 });
 
 await test("requête : un seul appel (I23), voiceover exact une seule fois (I8), unités sans position ni texte", async () => {
@@ -196,7 +198,7 @@ await test("requête : un seul appel (I23), voiceover exact une seule fois (I8),
     { unit_id: "u3", type: "phrase" }, { unit_id: "u4", type: "phrase" }
   ]);
   deepStrictEqual(plain(payload.claims), [{ claim_id: "s2-g4-c1", text: BASELINE_CLAIMS[0].text }]);
-  deepStrictEqual(payload.lock_sha256, judgeLockSha256(LOCK));
+  deepStrictEqual(payload.lock_sha256, lockSha256(LOCK));
 });
 
 await test("propagation exacte des unit_id et désignation (I22) : unités exclues jamais désignées", async () => {
@@ -298,7 +300,7 @@ await test("composants absents : transport ou frontière → refus explicite", a
 
 await test("verrou absent ou incomplet (dont version du juge absente) → refus explicite", async () => {
   await expectRefused({ lock: null }, "verrou absent");
-  for (const key of JUDGE_LOCK_KEYS) {
+  for (const key of COVERAGE_LOCK_KEYS) {
     const { [key]: _removed, ...partial } = LOCK;
     await expectRefused({ lock: partial }, `verrou incomplet : ${key}`);
     await expectRefused({ lock: { ...LOCK, [key]: "" } }, `verrou incomplet : ${key}`);
@@ -381,7 +383,8 @@ await test("aucun appel réseau, aucune gestion du cache, aucun recalcul, aucun 
   const source = fs.readFileSync(new URL("../src/utils/coverage-judge-v2.js", import.meta.url), "utf8");
   deepStrictEqual(source.split("\n").filter(line => line.startsWith("import ")), [
     'import crypto from "node:crypto";',
-    'import { extractText } from "../services/anthropic.js";'
+    'import { extractText } from "../services/anthropic.js";',
+    'import { ARCHITECTURE_BASELINE_VERSION, BOUNDARY_LOCK_KEYS, COMPOSITE_COVERAGE_BOUNDARY_VERSION, boundaryProtocolIdFromLock, invalidLockElements, lockSha256 } from "./coverage-lock.js";'
   ]);
   const code = source.split("\n").filter(line => !line.trim().startsWith("//")).join("\n");
   for (const forbidden of ["discardCachedResponse", "call-guard", "splitCoverageUnits", "normalizeCoverageText", "protectCoverageUnit", "classifyCoverageUnit", "composeCoverageBoundary", "fetch(", "http"]) {
@@ -415,7 +418,7 @@ async function expectProtocolRefused(protocolId, reasonPrefix) {
 }
 
 await test("protocol_id correct : recalcul depuis le verrou identique à celui de la frontière (même algorithme)", async () => {
-  deepStrictEqual(EXPECTED_BOUNDARY_VERSION, "composite-coverage-boundary.v1");
+  deepStrictEqual(COMPOSITE_COVERAGE_BOUNDARY_VERSION, "composite-coverage-boundary.v1");
   deepStrictEqual(boundaryProtocolIdFromLock(LOCK), BOUNDARY.protocol_id);
   const sydney = extractResearchEntities({ keyFacts: ["La ville de Sydney grandit."], ruleVersion: "research-entities.v1" });
   const sydneyLock = { ...BOUNDARY_LOCK, entities_fingerprint: sydney.fingerprint };
@@ -461,7 +464,7 @@ await test("protocol_id d'une autre frontière : refusé si son verrou diffère 
 });
 
 await test("protocol_id valide syntaxiquement mais incohérent → refusé", async () => {
-  for (const protocolId of [sha256("autre chose"), BOUNDARY.voiceover_sha256, judgeLockSha256(LOCK), BOUNDARY.protocol_id.toUpperCase()]) {
+  for (const protocolId of [sha256("autre chose"), BOUNDARY.voiceover_sha256, lockSha256(LOCK), BOUNDARY.protocol_id.toUpperCase()]) {
     await expectProtocolRefused(protocolId, protocolId === BOUNDARY.protocol_id.toUpperCase() ? "protocol_id absent ou invalide" : "protocol_id divergent");
   }
 });
@@ -478,10 +481,10 @@ const stable = value => (value === null || typeof value !== "object")
   : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
 
 await test("R28.9A — empreinte du verrou : SHA-256 du JSON stable des 11 champs, recalculée indépendamment", () => {
-  const expected = sha256(stable(Object.fromEntries(JUDGE_LOCK_KEYS.map(key => [key, LOCK[key]]))));
-  deepStrictEqual(judgeLockSha256(LOCK), expected);
-  deepStrictEqual(JUDGE_LOCK_KEYS.length, 11);
-  if (judgeLockSha256(LOCK) === judgeLockSha256(OLD_LOCK)) throw new Error("ancien verrou indiscernable");
+  const expected = sha256(stable(Object.fromEntries(COVERAGE_LOCK_KEYS.map(key => [key, LOCK[key]]))));
+  deepStrictEqual(lockSha256(LOCK), expected);
+  deepStrictEqual(COVERAGE_LOCK_KEYS.length, 11);
+  if (lockSha256(LOCK) === lockSha256(OLD_LOCK)) throw new Error("ancien verrou indiscernable");
 });
 
 await test("R28.9A — réparation absente du verrou → refus explicite", async () => {
@@ -496,15 +499,15 @@ await test("R28.9A — coordinateur absent du verrou → refus explicite", async
 
 await test("R28.9A — version de réparation ou de coordinateur modifiée : lock_sha256 change", () => {
   for (const key of ["repair", "coordinator"]) {
-    if (judgeLockSha256({ ...LOCK, [key]: `${LOCK[key]}x` }) === judgeLockSha256(LOCK)) throw new Error(`élément ${key} non couvert`);
+    if (lockSha256({ ...LOCK, [key]: `${LOCK[key]}x` }) === lockSha256(LOCK)) throw new Error(`élément ${key} non couvert`);
   }
 });
 
 await test("R28.9A — version de réparation modifiée : jugement lié au nouveau verrou, pas à l'ancien", async () => {
   const modified = { ...LOCK, repair: "coverage-repair.v2" };
   const result = await judge({ lock: modified });
-  deepStrictEqual([result.status, result.lock_sha256], ["JUDGED", judgeLockSha256(modified)]);
-  if (result.lock_sha256 === judgeLockSha256(LOCK)) throw new Error("lock_sha256 inchangé");
+  deepStrictEqual([result.status, result.lock_sha256], ["JUDGED", lockSha256(modified)]);
+  if (result.lock_sha256 === lockSha256(LOCK)) throw new Error("lock_sha256 inchangé");
 });
 
 await test("R28.9A — protocol_id inchangé : il ne dépend que du protocole de frontière", () => {
@@ -518,7 +521,7 @@ await test("R28.9A — rejeu avec l'ancien verrou (9 champs) refusé", async () 
 
 await test("R28.9A — rejeu avec le verrou complet accepté, empreinte du verrou complet", async () => {
   const result = await judge();
-  deepStrictEqual([result.status, result.lock_sha256, result.protocol_id], ["JUDGED", judgeLockSha256(LOCK), BOUNDARY.protocol_id]);
+  deepStrictEqual([result.status, result.lock_sha256, result.protocol_id], ["JUDGED", lockSha256(LOCK), BOUNDARY.protocol_id]);
 });
 
 // Copie isolée hors dépôt du juge, avec une mutation textuelle facultative.
@@ -526,13 +529,18 @@ await test("R28.9A — rejeu avec le verrou complet accepté, empreinte du verro
 // n'est jamais appelé : le transport est toujours simulé.
 async function isolatedJudge(prefix, mutation = null) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
-  let source = fs.readFileSync(new URL("../src/utils/coverage-judge-v2.js", import.meta.url), "utf8")
-    .replace('"../services/anthropic.js"', JSON.stringify(pathToFileURL(new URL("../src/services/anthropic.js", import.meta.url).pathname).href));
+  const sources = {
+    "coverage-judge-v2.js": fs.readFileSync(new URL("../src/utils/coverage-judge-v2.js", import.meta.url), "utf8")
+      .replace('"../services/anthropic.js"', JSON.stringify(pathToFileURL(new URL("../src/services/anthropic.js", import.meta.url).pathname).href)),
+    // R29.4 : le verrou est défini dans coverage-lock.js, copié à côté du juge.
+    "coverage-lock.js": fs.readFileSync(new URL("../src/utils/coverage-lock.js", import.meta.url), "utf8")
+  };
   if (mutation) {
-    if (source.split(mutation.from).length !== 2) throw new Error(`mutation non applicable : ${mutation.from}`);
-    source = source.replace(mutation.from, mutation.to);
+    const target = mutation.target ?? "coverage-judge-v2.js";
+    if (sources[target].split(mutation.from).length !== 2) throw new Error(`mutation non applicable : ${mutation.from}`);
+    sources[target] = sources[target].replace(mutation.from, mutation.to);
   }
-  fs.writeFileSync(path.join(root, "coverage-judge-v2.js"), source);
+  for (const [name, source] of Object.entries(sources)) fs.writeFileSync(path.join(root, name), source);
   const module = await import(pathToFileURL(path.join(root, "coverage-judge-v2.js")).href);
   return { root, module };
 }
@@ -597,11 +605,11 @@ const MUTATIONS = [
   ["désignation non vérifiée", { from: 'if (!sameJson(designated, expected)) return "analysed_unit_ids incomplets ou désordonnés";', to: "" }],
   ["composant absent accepté", { from: 'if (typeof send !== "function") return "composant absent : transport";', to: "" }],
   ["bornes non vérifiées", { from: "if (outOfBounds) return", to: "if (false) return" }],
-  ["réparation hors du verrou", { from: '  "repair",\n', to: "" }],
-  ["coordinateur hors du verrou", { from: '  "coordinator",\n', to: "" }],
+  ["réparation hors du verrou", { target: "coverage-lock.js", from: '  "repair",\n', to: "" }],
+  ["coordinateur hors du verrou", { target: "coverage-lock.js", from: '  "coordinator",\n', to: "" }],
   ["protocol_id non recalculé", { from: "if (boundary.protocol_id !== expectedProtocolId) {", to: "if (false) {" }],
-  ["algorithme du protocol_id altéré", { from: "composite: EXPECTED_BOUNDARY_VERSION,", to: "" }],
-  ["version composite non vérifiée", { from: "if (boundary.version !== EXPECTED_BOUNDARY_VERSION || boundary.versions?.composite !== EXPECTED_BOUNDARY_VERSION) {", to: "if (false) {" }]
+  ["algorithme du protocol_id altéré", { target: "coverage-lock.js", from: "composite: COMPOSITE_COVERAGE_BOUNDARY_VERSION,", to: "" }],
+  ["version composite non vérifiée", { from: "if (boundary.version !== COMPOSITE_COVERAGE_BOUNDARY_VERSION || boundary.versions?.composite !== COMPOSITE_COVERAGE_BOUNDARY_VERSION) {", to: "if (false) {" }]
 ];
 
 await test("mutations : témoin valide, chaque mutant détecté (copies hors dépôt, transport simulé)", async () => {

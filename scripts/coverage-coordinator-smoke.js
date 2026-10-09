@@ -23,7 +23,8 @@ import {
   NOT_PASS_REASON,
   coordinateCoverage
 } from "../src/utils/coverage-coordinator.js";
-import { boundaryProtocolIdFromLock, coverageJudgeV2Version, judgeLockSha256 } from "../src/utils/coverage-judge-v2.js";
+import { coverageJudgeV2Version } from "../src/utils/coverage-judge-v2.js";
+import { boundaryProtocolIdFromLock, lockSha256 } from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageUnitSplitterVersion } from "../src/utils/coverage-unit-splitter.js";
@@ -174,7 +175,7 @@ await test("classement PASS : aucune raison, aucune catégorie, aucune unité", 
 await test("traçabilité : protocol_id, lock_sha256, baseline, politique", () => {
   deepStrictEqual(
     [IMMEDIATE.protocol_id, IMMEDIATE.lock_sha256, IMMEDIATE.baseline, IMMEDIATE.policy_version],
-    [IMMEDIATE.history[0].boundary.protocol_id, judgeLockSha256(LOCK), "architecture-baseline-v1.0.3", POLICY.version]
+    [IMMEDIATE.history[0].boundary.protocol_id, lockSha256(LOCK), "architecture-baseline-v1.0.3", POLICY.version]
   );
 });
 
@@ -429,7 +430,8 @@ await test("aucune régénération ni écriture : imports limités aux cinq modu
   const source = fs.readFileSync(new URL("../src/utils/coverage-coordinator.js", import.meta.url), "utf8");
   deepStrictEqual(source.split("\n").filter(line => line.startsWith("import ")), [
     'import { composeCoverageBoundary } from "./composite-coverage-boundary.js";',
-    'import { judgeLockSha256, judgeSegmentCoverageV2 } from "./coverage-judge-v2.js";',
+    'import { judgeSegmentCoverageV2 } from "./coverage-judge-v2.js";',
+    'import { lockMatchesPolicy, lockSha256 } from "./coverage-lock.js";',
     'import { executeJudgeRequest } from "./coverage-judge-executor.js";',
     'import { planCoverageRepair } from "./coverage-repair.js";',
     'import { applyCoverageDeletePlan } from "./coverage-delete-applier.js";'
@@ -522,7 +524,7 @@ await test("historique déterministe sur chaque scénario", async () => {
 function isolatedCoordinator(prefix, { replacements = [], stubs = {} } = {}) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   let source = fs.readFileSync(new URL("../src/utils/coverage-coordinator.js", import.meta.url), "utf8");
-  for (const name of ["composite-coverage-boundary.js", "coverage-judge-v2.js", "coverage-judge-executor.js", "coverage-repair.js", "coverage-delete-applier.js"]) {
+  for (const name of ["composite-coverage-boundary.js", "coverage-judge-v2.js", "coverage-judge-executor.js", "coverage-repair.js", "coverage-delete-applier.js", "coverage-lock.js"]) {
     const real = pathToFileURL(new URL(`../src/utils/${name}`, import.meta.url).pathname).href;
     let target = real;
     if (stubs[name]) {
@@ -620,8 +622,8 @@ await test("R28.9A — version du coordinateur absente ou modifiée → NOT_PASS
 });
 
 await test("R28.9A — lock_sha256 propagé = empreinte du verrou complet, protocol_id inchangé", () => {
-  deepStrictEqual([IMMEDIATE.lock_sha256, IMMEDIATE.protocol_id], [judgeLockSha256(LOCK), boundaryProtocolIdFromLock(OLD_LOCK)]);
-  if (judgeLockSha256(LOCK) === judgeLockSha256(OLD_LOCK)) throw new Error("empreinte inchangée");
+  deepStrictEqual([IMMEDIATE.lock_sha256, IMMEDIATE.protocol_id], [lockSha256(LOCK), boundaryProtocolIdFromLock(OLD_LOCK)]);
+  if (lockSha256(LOCK) === lockSha256(OLD_LOCK)) throw new Error("empreinte inchangée");
 });
 
 await test("R28.9A — rejeu avec l'ancien verrou refusé, verrou complet accepté", async () => {
@@ -639,7 +641,7 @@ export async function judgeSegmentCoverageV2(input) {
   const control = await isolatedCoordinator("r28-9a-locksha-", { stubs: { "coverage-judge-v2.js": stub } });
   const mutant = await isolatedCoordinator("r28-9a-locksha-mutant-", {
     stubs: { "coverage-judge-v2.js": stub },
-    replacements: [{ from: 'if (judgment.lock_sha256 !== judgeLockSha256(lock)) return notPass(NOT_PASS_REASON.LOCK_INVALID, "lock_sha256");', to: "" }]
+    replacements: [{ from: 'if (judgment.lock_sha256 !== lockSha256(lock)) return notPass(NOT_PASS_REASON.LOCK_INVALID, "lock_sha256");', to: "" }]
   });
   try {
     const input = () => ({ segment: segmentOf(), claims: CLAIMS, lock: LOCK, transport: transport().fn, policy: POLICY });
@@ -677,7 +679,7 @@ async function behaviourFailures(module) {
   const one = await exec(MODELS.inhabitable);
   check("réparation appliquée", [one.result.script_status, one.result.rounds, one.result.final_voiceover], ["PASS", 2, S[0] + S[1] + NO_JUNCTION(S[2])]);
   check("protocole propagé", one.result.protocol_id, one.result.history?.[0]?.boundary?.protocol_id);
-  check("verrou propagé", one.result.lock_sha256, judgeLockSha256(LOCK));
+  check("verrou propagé", one.result.lock_sha256, lockSha256(LOCK));
   check("frontière reconstruite", one.result.history?.[1]?.boundary?.units?.length, 3);
   const declare = await exec(MODELS.declare);
   check("NOT_PASS conservé", [declare.result.script_status, declare.result.segment_status?.reason], ["NOT_PASS", "REPAIR_REFUSED"]);

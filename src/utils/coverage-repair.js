@@ -27,13 +27,10 @@
 import crypto from "node:crypto";
 
 import {
-  ARCHITECTURE_BASELINE_VERSION,
   COVERAGE_JUDGE_V2_PROTOCOL,
-  JUDGE_LOCK_KEYS,
-  boundaryProtocolIdFromLock,
-  coverageJudgeV2Version,
-  judgeLockSha256
+  coverageJudgeV2Version
 } from "./coverage-judge-v2.js";
+import { ARCHITECTURE_BASELINE_VERSION, BOUNDARY_LOCK_KEYS, boundaryProtocolIdFromLock, invalidLockElements, lockSha256 } from "./coverage-lock.js";
 
 export const COVERAGE_REPAIR_VERSION = "coverage-repair.v1";
 
@@ -71,9 +68,6 @@ export const REPAIR_REFUSAL = Object.freeze({
 });
 
 const HEX64 = /^[0-9a-f]{64}$/;
-const BOUNDARY_LOCK_ECHO = Object.freeze([
-  "splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint", "classification", "language"
-]);
 
 const sha256 = value => crypto.createHash("sha256").update(value, "utf8").digest("hex");
 const isObject = value => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -99,7 +93,7 @@ function freezeAll(value) {
 
 function checkLock(lock) {
   if (!isObject(lock)) refuse(REPAIR_REFUSAL.LOCK_MISSING);
-  if (JUDGE_LOCK_KEYS.some(key => typeof lock[key] !== "string" || lock[key] === "")) refuse(REPAIR_REFUSAL.LOCK_INCOMPLETE);
+  if (invalidLockElements(lock).length > 0) refuse(REPAIR_REFUSAL.LOCK_INCOMPLETE);
   if (lock.baseline !== ARCHITECTURE_BASELINE_VERSION || lock.judge !== coverageJudgeV2Version()) refuse(REPAIR_REFUSAL.LOCK_MISMATCH);
   // Élément 9 du verrou : la version de la réparation.
   if (lock.repair !== COVERAGE_REPAIR_VERSION) refuse(REPAIR_REFUSAL.LOCK_MISMATCH);
@@ -113,7 +107,7 @@ function checkBoundary(boundary, lock) {
   }
   if (boundary.status === "FAILED") refuse(REPAIR_REFUSAL.BOUNDARY_MALFORMED);
   if (typeof boundary.protocol_id !== "string" || boundary.protocol_id === "") refuse(REPAIR_REFUSAL.PROTOCOL_MISSING);
-  if (boundary.lock_divergences.length > 0 || BOUNDARY_LOCK_ECHO.some(key => boundary.lock[key] !== lock[key])) {
+  if (boundary.lock_divergences.length > 0 || BOUNDARY_LOCK_KEYS.some(key => boundary.lock[key] !== lock[key])) {
     refuse(REPAIR_REFUSAL.LOCK_MISMATCH);
   }
 
@@ -147,7 +141,7 @@ function checkJudgment(judgment, boundary, lock) {
   if (judgment.protocol_id !== boundary.protocol_id || boundary.protocol_id !== expectedProtocolId) {
     refuse(REPAIR_REFUSAL.PROTOCOL_MISMATCH);
   }
-  if (judgment.lock_sha256 !== judgeLockSha256(lock)) refuse(REPAIR_REFUSAL.LOCK_SHA_MISMATCH);
+  if (judgment.lock_sha256 !== lockSha256(lock)) refuse(REPAIR_REFUSAL.LOCK_SHA_MISMATCH);
   if (judgment.voiceover_sha256 !== boundary.voiceover_sha256) refuse(REPAIR_REFUSAL.VOICEOVER_MISMATCH);
 
   if (JSON.stringify(judgment.designated_unit_ids) !== JSON.stringify(boundary.analysed_unit_ids)) {
