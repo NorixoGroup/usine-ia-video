@@ -55,6 +55,11 @@ function fail(message) {
   throw new Error(`${FIXTURE_MODE_ENV}=1 — ${message}`);
 }
 
+// R29.3 : le mode fixtures est-il actif ? Lecture seule, aucun effet de bord.
+export function areFixturesEnabled() {
+  return fixturesEnabled();
+}
+
 export function detectFixtureId(system) {
   if (typeof system !== "string") {
     fail("SYSTEM_PROMPT absent ou invalide.");

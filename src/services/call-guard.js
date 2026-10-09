@@ -504,6 +504,33 @@ function readCache(hash) {
   return record.result;
 }
 
+// R29.3 — sonde en LECTURE SEULE : la requête (la même que celle que recevrait
+// beginRealCall) a-t-elle une réponse valide en cache ? Aucune écriture, aucun
+// journal, aucun compteur (ni used ni cacheHits). Même règle que
+// beginRealCall : en régénération (cacheBypass) le cache n'est pas lu, la
+// réponse est donc « absente ». Une entrée illisible ou incohérente lève
+// exactement l'erreur fail-closed de readCache, marquée cache_invalid : elle
+// n'est jamais prise pour une absence.
+export function isRequestCached(request) {
+  if (!state) {
+    throw new Error(
+      "Sonde du cache : aucune autorisation d'appels réels configurée."
+    );
+  }
+
+  if (state.cacheBypass) {
+    return false;
+  }
+
+  try {
+    return readCache(requestSha256(request)) !== null;
+  } catch (error) {
+    error.cache_invalid = true;
+
+    throw error;
+  }
+}
+
 // Appelée juste avant l'envoi au SDK. Retourne soit { cached }, soit
 // une réservation à clore par endRealCall / failRealCall.
 export function beginRealCall(request) {

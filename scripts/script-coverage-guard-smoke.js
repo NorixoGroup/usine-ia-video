@@ -13,6 +13,7 @@
 // Usage :
 //   NO_API=1 node --import ./scripts/fixture-network-guard.js scripts/script-coverage-guard-smoke.js
 
+import crypto from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
@@ -26,7 +27,9 @@ import { runScriptCoverageGate, buildCoverageLock, researchEntitiesOf, SCRIPT_CO
 import { coordinateCoverage } from "../src/utils/coverage-coordinator.js";
 import { EXECUTOR_LIMITS } from "../src/utils/coverage-judge-executor.js";
 import { boundaryProtocolIdFromLock, judgeLockSha256 } from "../src/utils/coverage-judge-v2.js";
-import { CACHE_DIR, JOURNAL_FILE, configureCallGuard, resetCallGuard } from "../src/services/call-guard.js";
+import { CACHE_DIR, JOURNAL_FILE, configureCallGuard, getCallGuardStatus, resetCallGuard, setCacheBypass } from "../src/services/call-guard.js";
+import { previewMessageCost } from "../src/services/anthropic.js";
+import { estimateCoverageBudget } from "../src/utils/coverage-budget-preflight.js";
 import { protocolOutcomeError } from "../src/orchestrator/resume.js";
 
 const networkGuard = globalThis.__fixtureNetworkGuard;
@@ -188,7 +191,11 @@ await test("D4 — reprise (I25) : réponses acceptées rejouées depuis le vrai
   const first = await withGuard({ directory }, () => gate(scriptOf(V)));
   await withGuard({ directory }, async ({ calls }) => {
     const second = await gate(scriptOf(V));
-    deepStrictEqual([calls.length, JSON.stringify(second) === JSON.stringify(first)], [0, true]);
+    // budget_preflight observe l'état du cache (3 appels requis, puis 0) ; tout le reste est identique.
+    const { budget_preflight: firstBudget, ...firstRest } = first;
+    const { budget_preflight: secondBudget, ...secondRest } = second;
+    deepStrictEqual([calls.length, JSON.stringify(secondRest) === JSON.stringify(firstRest)], [0, true]);
+    deepStrictEqual([firstBudget.required, firstBudget.segments_cached_round_1, secondBudget.required, secondBudget.segments_cached_round_1], [3, 0, 0, 3]);
     deepStrictEqual(journalOf(directory).slice(3).map(entry => entry.status), ["cache_hit", "cache_hit", "cache_hit"]);
   });
 });
@@ -358,10 +365,22 @@ mock.timers.reset();
 // ---------------------------------------------------------------------------
 console.log("--- 3. Refus du garde d'appels (D6) ---");
 
-await test("D6 — plafond atteint : NOT_PASS JUDGE_CALL_REFUSED avec la vraie cause, aucun appel au-delà du plafond", async () => {
-  await withGuard({ cap: 1 }, async ({ calls }) => {
+// Le juge déclare non couverte la 2e unité du segment s1-g2 (« Le vent souffle fort. ») : une ronde 2 est nécessaire.
+function judgeDeletingSecondUnit(request) {
+  const payload = JSON.parse(request.messages[0].content.slice(HEADER.length));
+  const delete2 = payload.segment_id === "s1-g2" && payload.designated_unit_ids.includes("u2");
+  const reply = judgeReply(request);
+  if (!delete2) return reply;
+  const data = JSON.parse(reply.content[0].text);
+  data.results = data.results.map(item => (item.unit_id === "u2" ? { unit_id: "u2", verdict: "UNCOVERED", operations: [{ action: "DELETE" }] } : item));
+  return { ...reply, content: [{ type: "text", text: JSON.stringify(data) }] };
+}
+
+await test("D6 — plafond atteint EN COURS DE ROUTE (ronde 2, après un préflight réussi) : NOT_PASS JUDGE_CALL_REFUSED avec la vraie cause", async () => {
+  await withGuard({ cap: 2, handler: judgeDeletingSecondUnit }, async ({ calls }) => {
     const result = await gate(scriptOf(V.slice(0, 2)));
-    deepStrictEqual([result.status, result.failure.segment_id, result.failure.reason, result.failure.category, calls.length], ["NOT_PASS", "s1-g2", "JUDGE_CALL_REFUSED", "CALL_REFUSED", 1]);
+    deepStrictEqual([result.status, result.failure.segment_id, result.failure.reason, result.failure.category, calls.length], ["NOT_PASS", "s1-g2", "JUDGE_CALL_REFUSED", "CALL_REFUSED", 2]);
+    deepStrictEqual([result.budget_preflight.required, result.budget_preflight.remaining], [2, 2]);
     if (!/Plafond/.test(result.failure.detail)) throw new Error(result.failure.detail);
   });
 });
@@ -385,6 +404,142 @@ await test("D6 — panne réelle du transport (SDK en erreur) : reste une panne 
     const result = await gate(scriptOf(V.slice(0, 1)));
     deepStrictEqual([result.failure.reason, result.failure.category, calls.length], ["JUDGE_BUDGET_EXHAUSTED", "TRANSPORT_ERROR", SCRIPT_COVERAGE_POLICY.max_total_judge_calls]);
   });
+});
+
+// ---------------------------------------------------------------------------
+console.log("--- 3b. Préflight du budget (R29.3), vrai garde et vrai cache ---");
+
+const treeOf = directory => fs.existsSync(directory)
+  ? fs.readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter(entry => entry.isFile())
+    .map(entry => path.join(entry.parentPath, entry.name))
+    .sort()
+    .map(file => [path.relative(directory, file), crypto.createHash("sha256").update(fs.readFileSync(file)).digest("hex")])
+  : [];
+
+await test("R29.3 — plafond insuffisant : NOT_PASS BUDGET_INSUFFICIENT avant tout appel, détail chiffré, aucun segment évalué", async () => {
+  await withGuard({ cap: 2 }, async ({ directory, calls }) => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.status, result.failure.reason, result.failure.category, result.failure.segment_id, calls.length, result.segments.length], ["NOT_PASS", "BUDGET_INSUFFICIENT", "PREFLIGHT", null, 0, 0]);
+    deepStrictEqual([result.budget_preflight.required, result.budget_preflight.remaining, result.budget_preflight.cap, result.budget_preflight.used, result.budget_preflight.maximum], [3, 2, 2, 0, 36]);
+    for (const part of ["minimum 3 appel(s) requis", "2 restant(s)", "plafond 2", "déjà utilisés 0", "maximum théorique 36"]) {
+      if (!result.failure.detail.includes(part)) throw new Error(`détail : ${result.failure.detail}`);
+    }
+    deepStrictEqual([result.final_voiceovers.length, activeCache(directory).length, fs.existsSync(path.join(directory, JOURNAL_FILE))], [0, 0, false]);
+    deepStrictEqual([result.lock_sha256, result.protocol_id].every(value => /^[0-9a-f]{64}$/.test(value)), true);
+  });
+});
+
+await test("R29.3 — plafond égal au minimum exact : le préflight passe et le Script est PASS", async () => {
+  await withGuard({ cap: 3 }, async ({ calls }) => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.status, calls.length, result.budget_preflight.required, result.budget_preflight.remaining], ["PASS", 3, 3, 3]);
+  });
+});
+
+await test("R29.3 — compteur de l'invocation pris en compte : le budget déjà consommé réduit le restant", async () => {
+  await withGuard({ cap: 4 }, async ({ calls }) => {
+    const first = await gate(scriptOf(V.slice(0, 2)));
+    const second = await gate(scriptOf([V[2], "La nuit est calme 4 fois.", "Il pleut 3 jours."]));
+    deepStrictEqual([first.status, getCallGuardStatus().used, calls.length], ["PASS", 2, 2]);
+    deepStrictEqual([second.status, second.failure.reason, second.budget_preflight.required, second.budget_preflight.remaining, second.budget_preflight.used], ["NOT_PASS", "BUDGET_INSUFFICIENT", 3, 2, 2]);
+  });
+});
+
+await test("R29.3 — AUCUN FAUX REFUS À LA REPRISE : tout est en cache, un plafond de 1 suffit, 0 appel", async () => {
+  const directory = makeDir();
+  await withGuard({ directory, cap: 20 }, () => gate(scriptOf(V)));
+  await withGuard({ directory, cap: 1 }, async ({ calls }) => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.status, calls.length, result.budget_preflight.required, result.budget_preflight.segments_cached_round_1, result.budget_preflight.maximum], ["PASS", 0, 0, 3, 36]);
+  });
+});
+
+await test("R29.3 — reprise partielle : seul le segment absent du cache est compté", async () => {
+  const directory = makeDir();
+  await withGuard({ directory, cap: 20 }, () => gate(scriptOf(V.slice(0, 2))));
+  await withGuard({ directory, cap: 1 }, async ({ calls }) => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.status, calls.length, result.budget_preflight.required, result.budget_preflight.segments_cached_round_1], ["PASS", 1, 1, 2]);
+  });
+});
+
+await test("R29.3 — régénération (cacheBypass) : le cache n'est pas lu, tout est compté", async () => {
+  const directory = makeDir();
+  await withGuard({ directory, cap: 20 }, () => gate(scriptOf(V)));
+  await withGuard({ directory, cap: 2 }, async ({ calls }) => {
+    setCacheBypass(true);
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.failure.reason, result.budget_preflight.required, result.budget_preflight.segments_cached_round_1, calls.length], ["BUDGET_INSUFFICIENT", 3, 0, 0]);
+  });
+});
+
+await test("R29.3 — cache invalide : BUDGET_PROBE_FAILED (CACHE_INVALID), jamais pris pour une absence, 0 appel", async () => {
+  const directory = makeDir();
+  await withGuard({ directory, cap: 20 }, () => gate(scriptOf(V)));
+  const hash = journalOf(directory)[1].request_sha256;
+  fs.writeFileSync(path.join(directory, CACHE_DIR, `${hash}.json`), "{ pas du json");
+  await withGuard({ directory, cap: 20 }, async ({ calls }) => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.status, result.failure.reason, result.failure.category, result.failure.segment_id, calls.length], ["NOT_PASS", "BUDGET_PROBE_FAILED", "CACHE_INVALID", "s1-g2", 0]);
+    if (!result.failure.detail.includes(hash.slice(0, 12))) throw new Error(result.failure.detail);
+  });
+});
+
+await test("R29.3 — la sonde est strictement en lecture seule : arbre du dossier, journal et compteurs inchangés", async () => {
+  const directory = makeDir();
+  await withGuard({ directory, cap: 20 }, () => gate(scriptOf(V.slice(0, 2))));
+  await withGuard({ directory, cap: 20 }, async ({ calls }) => {
+    const before = [treeOf(directory), getCallGuardStatus()];
+    const lock = buildCoverageLock({ entities: researchEntitiesOf(RESEARCH) });
+    const segments = V.map((voiceover, index) => ({ segment_id: `s1-g${index + 1}`, voiceover, claims: [{ text: "Le désert avance vite dans le centre." }] }));
+    const estimate = await estimateCoverageBudget({ segments, entities: researchEntitiesOf(RESEARCH), lock, policy: SCRIPT_COVERAGE_POLICY, probe: previewMessageCost });
+    deepStrictEqual([estimate.status, estimate.min_new_calls, estimate.segments_cached_round_1], ["OK", 1, 2]);
+    deepStrictEqual([treeOf(directory), getCallGuardStatus(), calls.length], [...before, 0]);
+  });
+});
+
+await test("R29.3 — fixtures avec garde configuré : coût nul, aucun refus quel que soit le plafond", async () => {
+  await withGuard({ cap: 1 }, async () => withEnv({ ANTHROPIC_FIXTURES: "1" }, async () => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.budget_preflight, result.failure?.reason?.startsWith("BUDGET_") ?? false], [null, false]);
+  }));
+});
+
+await test("R29.3 — garde non configuré ou NO_API : préflight sans objet, les appels suivent leur chemin actuel", async () => {
+  await withGuard({ configure: false }, async () => {
+    const result = await gate(scriptOf(V.slice(0, 1)));
+    deepStrictEqual([result.budget_preflight, result.failure.reason], [null, "JUDGE_CALL_REFUSED"]);
+  });
+  await withGuard({}, async () => withEnv({ NO_API: "1" }, async () => {
+    const result = await gate(scriptOf(V.slice(0, 1)));
+    deepStrictEqual([result.budget_preflight, result.failure.reason], [null, "JUDGE_CALL_REFUSED"]);
+  }));
+});
+
+await test("R29.3 — transport injecté sans budget fourni : préflight inactif (son coût est inconnu)", async () => {
+  await withGuard({ cap: 1 }, async () => {
+    const result = await gate(scriptOf(V), { transport: async request => ({ request_sha256: "a".repeat(64), meta: { output_tokens: 20, stop_reason: "end_turn" }, response: judgeReply(request) }), discard: () => {} });
+    deepStrictEqual([result.budget_preflight, result.status], [null, "PASS"]);
+  });
+});
+
+await test("R29.3 — le préflight ne change ni le verrou ni le protocole ni les métadonnées de segment", async () => {
+  const lock = buildCoverageLock({ entities: researchEntitiesOf(RESEARCH) });
+  await withGuard({ cap: 20 }, async () => {
+    const result = await gate(scriptOf(V));
+    deepStrictEqual([result.lock_sha256, result.protocol_id], [judgeLockSha256(lock), boundaryProtocolIdFromLock(lock)]);
+    deepStrictEqual(Object.keys(result.segments[0]), ["status", "covered", "undeclared_claims", "protocol_id", "lock_sha256", "voiceover_sha256", "rounds", "repair_count"]);
+  });
+});
+
+await test("R29.3 — déterministe : mêmes entrées et même état, mêmes octets", async () => {
+  const directory = makeDir();
+  const outputs = [];
+  for (let round = 0; round < 3; round += 1) {
+    await withGuard({ directory, cap: 2 }, async () => { outputs.push(JSON.stringify(await gate(scriptOf(V)))); });
+  }
+  deepStrictEqual(new Set(outputs).size, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -520,14 +675,26 @@ async function guardFailures(module) {
     const result = await module.runScriptCoverageGate({ script: scriptOf(V), research: RESEARCH });
     check("retrait impossible signalé", [result.status, result.failure?.reason], ["NOT_PASS", "CACHE_DISCARD_FAILED"]);
   });
-  await withGuard({ cap: 1 }, async () => {
+  await withGuard({ cap: 2, handler: judgeDeletingSecondUnit }, async () => {
     const result = await module.runScriptCoverageGate({ script: scriptOf(V.slice(0, 2)), research: RESEARCH });
     check("refus qualifié", result.failure?.reason, "JUDGE_CALL_REFUSED");
+  });
+  await withGuard({ cap: 2 }, async ({ calls }) => {
+    const result = await module.runScriptCoverageGate({ script: scriptOf(V), research: RESEARCH });
+    check("préflight : plafond insuffisant refusé avant tout appel", [result.failure?.reason, calls.length], ["BUDGET_INSUFFICIENT", 0]);
+  });
+  const resumeDirectory = makeDir();
+  await withGuard({ directory: resumeDirectory, cap: 20 }, () => module.runScriptCoverageGate({ script: scriptOf(V), research: RESEARCH }));
+  await withGuard({ directory: resumeDirectory, cap: 1 }, async ({ calls }) => {
+    const result = await module.runScriptCoverageGate({ script: scriptOf(V), research: RESEARCH });
+    check("préflight : reprise en cache jamais refusée", [result.status, calls.length], ["PASS", 0]);
   });
   return failures;
 }
 
 const GUARD_MUTATIONS = [
+  ["préflight désactivé", [{ from: "    if (!failure && activeBudget) {", to: "    if (false) {" }]],
+  ["préflight bloquant sur le maximum au lieu du minimum", [{ from: "evaluateCoverageBudget({ estimate, status: activeBudget.status() })", to: "evaluateCoverageBudget({ estimate: { ...estimate, min_new_calls: estimate.max_new_calls }, status: activeBudget.status() })" }]],
   ["appel en cours non réutilisé (relance refusée en « double appel »)", [{ from: "    if (pending) return pending;\n", to: "" }]],
   ["TIMEOUT non requalifié", [{ from: "    reason = SCRIPT_COVERAGE_GATE_REASON.JUDGE_TIMEOUT;", to: "    void 0;" }]],
   ["retrait impossible ignoré", [{ from: "    discardFailed.push(...removal.skipped);", to: "    void removal.skipped;" }, { from: "    return removal.skipped.length === 0;", to: "    return true;" }]],

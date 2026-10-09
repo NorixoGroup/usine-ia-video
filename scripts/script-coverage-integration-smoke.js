@@ -263,7 +263,7 @@ await test("checkpoint : champs exacts, sans texte libre ni réponse brute", () 
 });
 
 await test("sortie de la porte : structure figée et immuable", () => {
-  deepStrictEqual(Object.keys(NOMINAL.result), ["version", "status", "baseline", "policy_version", "lock_sha256", "protocol_id", "segments", "failure", "final_voiceovers", "discarded_request_sha256s", "discard_failed_request_sha256s"]);
+  deepStrictEqual(Object.keys(NOMINAL.result), ["version", "status", "baseline", "policy_version", "lock_sha256", "protocol_id", "segments", "failure", "final_voiceovers", "discarded_request_sha256s", "discard_failed_request_sha256s", "budget_preflight"]);
   if (!Object.isFrozen(NOMINAL.result) || !Object.isFrozen(NOMINAL.result.segments) || !NOMINAL.result.segments.every(Object.isFrozen)) throw new Error("sortie modifiable");
 });
 
@@ -629,6 +629,7 @@ await test("imports de la porte : composants de couverture (versions, coordinate
   deepStrictEqual(source.split("\n").filter(line => line.startsWith("import ")).map(line => line.replace(/^import .* from /, "")), [
     '"../services/anthropic.js";',
     '"../services/call-guard.js";',
+    '"./coverage-budget-preflight.js";',
     '"./coverage-normalization.js";',
     '"./coverage-unit-splitter.js";',
     '"./coverage-protection.js";',
@@ -650,7 +651,7 @@ await test("imports de la porte : composants de couverture (versions, coordinate
 async function isolatedGate(prefix, replacements = []) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), prefix));
   let source = fs.readFileSync(new URL("../src/utils/script-coverage-gate.js", import.meta.url), "utf8");
-  for (const relative of ["../services/anthropic.js", "../services/call-guard.js", "./coverage-normalization.js", "./coverage-unit-splitter.js", "./coverage-protection.js", "./coverage-classification.js", "./coverage-judge-v2.js", "./coverage-judge-executor.js", "./coverage-repair.js", "./coverage-coordinator.js"]) {
+  for (const relative of ["../services/anthropic.js", "../services/call-guard.js", "./coverage-budget-preflight.js", "./coverage-normalization.js", "./coverage-unit-splitter.js", "./coverage-protection.js", "./coverage-classification.js", "./coverage-judge-v2.js", "./coverage-judge-executor.js", "./coverage-repair.js", "./coverage-coordinator.js"]) {
     source = source.replace(`"${relative}"`, JSON.stringify(pathToFileURL(new URL(relative.startsWith("../") ? `../src/${relative.slice(3)}` : `../src/utils/${relative.slice(2)}`, import.meta.url).pathname).href));
   }
   for (const { from, to } of replacements) {
@@ -704,7 +705,7 @@ async function behaviourFailures(module) {
 
 const MUTATIONS = [
   ["couverture contournée", [{ from: "      result = await coordinate({", to: "      result = { script_status: \"PASS\", segment_status: { status: \"PASS\" }, history: [], final_voiceover: entry.segment?.voiceover, rounds: 0 }; void ({" }]],
-  ["coordinateur sauté (premier segment)", [{ from: "    for (const entry of all) {", to: "    for (const entry of all.slice(1)) {" }]],
+  ["coordinateur sauté (premier segment)", [{ from: "    for (const entry of failure ? [] : all) {", to: "    for (const entry of failure ? [] : all.slice(1)) {" }]],
   ["PASS forcé", [{ from: "    status: failure ? SCRIPT_COVERAGE_STATUS.NOT_PASS : SCRIPT_COVERAGE_STATUS.PASS,", to: "    status: SCRIPT_COVERAGE_STATUS.PASS," }]],
   ["NOT_PASS ignoré", [{ from: "      if (!passed) failure = failureOf(entry, result, segmentRefusals);", to: "      void passed;" }]],
   ["checkpoint incomplet", [{ from: "    lock_sha256: result.lock_sha256 ?? lockSha256,\n", to: "" }]],

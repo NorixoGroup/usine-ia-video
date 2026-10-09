@@ -17,7 +17,9 @@ import { fileURLToPath } from "node:url";
 import Anthropic from "@anthropic-ai/sdk";
 
 import {
-  createMessage
+  buildMessageRequest,
+  createMessage,
+  previewMessageCost
 } from "../src/services/anthropic.js";
 
 import {
@@ -31,7 +33,8 @@ import {
   getCallGuardStatus,
   requestSha256,
   redactSecrets,
-  setCacheBypass
+  setCacheBypass,
+  isRequestCached
 } from "../src/services/call-guard.js";
 
 import { runResearchAgent } from "../src/agents/research.js";
@@ -823,6 +826,108 @@ await test("cache invalide, incohérent ou illisible : erreur, jamais de nouvel 
 });
 
 console.log("");
+console.log("--- 5b. Sonde du cache et coût prévisible (R29.3) ---");
+
+const PARAMS = { system: "Système de test", messages: [{ role: "user", content: "requête sondée" }], maxTokens: 10, temperature: 0 };
+const treeSnapshot = directory => listFiles(directory)
+  .map(file => [path.relative(directory, file), fs.readFileSync(file, "utf8")])
+  .sort((a, b) => (a[0] < b[0] ? -1 : 1));
+
+await test("R29.3 — buildMessageRequest : mêmes clés que l'ancienne requête de createMessage, valeurs par défaut conservées", () => {
+  assert(
+    JSON.stringify(buildMessageRequest({ system: "S", messages: [1] })) ===
+      JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1024, temperature: 0.2, messages: [1], system: "S" }),
+    "requête par défaut"
+  );
+  assert(!("system" in buildMessageRequest({ messages: [1] })), "system présent sans prompt");
+  assert(!("tools" in buildMessageRequest({ messages: [1], tools: [] })), "tools vide transmis");
+  const withTools = buildMessageRequest({ messages: [1], tools: [{ name: "t" }], model: "m", maxTokens: 5, temperature: 0 });
+  assert(JSON.stringify(withTools) === JSON.stringify({ model: "m", max_tokens: 5, temperature: 0, messages: [1], tools: [{ name: "t" }] }), JSON.stringify(withTools));
+});
+
+await test("R29.3 — isRequestCached : absent, puis présent après l'appel ; l'empreinte prédite est celle du journal", async () => {
+  await withGuard({ cap: 5 }, async ({ directory }) => {
+    const request = buildMessageRequest(PARAMS);
+    assert(isRequestCached(request) === false, "présent avant l'appel");
+    await ask("requête sondée");
+    assert(isRequestCached(request) === true, "absent après l'appel");
+    assert(requestSha256(request) === readJournal(directory).entries[0].request_sha256, "empreinte différente de celle du journal");
+    assert(isRequestCached(buildMessageRequest({ ...PARAMS, temperature: 0.5 })) === false, "une autre requête ne doit pas être en cache");
+  });
+});
+
+await test("R29.3 — isRequestCached est strictement en lecture seule : fichiers, journal, compteurs inchangés", async () => {
+  await withGuard({ cap: 5 }, async ({ directory, calls }) => {
+    await ask("requête sondée");
+    const before = [treeSnapshot(directory), getCallGuardStatus(), calls.length];
+    for (let index = 0; index < 3; index += 1) {
+      isRequestCached(buildMessageRequest(PARAMS));
+      isRequestCached(buildMessageRequest({ ...PARAMS, maxTokens: 11 }));
+    }
+    assert(JSON.stringify([treeSnapshot(directory), getCallGuardStatus(), calls.length]) === JSON.stringify(before), "effet de bord de la sonde");
+  });
+});
+
+await test("R29.3 — isRequestCached en régénération (cacheBypass) : jamais en cache, comme beginRealCall", async () => {
+  await withGuard({ cap: 5 }, async () => {
+    await ask("requête sondée");
+    setCacheBypass(true);
+    try {
+      assert(isRequestCached(buildMessageRequest(PARAMS)) === false, "cache lu en régénération");
+    } finally {
+      setCacheBypass(false);
+    }
+    assert(isRequestCached(buildMessageRequest(PARAMS)) === true, "cache non restauré");
+  });
+});
+
+await test("R29.3 — isRequestCached : entrée invalide → erreur fail-closed marquée cache_invalid, jamais « absent » ; rien d'écrit", async () => {
+  await withGuard({ cap: 5 }, async ({ directory }) => {
+    await ask("requête sondée");
+    const file = path.join(directory, CACHE_DIR, `${readJournal(directory).entries[0].request_sha256}.json`);
+    fs.writeFileSync(file, "{ pas du json");
+    const before = treeSnapshot(directory);
+    let error = null;
+    try {
+      isRequestCached(buildMessageRequest(PARAMS));
+    } catch (caught) {
+      error = caught;
+    }
+    assert(error && error.cache_invalid === true && /Cache des appels invalide/.test(error.message), error?.message);
+    assert(JSON.stringify(treeSnapshot(directory)) === JSON.stringify(before), "la sonde a modifié le cache");
+  });
+});
+
+await test("R29.3 — isRequestCached sans garde configuré : erreur explicite", () => {
+  expectThrow(() => isRequestCached(buildMessageRequest(PARAMS)), /aucune autorisation d'appels réels/);
+});
+
+await test("R29.3 — previewMessageCost : coût nul sous fixtures, sans objet sous NO_API ou sans garde, sinon cache connu", async () => {
+  await withGuard({ cap: 5 }, async () => {
+    assert(JSON.stringify(previewMessageCost(PARAMS)) === JSON.stringify({ applicable: true, cached: false }), "avant l'appel");
+    await ask("requête sondée");
+    assert(JSON.stringify(previewMessageCost(PARAMS)) === JSON.stringify({ applicable: true, cached: true }), "après l'appel");
+    await withEnv({ ANTHROPIC_FIXTURES: "1" }, () => assert(JSON.stringify(previewMessageCost(PARAMS)) === JSON.stringify({ applicable: false, reason: "FIXTURES" }), "fixtures"));
+    await withEnv({ NO_API: "1" }, () => assert(JSON.stringify(previewMessageCost(PARAMS)) === JSON.stringify({ applicable: false, reason: "NO_API" }), "NO_API"));
+  });
+  await withEnv(REAL_ENV, () => assert(JSON.stringify(previewMessageCost(PARAMS)) === JSON.stringify({ applicable: false, reason: "GUARD_UNCONFIGURED" }), "garde non configuré"));
+});
+
+await test("R29.3 — previewMessageCost et createMessage partagent les valeurs par défaut (modèle, max_tokens, température)", async () => {
+  await withGuard({ cap: 5 }, async ({ calls }) => {
+    await createMessage({ system: "Système de test", messages: [{ role: "user", content: "défauts" }] });
+    assert(calls.length === 1 && calls[0].model === "claude-sonnet-4-5" && calls[0].max_tokens === 1024 && calls[0].temperature === 0.2, JSON.stringify(calls[0]));
+    assert(previewMessageCost({ system: "Système de test", messages: [{ role: "user", content: "défauts" }] }).cached === true, "la sonde ne retrouve pas l'appel par défaut");
+  });
+});
+
+await test("R29.3 — previewMessageCost : aucun appel SDK, aucun réseau", async () => {
+  await withGuard({ cap: 5 }, async ({ calls }) => {
+    previewMessageCost(PARAMS);
+    assert(calls.length === 0 && getCallGuardStatus().used === 0, "la sonde a appelé le SDK");
+  });
+});
+
 console.log("--- 6. Aucun secret, aucune fuite ---");
 
 await test("ni clé ni contenu de prompt dans le journal, le cache ou les erreurs", async () => {

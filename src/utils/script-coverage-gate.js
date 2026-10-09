@@ -30,11 +30,21 @@
 // est qualifié JUDGE_CALL_REFUSED ; un budget épuisé par des TIMEOUT est
 // qualifié JUDGE_TIMEOUT.
 //
+// Préflight du budget (R29.3) : avant le premier appel du juge, le minimum
+// d'appels réels que la ronde 1 coûtera (segments dont la réponse n'est pas
+// déjà en cache) est comparé au budget restant de l'invocation. Minimum
+// insuffisant : NOT_PASS BUDGET_INSUFFICIENT sans aucun appel. Seul le minimum
+// est bloquant ; le maximum est renvoyé à titre informatif. Les reprises ne
+// sont pas pénalisées : un segment déjà en cache coûte zéro. Actif pour le
+// transport par défaut (createMessage) ou si `budget` est fourni ; inactif en
+// fixtures, sous NO_API et sans garde configuré (rien à contrôler).
+//
 // Ne lève jamais : toute erreur inattendue est un NOT_PASS UNEXPECTED, avec
 // son message expurgé.
 
-import { createMessage } from "../services/anthropic.js";
-import { discardCachedResponse, redactSecrets } from "../services/call-guard.js";
+import { createMessage, previewMessageCost } from "../services/anthropic.js";
+import { discardCachedResponse, getCallGuardStatus, redactSecrets } from "../services/call-guard.js";
+import { BUDGET_ESTIMATE_STATUS, BUDGET_VERDICT, estimateCoverageBudget, evaluateCoverageBudget } from "./coverage-budget-preflight.js";
 import { COVERAGE_NORMALIZATION_VERSION } from "./coverage-normalization.js";
 import { coverageUnitSplitterVersion } from "./coverage-unit-splitter.js";
 import { coverageProtectionVersion, extractResearchEntities, RESEARCH_ENTITY_RULE_VERSION } from "./coverage-protection.js";
@@ -61,8 +71,13 @@ export const SCRIPT_COVERAGE_GATE_REASON = Object.freeze({
   UNEXPECTED: "UNEXPECTED",
   CACHE_DISCARD_FAILED: "CACHE_DISCARD_FAILED",
   JUDGE_TIMEOUT: "JUDGE_TIMEOUT",
-  JUDGE_CALL_REFUSED: "JUDGE_CALL_REFUSED"
+  JUDGE_CALL_REFUSED: "JUDGE_CALL_REFUSED",
+  BUDGET_INSUFFICIENT: "BUDGET_INSUFFICIENT",
+  BUDGET_PROBE_FAILED: "BUDGET_PROBE_FAILED"
 });
+
+// Budget réel : état du garde d'appels et coût prévisible d'une requête.
+const REAL_BUDGET = Object.freeze({ status: getCallGuardStatus, probe: previewMessageCost });
 
 const LANGUAGE = "fr";
 const BUDGET_EXHAUSTED = "JUDGE_BUDGET_EXHAUSTED";
@@ -172,12 +187,15 @@ export async function runScriptCoverageGate({
   transport = createMessage,
   policy = SCRIPT_COVERAGE_POLICY,
   coordinate = coordinateCoverage,
-  discard = discardCachedResponse
+  discard = discardCachedResponse,
+  budget
 } = {}) {
+  const activeBudget = budget ?? (transport === createMessage ? REAL_BUDGET : null);
   const segments = [];
   const finalVoiceovers = [];
   const discarded = [];
   const discardFailed = [];
+  let budgetPreflight = null;
   let failure = null;
   let lock = null;
   let lockSha256 = null;
@@ -239,7 +257,57 @@ export async function runScriptCoverageGate({
       failure = { segment_id: null, label: null, reason: SCRIPT_COVERAGE_GATE_REASON.NO_SEGMENT, category: null, unit_ids: [], detail: null };
     }
 
-    for (const entry of all) {
+    // Préflight du budget : avant tout appel du coordinateur.
+    if (!failure && activeBudget) {
+      const estimate = await estimateCoverageBudget({
+        segments: all.map(entry => ({ segment_id: entry.segment_id, voiceover: entry.segment?.voiceover, claims: entry.segment?.claims })),
+        entities,
+        lock,
+        policy,
+        probe: activeBudget.probe
+      });
+
+      if (estimate.status === BUDGET_ESTIMATE_STATUS.PROBE_FAILED) {
+        failure = {
+          segment_id: estimate.segment_id,
+          label: all.find(entry => entry.segment_id === estimate.segment_id)?.label ?? null,
+          reason: SCRIPT_COVERAGE_GATE_REASON.BUDGET_PROBE_FAILED,
+          category: estimate.category,
+          unit_ids: [],
+          detail: redactSecrets(estimate.detail)
+        };
+      } else {
+        const evaluation = evaluateCoverageBudget({ estimate, status: activeBudget.status() });
+
+        if (evaluation.applicable) {
+          budgetPreflight = {
+            required: evaluation.required,
+            maximum: evaluation.maximum,
+            remaining: evaluation.remaining,
+            cap: evaluation.cap,
+            used: evaluation.used,
+            segments_total: evaluation.segments_total,
+            segments_cached_round_1: evaluation.segments_cached_round_1
+          };
+        }
+
+        if (evaluation.verdict === BUDGET_VERDICT.INSUFFICIENT) {
+          failure = {
+            segment_id: null,
+            label: null,
+            reason: SCRIPT_COVERAGE_GATE_REASON.BUDGET_INSUFFICIENT,
+            category: "PREFLIGHT",
+            unit_ids: [],
+            detail: `minimum ${evaluation.required} appel(s) requis, ${evaluation.remaining} restant(s) ` +
+              `(plafond ${evaluation.cap}, déjà utilisés ${evaluation.used}) ; ` +
+              `${evaluation.segments_total} segment(s), dont ${evaluation.segments_cached_round_1} déjà en cache ; ` +
+              `maximum théorique ${evaluation.maximum}`
+          };
+        }
+      }
+    }
+
+    for (const entry of failure ? [] : all) {
       let result = null;
       let detail = null;
       try {
@@ -298,6 +366,7 @@ export async function runScriptCoverageGate({
     failure,
     final_voiceovers: failure ? [] : finalVoiceovers,
     discarded_request_sha256s: [...discarded],
-    discard_failed_request_sha256s: [...discardFailed]
+    discard_failed_request_sha256s: [...discardFailed],
+    budget_preflight: budgetPreflight
   });
 }

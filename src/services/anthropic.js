@@ -1,9 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { getAnthropicFixture } from "../fixtures/anthropic.js";
+import { areFixturesEnabled, getAnthropicFixture } from "../fixtures/anthropic.js";
 import {
   beginRealCall,
   endRealCall,
-  failRealCall
+  failRealCall,
+  getCallGuardStatus,
+  isRequestCached
 } from "./call-guard.js";
 
 let client = null;
@@ -40,12 +42,73 @@ function refusedCall(error) {
   return refused;
 }
 
+// Valeurs par défaut d'une requête : source unique, partagée par createMessage
+// et par la sonde de coût (la même requête donne la même empreinte de cache).
+const MESSAGE_DEFAULTS = Object.freeze({
+  model: "claude-sonnet-4-5",
+  maxTokens: 1024,
+  temperature: 0.2
+});
+
+// Requête envoyée au SDK (et dont l'empreinte indexe le cache des appels).
+// Fonction pure ; createMessage l'utilise telle quelle.
+export function buildMessageRequest({
+  system,
+  messages,
+  model = MESSAGE_DEFAULTS.model,
+  maxTokens = MESSAGE_DEFAULTS.maxTokens,
+  temperature = MESSAGE_DEFAULTS.temperature,
+  tools
+}) {
+  const request = {
+    model,
+    max_tokens: maxTokens,
+    temperature,
+    messages
+  };
+
+  if (system) {
+    request.system = system;
+  }
+
+  if (tools?.length) {
+    request.tools = tools;
+  }
+
+  return request;
+}
+
+// R29.3 — coût prévisible d'un futur createMessage, en lecture seule et sans
+// réseau. { applicable: false, reason } quand aucun budget d'appels ne
+// s'applique (fixtures : coût nul ; NO_API : l'appel sera refusé ; garde non
+// configuré : l'appel sera refusé). Sinon { applicable: true, cached } :
+// cached vaut true quand la réponse est déjà en cache (coût nul). Une entrée de
+// cache invalide lève (error.cache_invalid), jamais prise pour une absence.
+export function previewMessageCost(params) {
+  if (areFixturesEnabled()) {
+    return { applicable: false, reason: "FIXTURES" };
+  }
+
+  if (process.env.NO_API === "1") {
+    return { applicable: false, reason: "NO_API" };
+  }
+
+  if (!getCallGuardStatus().configured) {
+    return { applicable: false, reason: "GUARD_UNCONFIGURED" };
+  }
+
+  return {
+    applicable: true,
+    cached: isRequestCached(buildMessageRequest(params))
+  };
+}
+
 export async function createMessage({
   system,
   messages,
-  model = "claude-sonnet-4-5",
-  maxTokens = 1024,
-  temperature = 0.2,
+  model = MESSAGE_DEFAULTS.model,
+  maxTokens = MESSAGE_DEFAULTS.maxTokens,
+  temperature = MESSAGE_DEFAULTS.temperature,
   tools
 }) {
   const fixture = getAnthropicFixture({
@@ -73,20 +136,14 @@ export async function createMessage({
 
   const anthropic = getAnthropicClient();
 
-  const request = {
+  const request = buildMessageRequest({
+    system,
+    messages,
     model,
-    max_tokens: maxTokens,
+    maxTokens,
     temperature,
-    messages
-  };
-
-  if (system) {
-    request.system = system;
-  }
-
-  if (tools?.length) {
-    request.tools = tools;
-  }
+    tools
+  });
 
   // Garde des appels réels : autorisation, plafond, journal, cache. Un refus
   // du garde survient avant tout envoi ; il est marqué (call_refused) pour
