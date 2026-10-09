@@ -572,14 +572,12 @@ await test("rapport : bandeau de simulation, arrêt anticipé, aide R29.7 sans o
   }
 });
 
-await test("rapport : orientation R29.7 — implémenter (≥ 10 %), retirer (≤ 2 %), zone intermédiaire, aucune mesure", () => {
+await test("rapport : l'orientation R29.7 est soumise au minimum de preuves — une part de DECLARE seule ne recommande plus rien (R29.6b)", () => {
   const withVerdicts = (share, blocked) => ({ ...metricsOfFixture, verdicts: { ...metricsOfFixture.verdicts, declare_share_of_uncovered: share, segments_blocked_by_declare_rate: blocked } });
-  const orientation = metrics => render({ metrics }).match(/\*\*Orientation chiffrée : ([^*]+)\.\*\*|Aucun verdict UNCOVERED[^\n]*/)[0];
-  if (!/implémenter DECLARE/.test(orientation(withVerdicts(0.2, 0)))) throw new Error("≥ 10 % non reconnu");
-  if (!/implémenter DECLARE/.test(orientation(withVerdicts(0, 0.1)))) throw new Error("blocage ≥ 10 % non reconnu");
-  if (!/retirer DECLARE/.test(orientation(withVerdicts(0.02, 0)))) throw new Error("≤ 2 % non reconnu");
-  if (!/zone intermédiaire/.test(orientation(withVerdicts(0.05, 0.02)))) throw new Error("zone intermédiaire non reconnue");
-  if (!/Aucun verdict UNCOVERED/.test(orientation(withVerdicts(null, null)))) throw new Error("absence de mesure non signalée");
+  for (const [share, blocked] of [[0.2, 0], [0, 0.1], [0.02, 0], [0.05, 0.02], [null, null]]) {
+    const section = render({ metrics: withVerdicts(share, blocked) }).split("## 8.")[1].split("## 9.")[0];
+    if (!/Preuves insuffisantes : aucune recommandation/.test(section) || /Orientation chiffrée/.test(section)) throw new Error(`recommandation sans preuves (${share}, ${blocked})`);
+  }
 });
 
 await test("rapport : déterministe, barres verticales échappées, sans unité à relire", () => {
@@ -866,6 +864,335 @@ for (const [name, replacements] of MUTATIONS) {
     let failures;
     try {
       failures = metricsFailures(await isolatedMetrics(replacements));
+    } catch (error) {
+      failures = [`exception : ${error.message}`];
+    }
+    if (failures.length === 0) throw new Error("mutant non détecté");
+    console.log(`       témoin : ${failures.slice(0, 3).join(", ")}${failures.length > 3 ? ", …" : ""}`);
+  });
+}
+
+// ---------------------------------------------------------------------------
+console.log("--- 8. R29.6b — sortes de segments, DECLARE détaillés, relecture, minimum de preuves ---");
+
+const KU = (index) => U(`u${index + 1}`, index * 40, index * 40 + 40, `Unité ${index + 1} du segment. `);
+const KCLAIM = id => [{ text: `Claim de ${id}.`, key_fact: `Fait de ${id}.`, is_unverified: false }];
+
+// Segment fabriqué : `actions` donne, par unité, COVERED, DELETE ou DECLARE (claim s1-g1-c1).
+function kindRecord(id, kind, actions, extra = {}) {
+  const verdicts = actions.map((action, index) => [`u${index + 1}`, action === "COVERED" ? "COVERED" : "UNCOVERED", action === "COVERED" ? null : action, action === "DECLARE" ? "s1-g1-c1" : null]);
+  return {
+    ...REC(id, kind, RESULT("PASS", 1, 1), [round(1, J(V(...verdicts)))]),
+    units_round1: actions.map((_, index) => KU(index)),
+    claims: KCLAIM(id),
+    ...extra
+  };
+}
+
+// Jeu de données : A-1 (declare puis delete), B-1 (témoins), sans filtre de preuves.
+function dataset({ aDelete = 0, aDeclare = 0, bDelete = 0, bDeclare = 0 }) {
+  const records = [];
+  const actionsA = [...Array(aDeclare).fill("DECLARE"), ...Array(aDelete).fill("DELETE"), "COVERED"];
+  if (actionsA.length > 1) records.push(kindRecord("A-1", "A", actionsA));
+  const actionsB = [...Array(bDeclare).fill("DECLARE"), ...Array(bDelete).fill("DELETE"), "COVERED"];
+  if (actionsB.length > 1) records.push(kindRecord("B-1", "B", actionsB, { expect: { injected_start: 1e9, sentence_id: "x" } }));
+  return records;
+}
+
+const usableFor = (items, count) => items.map((item, index) => ({ review_id: item.review_id, usable: index < count, note: "" }));
+
+// Contrôles chiffrés de R29.6b ; renvoie les libellés qui échouent. Sert aussi de
+// détecteur pour les mutants de la partie 8.
+function kindFailures(module) {
+  const failures = [];
+  const check = (label, actual, expected) => {
+    const same = typeof expected === "number" && typeof actual === "number" ? Math.abs(actual - expected) < 1e-9 : JSON.stringify(actual) === JSON.stringify(expected);
+    if (!same) failures.push(label);
+  };
+  const metricsOf = (records, reviews = []) => module.computeMetrics(clone(records), { reviews });
+
+  // Sortes séparées.
+  const separated = metricsOf([
+    kindRecord("A-1", "A", ["DELETE", "DELETE", "DELETE", "DECLARE", "COVERED"]),
+    kindRecord("A-2", "A", ["COVERED", "COVERED"]),
+    kindRecord("B-1", "B", ["DECLARE", "DECLARE"], { expect: { injected_start: 1e9, sentence_id: "x" } }),
+    kindRecord("C-1", "C", ["DELETE", "COVERED"])
+  ]);
+  const kinds = separated.verdicts.by_kind;
+  check("A : effectifs", [kinds.A.segments, kinds.A.units_judged, kinds.A.covered, kinds.A.uncovered, kinds.A.delete_operations, kinds.A.declare_operations], [2, 7, 3, 4, 3, 1]);
+  check("A : part de DECLARE", [kinds.A.declare_share_of_uncovered, kinds.A.segments_with_declare, kinds.A.segments_blocked_by_declare], [0.25, 1, 0]);
+  check("B : effectifs", [kinds.B.segments, kinds.B.units_judged, kinds.B.uncovered, kinds.B.declare_operations, kinds.B.declare_share_of_uncovered, kinds.B.segments_with_declare], [1, 2, 2, 2, 1, 1]);
+  check("C : effectifs", [kinds.C.segments, kinds.C.uncovered, kinds.C.delete_operations, kinds.C.declare_operations, kinds.C.declare_share_of_uncovered, kinds.C.segments_with_declare], [1, 1, 1, 0, 0, 0]);
+  check("global inchangé (R29.6)", [separated.verdicts.units_judged, separated.verdicts.uncovered, separated.verdicts.declare_operations, separated.verdicts.declare_share_of_uncovered, separated.verdicts.segments_with_declare], [11, 7, 3, 3 / 7, 2]);
+
+  // Détails des DECLARE : texte d'origine, claim, key_fact, alertes.
+  const items = separated.declare_review.items;
+  check("DECLARE : identifiants", items.map(item => item.review_id), ["A-1/r1/u4", "B-1/r1/u1", "B-1/r1/u2"]);
+  check("DECLARE : texte d'origine, claim, key_fact", [items[0].original_text, items[0].claim_id, items[0].claim_text, items[0].key_fact_text], ["Unité 4 du segment. ", "s1-g1-c1", "Claim de A-1.", "Fait de A-1."]);
+  check("DECLARE : alertes par défaut", items[0].flags, { claim_found: true, claim_unverified: false, duplicate_in_segment: false });
+
+  const flagged = metricsOf([
+    kindRecord("A-3", "A", ["DECLARE", "COVERED"], { units_round1: [KU(0), U("u2", 40, 80, "Claim de A-3. ")] }),
+    kindRecord("A-4", "A", ["DECLARE", "COVERED"], { claims: [{ text: "Claim de A-4.", key_fact: "Fait", is_unverified: true }] }),
+    kindRecord("A-5", "A", ["COVERED", "COVERED"], { rounds: [round(1, J(V(["u1", "COVERED"], ["u2", "UNCOVERED", "DECLARE", "s1-g1-c3"])))], units_round1: [KU(0), KU(1)] }),
+    kindRecord("A-6", "A", ["DELETE", "COVERED"], {
+      rounds: [round(1, J(V(["u1", "UNCOVERED", "DELETE"], ["u2", "COVERED"]))), { ...round(2, J(V(["u1", "UNCOVERED", "DECLARE", "s1-g1-c1"]))), units: [U("u1", 0, 30, "Texte réparé. ")] }]
+    }),
+    kindRecord("A-7", "A", ["DELETE", "COVERED"], {
+      rounds: [round(1, J(V(["u1", "UNCOVERED", "DELETE"], ["u2", "COVERED"]))), round(2, J(V(["u1", "UNCOVERED", "DECLARE", "s1-g1-c1"])))]
+    })
+  ]).declare_review.items;
+  check("DECLARE : doublon dans le segment", flagged.find(item => item.entry_id === "A-3").flags.duplicate_in_segment, true);
+  check("DECLARE : claim non vérifié", flagged.find(item => item.entry_id === "A-4").flags.claim_unverified, true);
+  check("DECLARE : claim introuvable", [flagged.find(item => item.entry_id === "A-5").flags.claim_found, flagged.find(item => item.entry_id === "A-5").claim_text], [false, null]);
+  check("DECLARE : texte de la ronde 2 (unités de la ronde)", flagged.find(item => item.entry_id === "A-6").original_text, "Texte réparé. ");
+  check("DECLARE : texte de la ronde 2 inconnu", [flagged.find(item => item.entry_id === "A-7").original_text, flagged.find(item => item.entry_id === "A-7").flags.duplicate_in_segment], [null, null]);
+
+  // Relecture.
+  const reviewed = metricsOf([kindRecord("A-1", "A", ["DECLARE", "DECLARE", "DECLARE", "COVERED"])], [
+    { review_id: "A-1/r1/u1", usable: true, note: "ok" }, { review_id: "A-1/r1/u2", usable: false, note: "" }, { review_id: "Z/r1/u1", usable: true, note: "" }
+  ]).declare_review;
+  check("relecture : champ utilisable", reviewed.items.map(item => item.usable), [true, false, null]);
+  check("relecture : note", reviewed.items[0].note, "ok");
+  check("relecture : synthèse", reviewed.summary, { declare_total: 3, reviewed: 2, usable: 1, not_usable: 1, pending: 1, usable_rate: 0.5 });
+  check("relecture : identifiant inconnu", reviewed.issues, ["Z/r1/u1 : aucun DECLARE correspondant"]);
+
+  check("normalizeReviews : tableau", module.normalizeReviews([{ review_id: "a", usable: true }]).reviews, [{ review_id: "a", usable: true, note: "" }]);
+  check("normalizeReviews : document", module.normalizeReviews({ items: [{ review_id: "a" }] }).reviews, [{ review_id: "a", usable: null, note: "" }]);
+  check("normalizeReviews : usable invalide", module.normalizeReviews([{ review_id: "a", usable: "oui" }]).issues.length, 1);
+  check("normalizeReviews : doublon, identifiant absent, format", [module.normalizeReviews([{ review_id: "a" }, { review_id: "a" }]).issues.length, module.normalizeReviews([{}]).issues.length, module.normalizeReviews("x").issues.length], [1, 1, 1]);
+
+  // Minimum de preuves : 25 UNCOVERED au total, dont 10 sur A.
+  const evidence = (aDelete, bDelete) => metricsOf(dataset({ aDelete, bDelete })).evidence;
+  check("preuves : 10 A + 15 B suffisent", [evidence(10, 15).uncovered_total, evidence(10, 15).uncovered_a, evidence(10, 15).sufficient], [25, 10, true]);
+  check("preuves : 24 au total ne suffisent pas", [evidence(10, 14).sufficient, evidence(10, 14).missing_total, evidence(10, 14).missing_a], [false, 1, 0]);
+  check("preuves : 9 sur A ne suffisent pas", [evidence(9, 16).sufficient, evidence(9, 16).missing_total, evidence(9, 16).missing_a], [false, 0, 1]);
+  check("preuves : seuils exportés", [module.DECISION_RULE.min_uncovered_total, module.DECISION_RULE.min_uncovered_a], [25, 10]);
+
+  // Recommandation.
+  const recommend = (counts, usable = null, extra = []) => {
+    const base = metricsOf(dataset(counts));
+    const reviews = usable === null ? extra : [...usableFor(base.declare_review.items.filter(item => item.kind === "A"), usable), ...extra];
+    return module.computeMetrics(clone(dataset(counts)), { reviews }).recommendation;
+  };
+  check("recommandation : preuves insuffisantes, jamais de recommandation", [recommend({ aDelete: 5 }).status, recommend({ aDeclare: 9, aDelete: 0, bDelete: 20 }).status, recommend({ aDeclare: 20 }).status === "RECOMMEND_A"], ["INSUFFICIENT_EVIDENCE", "INSUFFICIENT_EVIDENCE", false]);
+  check("recommandation : DECLARE rare (≤ 2 %) → B", [recommend({ aDelete: 49, aDeclare: 1, bDelete: 10 }).status, recommend({ aDelete: 20, bDelete: 10 }).status], ["RECOMMEND_B", "RECOMMEND_B"]);
+  check("recommandation : entre 2 % et 10 % → zone intermédiaire", recommend({ aDelete: 19, aDeclare: 1, bDelete: 10 }).status, "INTERMEDIATE");
+  check("recommandation : ≥ 10 % sans relecture", [recommend({ aDelete: 18, aDeclare: 2, bDelete: 10 }).status, recommend({ aDelete: 18, aDeclare: 2, bDelete: 10 }).pending_a], ["REVIEW_INCOMPLETE", 2]);
+  check("recommandation : ≥ 10 % tout utilisable → A", recommend({ aDelete: 18, aDeclare: 2, bDelete: 10 }, 2).status, "RECOMMEND_A");
+  check("recommandation : ≥ 10 % mais 50 % utilisable → B", recommend({ aDelete: 18, aDeclare: 2, bDelete: 10 }, 1).status, "RECOMMEND_B");
+  check("recommandation : exactement 70 % utilisable → A, 60 % → B", [recommend({ aDelete: 30, aDeclare: 10, bDelete: 10 }, 7).status, recommend({ aDelete: 30, aDeclare: 10, bDelete: 10 }, 6).status], ["RECOMMEND_A", "RECOMMEND_B"]);
+  check("recommandation : les DECLARE des témoins B ne comptent pas", recommend({ aDelete: 20, bDeclare: 10 }).status, "RECOMMEND_B");
+  check("recommandation : relecture avec identifiant inconnu → relecture incomplète", recommend({ aDelete: 18, aDeclare: 2, bDelete: 10 }, 2, [{ review_id: "Z/r1/u1", usable: true, note: "" }]).status, "REVIEW_INCOMPLETE");
+  return failures;
+}
+
+await test("R29.6b — séparation A/B/C, DECLARE détaillés, relecture, minimum de preuves et recommandation (valeurs chiffrées)", () => {
+  eq(kindFailures(metricsModule), []);
+});
+
+await test("R29.6b — compatibilité : champs de R29.6 inchangés, résultats d'une ancienne exécution (sans claims ni unités par ronde) acceptés", () => {
+  const m = computeMetrics(clone(FIXTURE_RECORDS), { prices: PRICES });
+  eq([m.verdicts.units_judged, m.verdicts.declare_operations, m.verdicts.declare_share_of_uncovered, m.segments.pass_rate, Math.round(m.usage.cost_usd * 1e4) / 1e4], [18, 1, 1 / 6, 0.5, 0.1095]);
+  eq(m.declare_review.items.length, 1);
+  eq([m.declare_review.items[0].original_text, m.declare_review.items[0].claim_text, m.declare_review.items[0].key_fact_text], ["Second.", null, null]);
+  eq(m.declare_review.items[0].flags.claim_found, false);
+  eq(m.evidence.sufficient, false);
+  eq(m.recommendation.status, "INSUFFICIENT_EVIDENCE");
+  eq(metricsFailures(metricsModule), []);
+});
+
+// Rapport R29.6b.
+const REAL = { ...IDENTITY, mode: "real" };
+const renderOf = (records, { reviews = [], identity = REAL } = {}) => {
+  const metrics = computeMetrics(clone(records), { reviews });
+  return { metrics, markdown: renderReport({ title: "T", identity, corpus: CORPUS_SUMMARY, metrics, criteria: evaluateCriteria(metrics), halted: null }) };
+};
+
+await test("rapport R29.6b — tableau par sorte et tableau des DECLARE (texte d'origine, claim, key_fact, alertes, utilisable)", () => {
+  const records = [
+    kindRecord("A-1", "A", ["DELETE", "DECLARE", "COVERED"], { units_round1: [KU(0), U("u2", 40, 80, "Texte d'origine | avec barre. "), U("u3", 80, 120, "Claim de A-1. ")] }),
+    kindRecord("B-1", "B", ["DECLARE", "COVERED"], { expect: { injected_start: 1e9, sentence_id: "x" } })
+  ];
+  const { markdown } = renderOf(records, { reviews: [{ review_id: "B-1/r1/u1", usable: false, note: "" }] });
+  for (const expected of ["Par sorte de segment", "| A | 1 | 3 | 2 | 1 | 1 | 50,0 % | 1 | 0 |", "| B | 1 | 2 | 1 | 0 | 1 | 100,0 % | 1 | 0 |", "| C | 0 |",
+    "### DECLARE à relire", "| Relecture | Sorte | Ronde | Texte d'origine de l'unité | Claim désigné | key_fact du claim | Alertes | Utilisable |",
+    "A-1/r1/u2", "Texte d'origine \\| avec barre.", "s1-g1-c1 : Claim de A-1.", "Fait de A-1.", "doublon dans le segment", "à relire", "| non |",
+    "Relecture : 1 sur 2"]) {
+    if (!markdown.includes(expected)) throw new Error(`absent : ${expected}`);
+  }
+});
+
+await test("rapport R29.6b — section 8 : preuves insuffisantes, relecture incomplète, A, B, zone intermédiaire ; simulation sans objet", () => {
+  const base = { aDelete: 18, aDeclare: 2, bDelete: 10 };
+  const items = computeMetrics(clone(dataset(base))).declare_review.items;
+  const cases = [
+    [dataset({ aDelete: 5 }), [], /Preuves insuffisantes : aucune recommandation[^\n]*Il manque 20 verdict\(s\) UNCOVERED au total et 5 sur les segments A/],
+    [dataset(base), [], /Relecture incomplète : aucune recommandation\.\*\* 2 DECLARE de segments A à relire/],
+    [dataset(base), usableFor(items, 2), /Orientation chiffrée : implémenter DECLARE \(A\)\.\*\* Part de DECLARE sur les segments A : 10,0 % ; utilisables à la relecture : 100,0 %/],
+    [dataset(base), usableFor(items, 1), /Orientation chiffrée : retirer DECLARE du prompt \(B\)\.\*\* DECLARE fréquent mais peu utilisable/],
+    [dataset({ aDelete: 20, bDelete: 10 }), [], /retirer DECLARE du prompt \(B\)\.\*\* DECLARE rare sur les segments A/],
+    [dataset({ aDelete: 19, aDeclare: 1, bDelete: 10 }), [], /Zone intermédiaire — décision à prendre ensemble\.\*\* Part de DECLARE sur les segments A : 5,0 %/]
+  ];
+  for (const [records, reviews, pattern] of cases) {
+    const { markdown } = renderOf(records, { reviews });
+    if (!pattern.test(markdown)) throw new Error(`motif absent : ${pattern} — ${markdown.slice(markdown.indexOf("## 8."), markdown.indexOf("## 9.")).slice(0, 600)}`);
+  }
+  const { markdown } = renderOf(dataset(base), { identity: { ...REAL, mode: "simulation" } });
+  const section = markdown.slice(markdown.indexOf("## 8."), markdown.indexOf("## 9."));
+  if (!section.includes("Sans objet en simulation.") || /Orientation chiffrée|Preuves insuffisantes/.test(section)) throw new Error("simulation : recommandation affichée");
+  const { markdown: table } = renderOf(dataset({ aDelete: 5 }));
+  if (!/\| Verdicts UNCOVERED \(toutes sortes\) \| 5 \| 25 \| 20 \|/.test(table) || !/\| Dont sur segments A \| 5 \| 10 \| 5 \|/.test(table)) throw new Error("tableau des preuves absent");
+});
+
+await test("rapport R29.6b — relecture invalide signalée ; ancien résultat (sans champs R29.6b) toujours mis en forme", () => {
+  const bad = renderOf(dataset({ aDelete: 18, aDeclare: 2, bDelete: 10 }), { reviews: [{ review_id: "Z/r1/u1", usable: true, note: "" }] });
+  if (!bad.markdown.includes("**Relecture invalide** : Z/r1/u1 : aucun DECLARE correspondant")) throw new Error("relecture invalide non signalée");
+  const legacy = clone(metricsOfFixture);
+  for (const key of ["declare_review", "evidence", "recommendation"]) delete legacy[key];
+  delete legacy.verdicts.by_kind;
+  const markdown = render({ metrics: legacy });
+  for (const expected of ["## 5. Verdicts et DECLARE", "## 7. Unités à relire", "## 8. Aide à la décision R29.7 (DECLARE)", "Aucune donnée de décision."]) {
+    if (!markdown.includes(expected)) throw new Error(`absent : ${expected}`);
+  }
+  if (markdown.includes("Par sorte de segment") || markdown.includes("### DECLARE à relire")) throw new Error("sections R29.6b affichées sans données");
+});
+
+await test("rapport R29.6b — déterministe", () => {
+  const { markdown } = renderOf(dataset({ aDelete: 18, aDeclare: 2, bDelete: 10 }));
+  eq(markdown, renderOf(dataset({ aDelete: 18, aDeclare: 2, bDelete: 10 })).markdown);
+});
+
+// Corpus et exécution : champs ajoutés, requêtes inchangées.
+const ENRICHED_SCRIPT = {
+  sections: SCRIPT.sections.map((section, sectionIndex) => ({
+    segments: section.segments.map((segment, index) => ({
+      ...segment,
+      claims: [
+        { ...segment.claims[0], research_fact_ref: sectionIndex * 10 + index, is_unverified: false },
+        { ...segment.claims[1], research_fact_ref: 99, is_unverified: true }
+      ]
+    }))
+  }))
+};
+
+await test("corpus R29.6b — claims enrichis (référence, non vérifié, key_fact résolu) ; sans ces champs, claims et empreintes strictement ceux de R29.6", () => {
+  const enriched = naturalEntries({ script: ENRICHED_SCRIPT, research: RESEARCH, productionId: "prod-test", segmentIds: ["s1-g1", "s2-g3"] });
+  eq(enriched[0].segment.claims, [
+    { text: SCRIPT.sections[0].segments[0].claims[0].text, research_fact_ref: 0, is_unverified: false, key_fact: FACTS[0].claim },
+    { text: SCRIPT.sections[0].segments[0].claims[1].text, research_fact_ref: 99, is_unverified: true }
+  ]);
+  eq(enriched[1].segment.claims[0].key_fact, FACTS[12].claim);
+  eq(unsupportedWitness(enriched[0], 0).segment.claims, enriched[0].segment.claims);
+  eq(paraphraseWitness(enriched[0], 0).segment.claims, enriched[0].segment.claims);
+  eq(corpusIssues(buildCorpus({ naturals: enriched, countB: 1, countC: 1 })), []);
+  // Valeurs relevées avant R29.6b : le corpus de claims { text } n'a pas bougé d'un octet.
+  eq(CORPUS_FULL.corpus_sha256, "8a15e4da2236fa513cd22eba7a24e9ca6938a03f550d866c17a652cae4e45298");
+  eq(CORPUS_SMALL.corpus_sha256, "f9150ecc23d3255a618f12dad2c20ddece447728195bbcd05958917c447cc650");
+  eq(NATURALS_3[0].segment.claims.every(claim => Object.keys(claim).join() === "text"), true);
+  const manual = buildCorpus({ naturals: NATURALS_3, manualEntries: [{ kind: "C", research: RESEARCH, segment: { voiceover: "Regardez bien. Le site numéro 1 occupe onze hectares dans la vallée.", claims: [{ text: FACTS[0].claim, research_fact_ref: 0 }] } }] });
+  eq(manual.entries.at(-1).segment.claims[0].key_fact, FACTS[0].claim);
+});
+
+await test("exécution R29.6b — le juge reçoit exactement les mêmes requêtes qu'avec des claims { text } ; condensé enrichi (claims, unités par ronde)", async () => {
+  const plainEntries = entriesForStage(buildCorpus({ naturals: NATURALS_3, countB: 2, countC: 2 }), 1);
+  const enrichedNaturals = naturalEntries({ script: ENRICHED_SCRIPT, research: RESEARCH, productionId: "prod-test", segmentIds: ["s1-g1", "s1-g2", "s2-g1"] });
+  const enrichedEntries = entriesForStage(buildCorpus({ naturals: enrichedNaturals, countB: 2, countC: 2 }), 1);
+  const requests = async entries => {
+    const seen = [];
+    const transport = simulatedJudgeTransport({ mode: "mixed" });
+    await runCalibration({ entries, transport: async request => { seen.push(JSON.stringify(request)); return transport(request); }, cap: 200, now: () => 0 });
+    return seen;
+  };
+  eq(await requests(enrichedEntries), await requests(plainEntries));
+  const outcome = await runCalibration({ entries: enrichedEntries, transport: simulatedJudgeTransport({ mode: "mixed" }), cap: 200, now: () => 0 });
+  const first = outcome.records[0];
+  eq(first.claims[0], { text: enrichedNaturals[0].segment.claims[0].text, key_fact: FACTS[0].claim, is_unverified: false });
+  eq(first.claims[1].is_unverified, true);
+  for (const record of outcome.records) {
+    for (const entryRound of record.rounds) eq(entryRound.units.length > 0 && entryRound.units.every(unit => typeof unit.text === "string"), true);
+    eq(record.rounds[0].units.map(unit => unit.text).join(""), enrichedEntries.find(entry => entry.id === record.entry_id).segment.voiceover);
+  }
+  const repaired = outcome.records.find(record => record.rounds.length > 1);
+  if (!repaired) throw new Error("aucune réparation dans le jeu de test");
+  eq(repaired.rounds[1].units.map(unit => unit.text).join("").length < repaired.rounds[0].units.map(unit => unit.text).join("").length, true);
+});
+
+await test("exécution R29.6b — requêtes du juge en simulation identiques à celles de R29.6 (empreinte relevée avant le lot)", async () => {
+  const outcome = await runCalibration({ entries: entriesForStage(CORPUS_SMALL, 1), transport: simulatedJudgeTransport({ mode: "mixed" }), cap: 200, now: () => 0 });
+  const shas = outcome.records.flatMap(record => record.rounds.map(entryRound => entryRound.judgment?.request_sha256 ?? null));
+  eq(shas.length, 11);
+  eq(sha(stableJson(shas)), "2731dede8f84f83513b8b0aa10c7f9cec07bf1b82c092c52f6efb4561b5c5875");
+});
+
+// CLI : modèle de relecture, relecture, rapports distincts.
+await test("CLI R29.6b — finalize écrit le modèle de relecture ; avec --review il écrit des rapports -relu, sans rien écraser", () => {
+  const template = JSON.parse(read(path.join(OUT, "R29.6-relecture-modele.json")));
+  eq([template.version, template.corpus_sha256], ["judge-calibration-review.v1", JSON.parse(read(CORPUS_FILE)).corpus_sha256]);
+  if (template.items.length === 0) throw new Error("modèle sans élément");
+  eq(Object.keys(template.items[0]), ["review_id", "kind", "original_text", "claim_text", "key_fact_text", "flags", "usable", "note"]);
+  eq(template.items.every(item => item.usable === null), true);
+
+  const filled = path.join(WORK, "relecture.json");
+  const verdicts = template.items.map((item, index) => ({ ...item, usable: index % 2 === 0 }));
+  fs.writeFileSync(filled, JSON.stringify({ ...template, items: verdicts }));
+  const result = cli(["finalize", `--out=${OUT}`, `--review=${filled}`]);
+  eq(result.status, 0);
+  const document = JSON.parse(read(path.join(OUT, "R29.6-donnees-relu.json")));
+  eq(document.metrics.declare_review.summary.reviewed, template.items.length);
+  eq(document.metrics.declare_review.summary.usable, verdicts.filter(item => item.usable).length);
+  const markdown = read(path.join(OUT, "R29.6-rapport-calibration-relu.md"));
+  if (!markdown.includes("### DECLARE à relire") || !markdown.includes("| oui |")) throw new Error("rapport relu incomplet");
+  eq(fs.existsSync(path.join(OUT, "R29.6-relecture-modele.json")), true);
+  refused(cli(["finalize", `--out=${OUT}`, `--review=${filled}`]), /EEXIST|erreur inattendue/);
+  eq(cli(["finalize", `--out=${OUT}`, `--review=${filled}`, "--tag=-v2"]).status, 0);
+  eq(fs.existsSync(path.join(OUT, "R29.6-rapport-calibration-v2.md")), true);
+});
+
+await test("CLI R29.6b — relecture refusée : identifiant inconnu, valeur invalide, mauvais corpus, format ; l'ancien rapport reste intact", () => {
+  const template = JSON.parse(read(path.join(OUT, "R29.6-relecture-modele.json")));
+  const attempt = (name, doc, pattern) => {
+    const file = path.join(WORK, `${name}.json`);
+    fs.writeFileSync(file, JSON.stringify(doc));
+    refused(cli(["finalize", `--out=${OUT}`, `--review=${file}`, `--tag=-${name}`]), pattern);
+    eq(fs.existsSync(path.join(OUT, `R29.6-rapport-calibration-${name}.md`)), false);
+  };
+  attempt("inconnu", { ...template, items: [...template.items, { review_id: "Z-999/r1/u1", usable: true }] }, /aucun DECLARE correspondant/);
+  attempt("invalide", { ...template, items: template.items.map(item => ({ ...item, usable: "oui" })) }, /usable doit valoir/);
+  attempt("corpus", { ...template, corpus_sha256: "0".repeat(64) }, /corpus différent/);
+  attempt("format", { items: "x" }, /tableau d'éléments/);
+  refused(cli(["finalize", `--out=${OUT}`, `--review=${path.join(WORK, "absente.json")}`, "--tag=-absente"]), /illisible/);
+});
+
+// Mutations de la partie 8.
+const MUTATIONS_B = [
+  ["sortes : toutes les sortes comptées ensemble", [{ from: "const ofKind = records.filter(record => record.kind === kind);", to: "const ofKind = records;" }]],
+  ["preuves : seuil total exclusif", [{ from: "evidence.uncovered_total >= evidence.required_total", to: "evidence.uncovered_total > evidence.required_total" }]],
+  ["preuves : seuil sur A exclusif", [{ from: "evidence.uncovered_a >= evidence.required_a", to: "evidence.uncovered_a > evidence.required_a" }]],
+  ["recommandation : preuves insuffisantes ignorées", [{ from: "if (!evidence.sufficient) {", to: "if (false) {" }]],
+  ["recommandation : part des témoins B au lieu de A", [{ from: "const share = byKind.A.declare_share_of_uncovered;", to: "const share = byKind.B.declare_share_of_uncovered;" }]],
+  ["recommandation : seuil de retrait exclusif", [{ from: "if (share <= DECISION_RULE.declare_share_remove)", to: "if (share < DECISION_RULE.declare_share_remove)" }]],
+  ["recommandation : seuil d'implémentation exclusif", [{ from: "if (share >= DECISION_RULE.declare_share_implement) {", to: "if (share > DECISION_RULE.declare_share_implement) {" }]],
+  ["recommandation : seuil d'utilisable exclusif", [{ from: "usableRate >= DECISION_RULE.usable_rate_implement", to: "usableRate > DECISION_RULE.usable_rate_implement" }]],
+  ["recommandation : relecture incomplète ignorée", [{ from: "if (pending > 0) return result(", to: "if (false) return result(" }]],
+  ["recommandation : relecture invalide ignorée", [{ from: 'if (reviewIssues.length > 0) return result("REVIEW_INCOMPLETE", "relecture invalide");', to: "" }]],
+  ["DECLARE : claim décalé d'un cran", [{ from: "(record.claims ?? [])[index - 1] ?? null", to: "(record.claims ?? [])[index] ?? null" }]],
+  ["DECLARE : relecture ignorée", [{ from: "usable: review?.usable ?? null,", to: "usable: null," }]],
+  ["DECLARE : doublon jamais détecté", [{ from: "units.some(other => other.unit_id !== verdict.unit_id && other.text.includes(claimText))", to: "false" }]],
+  ["DECLARE : texte de la ronde 2 pris dans la ronde 1", [{ from: "const units = round.units ?? (round.round === 1 ? record.units_round1 : null) ?? null;", to: "const units = record.units_round1 ?? null;" }]],
+  ["relecture : valeur invalide acceptée", [{ from: 'if (![true, false, null].includes(item.usable ?? null)) issues.push(`${item.review_id} : usable doit valoir true, false ou null`);', to: "" }]],
+  ["relecture : doublon accepté", [{ from: "if (seen.has(item.review_id)) issues.push(`${item.review_id} : en double`);", to: "" }]]
+];
+
+await test("mutations R29.6b — témoin (copie non mutée) sans aucun écart", async () => {
+  eq(kindFailures(await isolatedMetrics()), []);
+});
+
+for (const [name, replacements] of MUTATIONS_B) {
+  await test(`mutation R29.6b détectée : ${name}`, async () => {
+    let failures;
+    try {
+      failures = kindFailures(await isolatedMetrics(replacements));
     } catch (error) {
       failures = [`exception : ${error.message}`];
     }

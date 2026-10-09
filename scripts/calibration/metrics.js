@@ -15,6 +15,18 @@ export const CRITERIA_THRESHOLDS = Object.freeze({
   max_rounds: 4
 });
 
+// R29.6b — règle de décision sur DECLARE (R29.7, D4) : minimum de preuves avant
+// toute recommandation, puis seuils sur la part de DECLARE des segments A.
+export const DECISION_RULE = Object.freeze({
+  min_uncovered_total: 25,
+  min_uncovered_a: 10,
+  declare_share_implement: 0.1,
+  declare_share_remove: 0.02,
+  usable_rate_implement: 0.7
+});
+
+export const REVIEW_VERSION = "judge-calibration-review.v1";
+
 const rate = (part, total) => (total > 0 ? part / total : null);
 
 export function mean(values) {
@@ -77,7 +89,114 @@ const isTimeout = call => /TIMEOUT/.test(`${call.failure?.reason ?? ""}`);
 
 // ---------------------------------------------------------------------------
 
-export function computeMetrics(records, { prices = null } = {}) {
+// Relecture « utilisable » des DECLARE : liste d'éléments { review_id, usable,
+// note }, ou document { items }. Renvoie les éléments normalisés et les
+// anomalies (vide si tout est valide).
+export function normalizeReviews(raw) {
+  const list = Array.isArray(raw) ? raw : Array.isArray(raw?.items) ? raw.items : null;
+  if (list === null) return { reviews: [], issues: ["relecture : tableau d'éléments attendu"] };
+  const issues = [];
+  const seen = new Set();
+  const reviews = [];
+  list.forEach((item, index) => {
+    if (typeof item?.review_id !== "string" || item.review_id === "") {
+      issues.push(`élément ${index + 1} : review_id absent`);
+      return;
+    }
+    if (seen.has(item.review_id)) issues.push(`${item.review_id} : en double`);
+    seen.add(item.review_id);
+    if (![true, false, null].includes(item.usable ?? null)) issues.push(`${item.review_id} : usable doit valoir true, false ou null`);
+    reviews.push({ review_id: item.review_id, usable: item.usable ?? null, note: typeof item.note === "string" ? item.note : "" });
+  });
+  return { reviews, issues };
+}
+
+const KINDS = ["A", "B", "C"];
+
+// Verdicts d'une sorte de segment, toutes rondes confondues.
+function verdictsOfKind(records, kind) {
+  const ofKind = records.filter(record => record.kind === kind);
+  const list = ofKind.flatMap(record => (record.rounds ?? []).flatMap(round => round.judgment?.status === "JUDGED" ? round.judgment.verdicts : []));
+  const uncovered = list.filter(item => item.verdict === "UNCOVERED");
+  const declares = uncovered.filter(item => item.action === "DECLARE");
+  const ran = ofKind.filter(record => record.result !== null);
+  return {
+    segments: ofKind.length,
+    units_judged: list.length,
+    covered: list.filter(item => item.verdict === "COVERED").length,
+    uncovered: uncovered.length,
+    delete_operations: uncovered.filter(item => item.action === "DELETE").length,
+    declare_operations: declares.length,
+    declare_share_of_uncovered: rate(declares.length, uncovered.length),
+    segments_with_declare: ofKind.filter(record => (record.rounds ?? []).some(round => round.judgment?.verdicts?.some(item => item.action === "DECLARE"))).length,
+    segments_blocked_by_declare: ofKind.filter(record => (record.rounds ?? []).some(round => round.repair?.refusal?.code === "DECLARE_NOT_SUPPORTED")).length,
+    segments_run: ran.length
+  };
+}
+
+// Chaque DECLARE : texte d'origine de l'unité, claim désigné, key_fact du
+// claim et alertes (claim inconnu ou non vérifié, doublon dans le segment).
+function declareItemsOf(records, reviews) {
+  const reviewOf = new Map(reviews.map(item => [item.review_id, item]));
+  const items = [];
+  for (const record of records) {
+    for (const round of record.rounds ?? []) {
+      if (round.judgment?.status !== "JUDGED") continue;
+      const units = round.units ?? (round.round === 1 ? record.units_round1 : null) ?? null;
+      for (const verdict of round.judgment.verdicts.filter(entry => entry.action === "DECLARE")) {
+        const index = Number(/-c(\d+)$/.exec(verdict.claim_id ?? "")?.[1] ?? 0);
+        const claim = index > 0 ? (record.claims ?? [])[index - 1] ?? null : null;
+        const unit = units?.find(candidate => candidate.unit_id === verdict.unit_id) ?? null;
+        const claimText = typeof claim?.text === "string" ? claim.text.trim() : null;
+        const reviewId = `${record.entry_id}/r${round.round}/${verdict.unit_id}`;
+        const review = reviewOf.get(reviewId) ?? null;
+        items.push({
+          review_id: reviewId,
+          entry_id: record.entry_id,
+          kind: record.kind,
+          round: round.round,
+          unit_id: verdict.unit_id,
+          claim_id: verdict.claim_id,
+          original_text: unit?.text ?? null,
+          claim_text: claimText,
+          key_fact_text: typeof claim?.key_fact === "string" ? claim.key_fact : null,
+          flags: {
+            claim_found: claim !== null,
+            claim_unverified: claim?.is_unverified === true,
+            duplicate_in_segment: units && claimText ? units.some(other => other.unit_id !== verdict.unit_id && other.text.includes(claimText)) : null
+          },
+          usable: review?.usable ?? null,
+          note: review?.note ?? ""
+        });
+      }
+    }
+  }
+  return items;
+}
+
+// Recommandation sur DECLARE (règle D4). Jamais avant le minimum de preuves.
+function recommendationOf({ evidence, byKind, items, reviewIssues }) {
+  if (!evidence.sufficient) {
+    return { status: "INSUFFICIENT_EVIDENCE", share_a: null, usable_rate_a: null, pending_a: null, basis: `UNCOVERED ${evidence.uncovered_total}/${evidence.required_total}, dont A ${evidence.uncovered_a}/${evidence.required_a}` };
+  }
+  const share = byKind.A.declare_share_of_uncovered;
+  const itemsA = items.filter(item => item.kind === "A");
+  const reviewedA = itemsA.filter(item => typeof item.usable === "boolean");
+  const usableRate = rate(reviewedA.filter(item => item.usable).length, reviewedA.length);
+  const pending = itemsA.length - reviewedA.length;
+  const result = (status, basis) => ({ status, share_a: share, usable_rate_a: usableRate, pending_a: pending, basis });
+  if (reviewIssues.length > 0) return result("REVIEW_INCOMPLETE", "relecture invalide");
+  if (share <= DECISION_RULE.declare_share_remove) return result("RECOMMEND_B", "DECLARE rare sur les segments A");
+  if (share >= DECISION_RULE.declare_share_implement) {
+    if (pending > 0) return result("REVIEW_INCOMPLETE", `${pending} DECLARE de segments A à relire`);
+    return usableRate >= DECISION_RULE.usable_rate_implement
+      ? result("RECOMMEND_A", "DECLARE fréquent et utilisable")
+      : result("RECOMMEND_B", "DECLARE fréquent mais peu utilisable");
+  }
+  return result("INTERMEDIATE", "part de DECLARE entre les deux seuils");
+}
+
+export function computeMetrics(records, { prices = null, reviews = [] } = {}) {
   const all = Array.isArray(records) ? records : [];
   const main = all.filter(record => record.stability_run !== true);
   const stabilityRecords = all.filter(record => record.stability_run === true);
@@ -222,6 +341,35 @@ export function computeMetrics(records, { prices = null } = {}) {
     }
   }
 
+  // R29.6b : sortes de segments séparées, DECLARE détaillés, preuves, recommandation.
+  verdicts.by_kind = Object.fromEntries(KINDS.map(kind => [kind, verdictsOfKind(main, kind)]));
+  const declareItems = declareItemsOf(main, reviews);
+  const knownReviewIds = new Set(declareItems.map(item => item.review_id));
+  const reviewIssues = reviews.filter(item => !knownReviewIds.has(item.review_id)).map(item => `${item.review_id} : aucun DECLARE correspondant`);
+  const reviewed = declareItems.filter(item => typeof item.usable === "boolean");
+  const evidence = {
+    uncovered_total: KINDS.reduce((sum, kind) => sum + verdicts.by_kind[kind].uncovered, 0),
+    uncovered_a: verdicts.by_kind.A.uncovered,
+    required_total: DECISION_RULE.min_uncovered_total,
+    required_a: DECISION_RULE.min_uncovered_a
+  };
+  evidence.sufficient = evidence.uncovered_total >= evidence.required_total && evidence.uncovered_a >= evidence.required_a;
+  evidence.missing_total = Math.max(0, evidence.required_total - evidence.uncovered_total);
+  evidence.missing_a = Math.max(0, evidence.required_a - evidence.uncovered_a);
+
+  const declareReview = {
+    items: declareItems,
+    summary: {
+      declare_total: declareItems.length,
+      reviewed: reviewed.length,
+      usable: reviewed.filter(item => item.usable).length,
+      not_usable: reviewed.filter(item => !item.usable).length,
+      pending: declareItems.length - reviewed.length,
+      usable_rate: rate(reviewed.filter(item => item.usable).length, reviewed.length)
+    },
+    issues: reviewIssues
+  };
+
   return {
     version: CALIBRATION_METRICS_VERSION,
     records: { total: all.length, main: main.length, stability: stabilityRecords.length },
@@ -230,6 +378,9 @@ export function computeMetrics(records, { prices = null } = {}) {
     verdicts,
     witnesses: { B: witnessB, C: witnessC },
     stability,
+    declare_review: declareReview,
+    evidence,
+    recommendation: recommendationOf({ evidence, byKind: verdicts.by_kind, items: declareItems, reviewIssues }),
     usage: { input_tokens: inputTokens, output_tokens: outputTokens, prices: prices ?? null, cost_usd: cost },
     review
   };

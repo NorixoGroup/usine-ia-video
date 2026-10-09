@@ -62,11 +62,21 @@ function fail(message) {
   throw new Error(`Corpus de calibration : ${message}`);
 }
 
-const cleanClaims = (claims, where) => {
+// R29.6b : un claim garde, quand ils existent, sa référence au dossier Research
+// (research_fact_ref), son indicateur is_unverified et le texte du key_fact
+// référencé (résolu à la construction, key_fact). Seul `text` est envoyé au
+// juge : les champs ajoutés ne servent qu'au rapport. Un claim sans ces champs
+// reste { text }, exactement comme avant.
+const cleanClaims = (claims, where, keyFacts = null) => {
   if (!Array.isArray(claims) || claims.length === 0) fail(`${where} : claims absents ou vides`);
   return claims.map((claim, index) => {
     if (typeof claim?.text !== "string" || claim.text.trim() === "") fail(`${where} : claim ${index + 1} sans texte`);
-    return { text: claim.text.trim() };
+    const cleaned = { text: claim.text.trim() };
+    if (Number.isSafeInteger(claim.research_fact_ref) && claim.research_fact_ref >= 0) cleaned.research_fact_ref = claim.research_fact_ref;
+    if (typeof claim.is_unverified === "boolean") cleaned.is_unverified = claim.is_unverified;
+    const keyFact = typeof claim.key_fact === "string" ? claim.key_fact : keyFacts?.[cleaned.research_fact_ref]?.claim;
+    if (typeof keyFact === "string") cleaned.key_fact = keyFact;
+    return cleaned;
   });
 };
 
@@ -108,7 +118,7 @@ export function naturalEntries({ script, research, productionId, segmentIds }) {
       kind: "A",
       origin: { production_id: productionId, segment_id: segmentId },
       research: cleanedResearch,
-      segment: { voiceover: segment.voiceover, claims: cleanClaims(segment.claims, `segment ${segmentId}`) },
+      segment: { voiceover: segment.voiceover, claims: cleanClaims(segment.claims, `segment ${segmentId}`, Array.isArray(research?.key_facts) ? research.key_facts : null) },
       expect: null
     };
   });
@@ -179,7 +189,7 @@ function manualEntry(raw, index) {
     kind: raw.kind,
     origin: { manual: true },
     research: cleanResearch(raw.research),
-    segment: { voiceover: raw.segment.voiceover, claims: cleanClaims(raw.segment.claims, `témoin manuel ${index + 1}`) },
+    segment: { voiceover: raw.segment.voiceover, claims: cleanClaims(raw.segment.claims, `témoin manuel ${index + 1}`, Array.isArray(raw.research?.key_facts) ? raw.research.key_facts : null) },
     expect: raw.kind === "B"
       ? { injected_start: raw.expect?.injected_start, sentence_id: "manuel" }
       : { all_covered: true }

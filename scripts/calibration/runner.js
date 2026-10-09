@@ -145,6 +145,12 @@ export function digestRun({ entry, gate, captured, wallMs = null, stabilityRun =
       voiceover_chars: entry.segment.voiceover.length,
       claims: entry.segment.claims.length
     },
+    // R29.6b : claims du segment (texte, key_fact, is_unverified), pour le rapport.
+    claims: entry.segment.claims.map(claim => ({
+      text: claim.text,
+      ...(typeof claim.key_fact === "string" ? { key_fact: claim.key_fact } : {}),
+      ...(typeof claim.is_unverified === "boolean" ? { is_unverified: claim.is_unverified } : {})
+    })),
     gate: {
       status: gate.status,
       failure: gate.failure ? { reason: gate.failure.reason, category: gate.failure.category, detail: gate.failure.detail } : null,
@@ -169,6 +175,7 @@ export function digestRun({ entry, gate, captured, wallMs = null, stabilityRun =
       round: round.round,
       boundary_status: round.boundary?.status ?? null,
       designated: round.boundary?.analysed_unit_ids?.length ?? 0,
+      units: unitsOf(round.boundary),
       judgment: judgmentOf(round.judgment),
       repair: round.repair
         ? { status: round.repair.status, refusal: round.repair.refusal, repaired_unit_ids: round.repair.repaired_unit_ids }
@@ -206,7 +213,9 @@ export async function runCalibration({
   for (const entry of entries) {
     let captured = null;
     const started = now();
-    const script = { sections: [{ segments: [{ voiceover: entry.segment.voiceover, claims: entry.segment.claims }] }] };
+    // Seul le texte des claims part au juge : les champs ajoutés par la
+    // construction du corpus (key_fact, is_unverified…) ne changent pas la requête.
+    const script = { sections: [{ segments: [{ voiceover: entry.segment.voiceover, claims: entry.segment.claims.map(claim => ({ text: claim.text })) }] }] };
     const result = await gate({
       script,
       research: entry.research,

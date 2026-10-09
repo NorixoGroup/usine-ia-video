@@ -122,6 +122,13 @@ export function renderReport(data) {
       ["Segments bloqués par DECLARE_NOT_SUPPORTED", `${metrics.verdicts.segments_blocked_by_declare} (${pct(metrics.verdicts.segments_blocked_by_declare_rate)})`]
     ]), "");
 
+  if (metrics.verdicts.by_kind) {
+    add("Par sorte de segment (A : segments réels ; B : témoins avec phrase non soutenue ; C : témoins de reformulation) :", "",
+      table(["Sorte", "Segments", "Unités jugées", "UNCOVERED", "DELETE", "DECLARE", "Part de DECLARE", "Segments avec DECLARE", "Segments bloqués"],
+        Object.entries(metrics.verdicts.by_kind).map(([kind, stats]) => [kind, stats.segments, stats.units_judged, stats.uncovered, stats.delete_operations,
+          stats.declare_operations, pct(stats.declare_share_of_uncovered), stats.segments_with_declare, stats.segments_blocked_by_declare])), "");
+  }
+
   add("## 6. Témoins", "",
     table(["Témoin", "Entrées évaluables / total", "Mesure", "Valeur"], [
       ["B — unités injectées détectées", `${metrics.witnesses.B.evaluable} / ${metrics.witnesses.B.entries}`, `${metrics.witnesses.B.detected} sur ${metrics.witnesses.B.injected_units}`, pct(metrics.witnesses.B.recall)],
@@ -141,18 +148,43 @@ export function renderReport(data) {
       : table(["Entrée", "Sorte", "Unité", "Opération", "Texte"],
         metrics.review.map(item => [item.entry_id, item.kind, item.unit_id, item.action === "DECLARE" ? `DECLARE ${item.claim_id}` : item.action, item.text])), "");
 
+  // R29.6b : chaque DECLARE avec son texte d'origine, le claim désigné et son key_fact.
+  const declareReview = metrics.declare_review;
+  if (declareReview) {
+    add("### DECLARE à relire", "",
+      declareReview.items.length === 0
+        ? "Aucun DECLARE."
+        : [
+          "Pour chaque DECLARE : le remplacement produirait le texte du claim désigné. « Utilisable » se renseigne dans le fichier de relecture (`true` : remplacement fidèle ; `false` : hors sujet, faux ou doublon). Alertes : claim introuvable, claim non vérifié, claim déjà présent dans le segment.", "",
+          table(["Relecture", "Sorte", "Ronde", "Texte d'origine de l'unité", "Claim désigné", "key_fact du claim", "Alertes", "Utilisable"],
+            declareReview.items.map(item => [item.review_id, item.kind, item.round, item.original_text, `${item.claim_id ?? dash} : ${item.claim_text ?? dash}`, item.key_fact_text,
+              [!item.flags.claim_found && "claim introuvable", item.flags.claim_unverified && "claim non vérifié", item.flags.duplicate_in_segment && "doublon dans le segment"].filter(Boolean).join(", ") || dash,
+              item.usable === null ? "à relire" : item.usable ? "oui" : "non"]))
+        ].join("\n"), "",
+      `Relecture : ${declareReview.summary.reviewed} sur ${declareReview.summary.declare_total} (utilisables : ${declareReview.summary.usable}, non utilisables : ${declareReview.summary.not_usable}, à relire : ${declareReview.summary.pending}).`, "");
+    if (declareReview.issues.length > 0) add(`**Relecture invalide** : ${declareReview.issues.join(" ; ")}`, "");
+  }
+
   add("## 8. Aide à la décision R29.7 (DECLARE)", "");
-  const share = metrics.verdicts.declare_share_of_uncovered;
-  const blocked = metrics.verdicts.segments_blocked_by_declare_rate;
   if (identity.mode !== "real") {
     add("Sans objet en simulation.", "");
-  } else if (share === null && blocked === null) {
-    add("Aucun verdict UNCOVERED : pas de mesure sur DECLARE.", "");
+  } else if (!metrics.evidence) {
+    add("Aucune donnée de décision.", "");
   } else {
-    const implement = (share ?? 0) >= 0.1 || (blocked ?? 0) >= 0.1;
-    const remove = (share ?? 0) <= 0.02 && (blocked ?? 0) <= 0.02;
-    add(`Part de DECLARE : ${pct(share)} ; segments bloqués : ${pct(blocked)}. Règle proposée : ≥ 10 % → implémenter DECLARE ; ≤ 2 % → le retirer du prompt ; entre les deux → décision à prendre ensemble.`,
-      `**Orientation chiffrée : ${implement ? "implémenter DECLARE (A)" : remove ? "retirer DECLARE du prompt (B)" : "zone intermédiaire — décision à prendre"}.**`, "");
+    const { evidence, recommendation } = metrics;
+    add(table(["Minimum de preuves", "Obtenu", "Requis", "Manquant"], [
+      ["Verdicts UNCOVERED (toutes sortes)", evidence.uncovered_total, evidence.required_total, evidence.missing_total],
+      ["Dont sur segments A", evidence.uncovered_a, evidence.required_a, evidence.missing_a]
+    ]), "");
+    const orientation = {
+      INSUFFICIENT_EVIDENCE: `**Preuves insuffisantes : aucune recommandation.** Étendre l'échantillon (étape 2 complète, davantage de segments A) avant de décider. Il manque ${evidence.missing_total} verdict(s) UNCOVERED au total et ${evidence.missing_a} sur les segments A.`,
+      REVIEW_INCOMPLETE: `**Relecture incomplète : aucune recommandation.** ${recommendation.basis}.`,
+      RECOMMEND_A: `**Orientation chiffrée : implémenter DECLARE (A).** Part de DECLARE sur les segments A : ${pct(recommendation.share_a)} ; utilisables à la relecture : ${pct(recommendation.usable_rate_a)}.`,
+      RECOMMEND_B: `**Orientation chiffrée : retirer DECLARE du prompt (B).** ${recommendation.basis} (part de DECLARE sur les segments A : ${pct(recommendation.share_a)}${recommendation.usable_rate_a === null ? "" : `, utilisables : ${pct(recommendation.usable_rate_a)}`}).`,
+      INTERMEDIATE: `**Zone intermédiaire — décision à prendre ensemble.** Part de DECLARE sur les segments A : ${pct(recommendation.share_a)}.`
+    }[recommendation.status];
+    add(orientation, "",
+      "Règle (D4) : au moins 25 verdicts UNCOVERED dont 10 sur segments A ; part de DECLARE sur les segments A ≥ 10 % et ≥ 70 % d'utilisables → implémenter ; ≤ 2 %, ou fréquent mais peu utilisable → retirer ; entre les deux → décision à prendre ensemble. Les témoins B ne comptent pas dans la part de DECLARE.", "");
   }
 
   add("## 9. Limites", "",
@@ -160,7 +192,8 @@ export function renderReport(data) {
     "- Les témoins B n'ajoutent qu'une phrase non soutenue en fin de segment ; les témoins C reprennent les claims à l'identique (ordre inversé, phrases d'accroche) : ils mesurent les fausses alertes les plus évidentes, pas la tolérance à une vraie paraphrase.",
     "- La justesse du juge sur les segments naturels n'est pas mesurable sans étiquetage : les unités de la section 7 sont à relire.",
     "- Le coût dépend de la grille de prix fournie ; les relances internes du SDK ne sont pas visibles dans ces chiffres.",
-    "- Une réponse rejouée depuis le cache est reconnue à sa durée nulle.", "");
+    "- Une réponse rejouée depuis le cache est reconnue à sa durée nulle.",
+    "- « Utilisable » est un jugement humain, saisi dans le fichier de relecture ; il n'est jamais déduit.", "");
 
   return `${lines.join("\n")}\n`;
 }

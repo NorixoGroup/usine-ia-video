@@ -17,6 +17,11 @@
 //     --out=<dossier-sortie> --simulate=mixed
 //   node scripts/coverage-judge-calibration.js finalize --out=<dossier-sortie>
 //
+// Relecture « utilisable » des DECLARE (R29.6b) : `finalize` écrit un modèle
+// R29.6-relecture-modele.json ; après l'avoir renseigné (usable: true, false
+// ou null), relancer avec --review=<fichier> écrit des rapports distincts
+// (suffixe -relu, ou --tag=<suffixe>), sans rien écraser.
+//
 // Mode réel (manuel, après accord explicite) :
 //   PIPELINE_REAL_CALLS_ACK=1 node --env-file=.env.local scripts/coverage-judge-calibration.js run \
 //     --corpus=<corpus.json> --stage=1 --out=<dossier-sortie> --real --cap=24 \
@@ -32,7 +37,7 @@ import { fileURLToPath } from "node:url";
 
 import { assertValidCorpus, buildCorpus, entriesForStage, naturalEntries } from "./calibration/corpus.js";
 import { SIMULATION_MODES, runCalibration, simulatedJudgeTransport } from "./calibration/runner.js";
-import { computeMetrics, evaluateCriteria } from "./calibration/metrics.js";
+import { REVIEW_VERSION, computeMetrics, evaluateCriteria, normalizeReviews } from "./calibration/metrics.js";
 import { buildResultsDocument, renderReport } from "./calibration/report.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -286,7 +291,19 @@ function finalize(args) {
   const prices = pricesOf(args) ?? first.doc.identity.prices ?? null;
   const budgetUsd = budgetOf(args) ?? first.doc.identity.budget_usd ?? null;
   const records = docs.flatMap(item => item.doc.records);
-  const metrics = computeMetrics(records, { prices });
+
+  // Relecture « utilisable » : document produit par un finalize précédent, rempli à la main.
+  let reviews = [];
+  if (args.review !== undefined) {
+    const reviewDoc = readJson(path.resolve(need(args, "review")), "relecture");
+    if (reviewDoc?.corpus_sha256 !== undefined && reviewDoc.corpus_sha256 !== first.doc.corpus.corpus_sha256) fail("relecture : corpus différent.");
+    const normalized = normalizeReviews(reviewDoc);
+    if (normalized.issues.length > 0) fail(`relecture invalide — ${normalized.issues.slice(0, 5).join(" ; ")}`);
+    reviews = normalized.reviews;
+  }
+  const metrics = computeMetrics(records, { prices, reviews });
+  if (metrics.declare_review.issues.length > 0) fail(`relecture invalide — ${metrics.declare_review.issues.slice(0, 5).join(" ; ")}`);
+  const tag = typeof args.tag === "string" ? args.tag : args.review !== undefined ? "-relu" : "";
   const cap = docs.reduce((sum, item) => sum + item.doc.identity.cap, 0);
   const toolCalls = docs.reduce((sum, item) => sum + item.doc.identity.tool_calls, 0);
   const within = docs.every(item => item.doc.identity.tool_calls <= item.doc.identity.cap);
@@ -308,8 +325,8 @@ function finalize(args) {
 
   const corpus = { version: first.doc.corpus.version, corpus_sha256: first.doc.corpus.corpus_sha256, counts: first.doc.corpus.counts };
   const document = buildResultsDocument({ identity, corpus, halted: null, records, metrics, criteria });
-  fs.writeFileSync(path.join(out, "R29.6-donnees.json"), `${JSON.stringify(document, null, 2)}\n`, { flag: "wx" });
-  fs.writeFileSync(path.join(out, "R29.6-rapport-calibration.md"), renderReport({
+  fs.writeFileSync(path.join(out, `R29.6-donnees${tag}.json`), `${JSON.stringify(document, null, 2)}\n`, { flag: "wx" });
+  fs.writeFileSync(path.join(out, `R29.6-rapport-calibration${tag}.md`), renderReport({
     title: "R29.6 — rapport de calibration du juge",
     identity,
     corpus,
@@ -318,8 +335,29 @@ function finalize(args) {
     halted: null
   }), { flag: "wx" });
 
-  console.log(`Rapport final : ${path.join(out, "R29.6-rapport-calibration.md")}`);
-  console.log(`Données       : ${path.join(out, "R29.6-donnees.json")}`);
+  // Modèle de relecture : un élément par DECLARE, `usable` à renseigner à la main.
+  if (args.review === undefined && metrics.declare_review.items.length > 0) {
+    const template = {
+      version: REVIEW_VERSION,
+      corpus_sha256: corpus.corpus_sha256,
+      consigne: "Renseigner « usable » : true si le texte du claim remplacerait fidèlement l'unité, false sinon (hors sujet, faux, doublon), null si non relu.",
+      items: metrics.declare_review.items.map(item => ({
+        review_id: item.review_id,
+        kind: item.kind,
+        original_text: item.original_text,
+        claim_text: item.claim_text,
+        key_fact_text: item.key_fact_text,
+        flags: item.flags,
+        usable: null,
+        note: ""
+      }))
+    };
+    fs.writeFileSync(path.join(out, "R29.6-relecture-modele.json"), `${JSON.stringify(template, null, 2)}\n`, { flag: "wx" });
+    console.log(`Relecture     : ${path.join(out, "R29.6-relecture-modele.json")}`);
+  }
+
+  console.log(`Rapport final : ${path.join(out, `R29.6-rapport-calibration${tag}.md`)}`);
+  console.log(`Données       : ${path.join(out, `R29.6-donnees${tag}.json`)}`);
   console.log(criteria.map(item => `  ${item.id} ${item.status}`).join("\n"));
 }
 
