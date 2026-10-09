@@ -1,5 +1,5 @@
 // R28.11 — contrôle du verrou de couverture persisté, à la reprise (baseline
-// v1.0.3, sections 7 et 8). Le verrou complet (11 éléments, COVERAGE_LOCK_KEYS)
+// v1.0.3, sections 7 et 8). Le verrou complet (13 éléments, COVERAGE_LOCK_KEYS)
 // est enregistré dans les métadonnées Script (script.json,
 // claim_coverage_validation.lock) lors du premier passage ; à la reprise, il
 // est relu et comparé strictement au verrou courant.

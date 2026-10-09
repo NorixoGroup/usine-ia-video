@@ -24,7 +24,7 @@ import {
   coordinateCoverage
 } from "../src/utils/coverage-coordinator.js";
 import { coverageJudgeV2Version } from "../src/utils/coverage-judge-v2.js";
-import { boundaryProtocolIdFromLock, lockSha256 } from "../src/utils/coverage-lock.js";
+import { boundaryProtocolIdFromLock, coordinatorLockElement, executorLockElement, lockSha256 } from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageUnitSplitterVersion } from "../src/utils/coverage-unit-splitter.js";
@@ -68,8 +68,10 @@ const LOCK = Object.freeze({
   language: "fr",
   judge: coverageJudgeV2Version(),
   repair: "coverage-repair.v1",
+  applier: "coverage-delete-applier.v1",
   baseline: "architecture-baseline-v1.0.3",
-  coordinator: POLICY.version
+  coordinator: coordinatorLockElement({ policy: POLICY, coordinatorVersion: "coverage-coordinator.v1" }),
+  executor: executorLockElement({ executorVersion: "coverage-judge-executor.v1", limits: { max_request_chars: 16000, max_tokens: 4000, max_response_chars: 16000, timeout_ms: 120000 } })
 });
 const CLAIMS = Object.freeze([{ text: "Le bassin couvre environ un million de kilomètres carrés." }]);
 
@@ -129,9 +131,15 @@ const MODELS = {
   declare: sentence => (sentence?.includes("inhabitable") ? { action: "DECLARE", claim_id: "s2-g4-c1" } : null)
 };
 
+// R29.5 : l'élément « coordinator » du verrou porte l'empreinte des bornes de la
+// politique ; un verrou cohérent avec une politique de test en dérive.
+const lockFor = policy => policy !== null && typeof policy === "object"
+  ? { ...LOCK, coordinator: coordinatorLockElement({ policy, coordinatorVersion: "coverage-coordinator.v1" }) }
+  : LOCK;
+
 const run = (model = MODELS.allCovered, overrides = {}, transportOptions = {}) => {
   const t = transport({ verdict: model, ...transportOptions });
-  return coordinateCoverage({ segment: segmentOf(), claims: CLAIMS, lock: LOCK, transport: t.fn, policy: POLICY, ...overrides })
+  return coordinateCoverage({ segment: segmentOf(), claims: CLAIMS, lock: lockFor(overrides.policy ?? POLICY), transport: t.fn, policy: POLICY, ...overrides })
     .then(result => ({ result, calls: t.calls }));
 };
 
@@ -447,7 +455,7 @@ const MIXED_VOICEOVER = "Imaginez la scène. Le bassin couvre environ un million
 const MIXED_S = ["Imaginez la scène. ", "Le bassin couvre environ un million de kilomètres carrés. ", "Sans lui, l’intérieur serait inhabitable."];
 const mixedRun = (model, overrides = {}) => {
   const t = transport({ verdict: model, sentences: MIXED_S });
-  return coordinateCoverage({ segment: segmentOf(MIXED_VOICEOVER), claims: CLAIMS, lock: LOCK, transport: t.fn, policy: POLICY, ...overrides }).then(result => ({ result, calls: t.calls }));
+  return coordinateCoverage({ segment: segmentOf(MIXED_VOICEOVER), claims: CLAIMS, lock: lockFor(overrides.policy ?? POLICY), transport: t.fn, policy: POLICY, ...overrides }).then(result => ({ result, calls: t.calls }));
 };
 
 await test("structure de sortie figée (PASS)", () => {
@@ -664,7 +672,7 @@ async function behaviourFailures(module) {
     const guard = new Promise(resolve => setTimeout(() => resolve({ script_status: "BLOQUÉ" }), 2000));
     try {
       const result = await Promise.race([
-        module.coordinateCoverage({ segment: segmentOf(), claims: CLAIMS, lock: LOCK, transport: t.fn, policy: POLICY, ...overrides }),
+        module.coordinateCoverage({ segment: segmentOf(), claims: CLAIMS, lock: lockFor(overrides.policy ?? POLICY), transport: t.fn, policy: POLICY, ...overrides }),
         guard
       ]);
       return { result, calls: t.calls.length };

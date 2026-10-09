@@ -24,7 +24,7 @@ import {
   planCoverageRepair
 } from "../src/utils/coverage-repair.js";
 import { coverageJudgeV2Version, judgeSegmentCoverageV2 } from "../src/utils/coverage-judge-v2.js";
-import { COVERAGE_LOCK_KEYS, lockSha256 } from "../src/utils/coverage-lock.js";
+import { COVERAGE_LOCK_KEYS, coordinatorLockElement, executorLockElement, lockSha256 } from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageUnitSplitterVersion } from "../src/utils/coverage-unit-splitter.js";
@@ -66,7 +66,10 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: COVERAGE_REPAIR_VERSION, coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.3" });
+// R29.5 : valeurs littérales des nouveaux éléments (version et empreinte des bornes).
+const COORDINATOR_ELEMENT = coordinatorLockElement({ policy: { version: "coverage-coordinator-policy.v1", max_rounds: 10, max_total_judge_calls: 12 }, coordinatorVersion: "coverage-coordinator.v1" });
+const EXECUTOR_ELEMENT = executorLockElement({ executorVersion: "coverage-judge-executor.v1", limits: { max_request_chars: 16000, max_tokens: 4000, max_response_chars: 16000, timeout_ms: 120000 } });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: coverageJudgeV2Version(), repair: COVERAGE_REPAIR_VERSION, applier: "coverage-delete-applier.v1", coordinator: COORDINATOR_ELEMENT, executor: EXECUTOR_ELEMENT, baseline: "architecture-baseline-v1.0.3" });
 
 const boundaryOf = voiceover => composeCoverageBoundary({ voiceover, lock: BOUNDARY_LOCK, entities: ENTITIES });
 

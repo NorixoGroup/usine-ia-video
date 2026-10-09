@@ -31,6 +31,8 @@ import {
   COMPOSITE_COVERAGE_BOUNDARY_VERSION,
   COVERAGE_LOCK_KEYS,
   boundaryProtocolIdFromLock,
+  coordinatorLockElement,
+  executorLockElement,
   lockSha256
 } from "../src/utils/coverage-lock.js";
 import { composeCoverageBoundary } from "../src/utils/composite-coverage-boundary.js";
@@ -77,7 +79,10 @@ const BOUNDARY_LOCK = Object.freeze({
   classification: coverageClassificationVersion(),
   language: "fr"
 });
-const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: V2, repair: "coverage-repair.v1", coordinator: "coverage-coordinator-policy.v1", baseline: "architecture-baseline-v1.0.3" });
+// R29.5 : valeurs littérales des nouveaux éléments (version et empreinte des bornes).
+const COORDINATOR_ELEMENT = coordinatorLockElement({ policy: { version: "coverage-coordinator-policy.v1", max_rounds: 10, max_total_judge_calls: 12 }, coordinatorVersion: "coverage-coordinator.v1" });
+const EXECUTOR_ELEMENT = executorLockElement({ executorVersion: "coverage-judge-executor.v1", limits: { max_request_chars: 16000, max_tokens: 4000, max_response_chars: 16000, timeout_ms: 120000 } });
+const LOCK = Object.freeze({ ...BOUNDARY_LOCK, judge: V2, repair: "coverage-repair.v1", applier: "coverage-delete-applier.v1", coordinator: COORDINATOR_ELEMENT, executor: EXECUTOR_ELEMENT, baseline: "architecture-baseline-v1.0.3" });
 
 // Exemple de la baseline (section 11), segment s2-g4.
 const BASELINE_VOICEOVER =
@@ -147,7 +152,7 @@ await test("constantes publiques : protocole, version, verrou, bornes, statuts",
   deepStrictEqual(coverageJudgeV2Version(), V2);
   deepStrictEqual([...COVERAGE_LOCK_KEYS], [
     "splitter", "normalization", "protection", "entities_rule_version", "entities_fingerprint",
-    "classification", "judge", "repair", "coordinator", "language", "baseline"
+    "classification", "judge", "repair", "applier", "coordinator", "executor", "language", "baseline"
   ]);
   deepStrictEqual(plain(JUDGE_BOUNDS), {
     max_tokens: 2000, output_token_budget: 1400, output_envelope_chars: 340, output_entry_chars: 140,
@@ -480,10 +485,10 @@ const stable = value => (value === null || typeof value !== "object")
   ? JSON.stringify(value ?? null)
   : `{${Object.keys(value).sort().map(key => `${JSON.stringify(key)}:${stable(value[key])}`).join(",")}}`;
 
-await test("R28.9A — empreinte du verrou : SHA-256 du JSON stable des 11 champs, recalculée indépendamment", () => {
+await test("R28.9A — empreinte du verrou : SHA-256 du JSON stable des 13 champs, recalculée indépendamment", () => {
   const expected = sha256(stable(Object.fromEntries(COVERAGE_LOCK_KEYS.map(key => [key, LOCK[key]]))));
   deepStrictEqual(lockSha256(LOCK), expected);
-  deepStrictEqual(COVERAGE_LOCK_KEYS.length, 11);
+  deepStrictEqual(COVERAGE_LOCK_KEYS.length, 13);
   if (lockSha256(LOCK) === lockSha256(OLD_LOCK)) throw new Error("ancien verrou indiscernable");
 });
 

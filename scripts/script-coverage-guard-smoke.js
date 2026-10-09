@@ -27,7 +27,7 @@ import { runScriptCoverageGate } from "../src/utils/script-coverage-gate.js";
 import { SCRIPT_COVERAGE_POLICY, buildCoverageLock, researchEntitiesOf } from "../src/utils/coverage-lock-builder.js";
 import { coordinateCoverage } from "../src/utils/coverage-coordinator.js";
 import { EXECUTOR_LIMITS } from "../src/utils/coverage-judge-executor.js";
-import { boundaryProtocolIdFromLock, lockSha256 } from "../src/utils/coverage-lock.js";
+import { boundaryProtocolIdFromLock, coordinatorLockElement, lockSha256 } from "../src/utils/coverage-lock.js";
 import { CACHE_DIR, JOURNAL_FILE, configureCallGuard, getCallGuardStatus, resetCallGuard, setCacheBypass } from "../src/services/call-guard.js";
 import { previewMessageCost } from "../src/services/anthropic.js";
 import { estimateCoverageBudget } from "../src/utils/coverage-budget-preflight.js";
@@ -275,7 +275,10 @@ await test("D3 — retrait impossible sur un segment PASS : jamais de PASS (I20)
 // Requête du juge pour un segment, capturée sans appel réel.
 async function firstRequest(input) {
   let captured = null;
-  await coordinateCoverage({ ...input, transport: async request => { captured = request; throw new Error("capture"); }, policy: { ...input.policy, max_total_judge_calls: 1 } });
+  const policy = { ...input.policy, max_total_judge_calls: 1 };
+  // R29.5 : le verrou porte l'empreinte des bornes de la politique.
+  const lock = { ...input.lock, coordinator: coordinatorLockElement({ policy, coordinatorVersion: "coverage-coordinator.v1" }) };
+  await coordinateCoverage({ ...input, lock, transport: async request => { captured = request; throw new Error("capture"); }, policy });
   return captured;
 }
 

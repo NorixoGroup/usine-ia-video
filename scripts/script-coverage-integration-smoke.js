@@ -27,7 +27,7 @@ import { SCRIPT_COVERAGE_POLICY, buildCoverageLock, researchEntitiesOf } from ".
 import { coordinateCoverage } from "../src/utils/coverage-coordinator.js";
 import { discardRejectedJudgeResponses } from "../src/utils/coverage-judge-executor.js";
 import { coverageJudgeV2Version } from "../src/utils/coverage-judge-v2.js";
-import { ARCHITECTURE_BASELINE_VERSION, boundaryProtocolIdFromLock, lockSha256 } from "../src/utils/coverage-lock.js";
+import { ARCHITECTURE_BASELINE_VERSION, boundaryProtocolIdFromLock, coordinatorLockElement, executorLockElement, lockSha256 } from "../src/utils/coverage-lock.js";
 import { coverageUnitSplitterVersion, splitCoverageUnits } from "../src/utils/coverage-unit-splitter.js";
 import { coverageProtectionVersion, extractResearchEntities } from "../src/utils/coverage-protection.js";
 import { coverageClassificationVersion } from "../src/utils/coverage-classification.js";
@@ -154,7 +154,7 @@ await test("constantes publiques : version de la porte, politique versionnée, s
   if (!Object.isFrozen(SCRIPT_COVERAGE_POLICY)) throw new Error("politique modifiable");
 });
 
-await test("verrou reconstruit : 11 champs, versions courantes des composants", () => {
+await test("verrou reconstruit : 13 champs, versions courantes des composants", () => {
   deepStrictEqual(clone(LOCK), {
     splitter: coverageUnitSplitterVersion(),
     normalization: "coverage-normalization.v1",
@@ -164,7 +164,9 @@ await test("verrou reconstruit : 11 champs, versions courantes des composants", 
     classification: coverageClassificationVersion(),
     judge: coverageJudgeV2Version(),
     repair: COVERAGE_REPAIR_VERSION,
-    coordinator: "coverage-coordinator-policy.v1",
+    applier: "coverage-delete-applier.v1",
+    coordinator: coordinatorLockElement({ policy: { version: "coverage-coordinator-policy.v1", max_rounds: 10, max_total_judge_calls: 12 }, coordinatorVersion: "coverage-coordinator.v1" }),
+    executor: executorLockElement({ executorVersion: "coverage-judge-executor.v1", limits: { max_request_chars: 16000, max_tokens: 4000, max_response_chars: 16000, timeout_ms: 120000 } }),
     language: "fr",
     baseline: ARCHITECTURE_BASELINE_VERSION
   });
@@ -175,8 +177,9 @@ await test("verrou reconstruit : déterministe et figé", () => {
   if (!Object.isFrozen(LOCK)) throw new Error("verrou modifiable");
 });
 
-await test("verrou reconstruit : la politique fixe l'élément 10", () => {
-  deepStrictEqual(buildCoverageLock({ entities: ENTITIES, policy: { version: "autre" } }).coordinator, "autre");
+await test("verrou reconstruit : la politique fixe l'élément 10 (version et bornes)", () => {
+  deepStrictEqual(buildCoverageLock({ entities: ENTITIES, policy: { version: "autre" } }).coordinator, coordinatorLockElement({ policy: { version: "autre" }, coordinatorVersion: "coverage-coordinator.v1" }));
+  if (buildCoverageLock({ entities: ENTITIES, policy: { version: "coverage-coordinator-policy.v1", max_rounds: 11, max_total_judge_calls: 12 } }).coordinator === LOCK.coordinator) throw new Error("bornes non verrouillées");
 });
 
 await test("entités Research : règle de Protection appliquée aux key_facts", () => {

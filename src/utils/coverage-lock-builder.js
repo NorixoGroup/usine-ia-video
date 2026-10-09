@@ -17,7 +17,10 @@ import { coverageProtectionVersion, extractResearchEntities, RESEARCH_ENTITY_RUL
 import { coverageClassificationVersion } from "./coverage-classification.js";
 import { coverageJudgeV2Version } from "./coverage-judge-v2.js";
 import { COVERAGE_REPAIR_VERSION } from "./coverage-repair.js";
-import { ARCHITECTURE_BASELINE_VERSION } from "./coverage-lock.js";
+import { COVERAGE_JUDGE_EXECUTOR_VERSION, EXECUTOR_LIMITS } from "./coverage-judge-executor.js";
+import { COVERAGE_DELETE_APPLIER_VERSION } from "./coverage-delete-applier.js";
+import { COVERAGE_COORDINATOR_VERSION } from "./coverage-coordinator.js";
+import { ARCHITECTURE_BASELINE_VERSION, coordinatorLockElement, executorLockElement } from "./coverage-lock.js";
 
 // Politique versionnée du coordinateur (élément 10 du verrou).
 export const SCRIPT_COVERAGE_POLICY = Object.freeze({
@@ -56,7 +59,9 @@ export function buildCoverageLock({ entities, policy = SCRIPT_COVERAGE_POLICY })
     classification: coverageClassificationVersion(),
     judge: coverageJudgeV2Version(),
     repair: COVERAGE_REPAIR_VERSION,
-    coordinator: policy?.version ?? null,
+    applier: COVERAGE_DELETE_APPLIER_VERSION,
+    coordinator: coordinatorLockElement({ policy, coordinatorVersion: COVERAGE_COORDINATOR_VERSION }),
+    executor: executorLockElement({ executorVersion: COVERAGE_JUDGE_EXECUTOR_VERSION, limits: EXECUTOR_LIMITS }),
     language: LANGUAGE,
     baseline: ARCHITECTURE_BASELINE_VERSION
   });

@@ -82,9 +82,9 @@ const CURRENT = buildLock(research);
 
 console.log("--- 1. Premier passage : le verrou est enregistré ---");
 
-await test("script.json : le verrou complet (11 éléments, dans l'ordre de la section 8) est enregistré", () => {
+await test("script.json : le verrou complet (13 éléments, dans l'ordre de la section 8) est enregistré", () => {
   deepStrictEqual(Object.keys(COVERAGE.lock), [...COVERAGE_LOCK_KEYS]);
-  deepStrictEqual(COVERAGE_LOCK_KEYS.length, 11);
+  deepStrictEqual(COVERAGE_LOCK_KEYS.length, 13);
   for (const key of COVERAGE_LOCK_KEYS) if (typeof COVERAGE.lock[key] !== "string" || COVERAGE.lock[key] === "") throw new Error(key);
 });
 
@@ -175,6 +175,30 @@ await test("réparation différente → LOCK_MISMATCH (repair)", () => {
 
 await test("coordinateur différent → LOCK_MISMATCH (coordinator)", () => {
   expectRefusal(check(coverageWith("coordinator", "coverage-coordinator-policy.v0")), "LOCK_MISMATCH", "coordinator");
+});
+
+// R29.5 : applicateur, bornes du coordinateur et limites de l'exécuteur sont verrouillés.
+await test("applicateur différent → LOCK_MISMATCH (applier)", () => {
+  expectRefusal(check(coverageWith("applier", "coverage-delete-applier.v0")), "LOCK_MISMATCH", "applier");
+});
+
+await test("exécuteur (version ou limites) différent → LOCK_MISMATCH (executor)", () => {
+  expectRefusal(check(coverageWith("executor", "coverage-judge-executor.v1+limits.0")), "LOCK_MISMATCH", "executor");
+  expectRefusal(check(coverageWith("executor", "coverage-judge-executor.v0+limits.0")), "LOCK_MISMATCH", "executor");
+});
+
+await test("bornes du coordinateur modifiées dans le verrou enregistré → LOCK_MISMATCH (coordinator)", () => {
+  const current = COVERAGE.lock.coordinator;
+  expectRefusal(check(coverageWith("coordinator", current.replace(/bounds\.[0-9a-f]{64}$/, `bounds.${"0".repeat(64)}`))), "LOCK_MISMATCH", "coordinator");
+});
+
+await test("verrou enregistré à 11 éléments (avant R29.5) → LOCK_INVALID, premier élément manquant (applier), aucune migration", () => {
+  const coverage = clone(COVERAGE);
+  delete coverage.lock.applier;
+  delete coverage.lock.executor;
+  coverage.lock_sha256 = lockSha256(coverage.lock);
+  for (const segment of coverage.segments) segment.lock_sha256 = coverage.lock_sha256;
+  expectRefusal(check(coverage), "LOCK_INVALID", "applier");
 });
 
 await test("empreinte des entités différente (dossier Research modifié) → LOCK_MISMATCH (entities_fingerprint)", () => {

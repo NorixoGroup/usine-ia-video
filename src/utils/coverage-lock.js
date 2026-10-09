@@ -6,7 +6,7 @@
 //
 // Il est l'UNIQUE définition de :
 //   - la baseline et la version de la frontière composée ;
-//   - la liste ordonnée des 11 éléments du verrou et celle des 7 éléments que
+//   - la liste ordonnée des 13 éléments du verrou et celle des 7 éléments que
 //     la frontière consomme (dérivée de la première) ;
 //   - l'empreinte du verrou (lock_sha256) ;
 //   - l'identifiant de protocole de la frontière (I10), calculé depuis le
@@ -27,10 +27,11 @@ export const ARCHITECTURE_BASELINE_VERSION = "architecture-baseline-v1.0.3";
 // Version de la frontière composée (R28.5), une seule constante.
 export const COMPOSITE_COVERAGE_BOUNDARY_VERSION = "composite-coverage-boundary.v1";
 
-// Verrou complet (section 8, éléments 1 à 12, dans leur ordre) : frontière
-// (1 à 6), juge (7 et 8 : prompt, format et bornes), réparation (9),
-// politique du coordinateur (10), langue (11), baseline (12). lock_sha256 est
-// calculé sur ces seuls éléments.
+// Verrou complet (section 8, dans l'ordre d'exécution) : frontière (1 à 6),
+// juge (7 et 8 : prompt, format et bornes), réparation (9), applicateur,
+// coordinateur (10 : version du code, de la politique et empreinte de ses
+// bornes), exécuteur (version et empreinte de ses limites), langue (11),
+// baseline (12). lock_sha256 est calculé sur ces seuls éléments (R29.5).
 export const COVERAGE_LOCK_KEYS = Object.freeze([
   "splitter",
   "normalization",
@@ -40,14 +41,16 @@ export const COVERAGE_LOCK_KEYS = Object.freeze([
   "classification",
   "judge",
   "repair",
+  "applier",
   "coordinator",
+  "executor",
   "language",
   "baseline"
 ]);
 
 // Éléments du verrou consommés par la frontière (section 8, éléments 1 à 6 et
 // 11), dérivés de la liste complète : impossible de les désynchroniser.
-const NOT_CONSUMED_BY_BOUNDARY = Object.freeze(["judge", "repair", "coordinator", "baseline"]);
+const NOT_CONSUMED_BY_BOUNDARY = Object.freeze(["judge", "repair", "applier", "coordinator", "executor", "baseline"]);
 
 export const BOUNDARY_LOCK_KEYS = Object.freeze(
   COVERAGE_LOCK_KEYS.filter(key => !NOT_CONSUMED_BY_BOUNDARY.includes(key))
@@ -115,7 +118,30 @@ export function firstDifferingLockElement(stored, current) {
   return COVERAGE_LOCK_KEYS.find(key => stored[key] !== current[key]);
 }
 
-// Liaison entre l'élément « coordinateur » et la politique (élément 10).
+// R29.5 : valeurs d'élément DÉRIVÉES du contenu des bornes (comme le juge) :
+// changer une constante sans changer de numéro change le verrou.
+export function boundsFingerprint(bounds) {
+  return sha256(stableJson(bounds ?? null));
+}
+
+function policyBounds(policy) {
+  return { max_rounds: policy?.max_rounds ?? null, max_total_judge_calls: policy?.max_total_judge_calls ?? null };
+}
+
+export function coordinatorLockElement({ policy, coordinatorVersion }) {
+  return `${policy?.version ?? null}+${coordinatorVersion}+bounds.${boundsFingerprint(policyBounds(policy))}`;
+}
+
+export function executorLockElement({ executorVersion, limits }) {
+  return `${executorVersion}+limits.${boundsFingerprint(limits)}`;
+}
+
+// Liaison entre l'élément « coordinateur » et la politique (élément 10) : la
+// version de la politique et l'empreinte de ses bornes doivent correspondre.
+// La version du code du coordinateur est contrôlée par la comparaison au
+// verrou courant (reprise).
 export function lockMatchesPolicy(lock, policy) {
-  return isLockRecord(lock) && lock.coordinator === policy.version;
+  return isLockRecord(lock) && typeof lock.coordinator === "string" &&
+    lock.coordinator.startsWith(`${policy.version}+`) &&
+    lock.coordinator.endsWith(`+bounds.${boundsFingerprint(policyBounds(policy))}`);
 }

@@ -145,14 +145,17 @@ await test("script sans segment : minimum 0, maximum 0", async () => {
 
 await test("la requête sondée est exactement celle que le coordinateur enverrait au transport", async () => {
   const probed = [];
-  await estimate(THREE, request => { probed.push(request); return MISS(); });
+  // R29.5 : le verrou (donc lock_sha256, donc la requête) dépend des bornes de la politique.
+  const ONE_CALL = { ...POLICY, max_total_judge_calls: 1 };
+  const ONE_CALL_LOCK = buildCoverageLock({ entities: ENTITIES, policy: ONE_CALL });
+  await estimate(THREE, request => { probed.push(request); return MISS(); }, { lock: ONE_CALL_LOCK, policy: ONE_CALL });
   for (const [index, entry] of THREE.entries()) {
     let sent = null;
     await coordinateCoverage({
       segment: { segment_id: entry.segment_id, voiceover: entry.voiceover, entities: ENTITIES },
       claims: entry.claims,
-      lock: LOCK,
-      policy: { ...POLICY, max_total_judge_calls: 1 },
+      lock: ONE_CALL_LOCK,
+      policy: ONE_CALL,
       transport: async request => { sent = request; throw new Error("capture"); }
     });
     deepStrictEqual(JSON.parse(JSON.stringify(probed[index])), JSON.parse(JSON.stringify(sent)));
