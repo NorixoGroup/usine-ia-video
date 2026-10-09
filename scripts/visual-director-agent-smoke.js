@@ -2,6 +2,13 @@ import {
   runVisualDirector
 } from "../src/agents/visual-director.js";
 
+// Sous NO_API=1 aucun appel réel n'est possible : le diagnostic s'exécute sur
+// les fixtures locales (R5). Sans NO_API, il garde son usage historique et
+// appelle l'API réelle.
+if (process.env.NO_API === "1") {
+  process.env.ANTHROPIC_FIXTURES ??= "1";
+}
+
 const script = {
   title:
     "Pourquoi 95 % de l'Australie est presque vide ?",

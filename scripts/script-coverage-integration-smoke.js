@@ -290,8 +290,8 @@ await test("réparation propagée : segment réparé PASS en deux rondes, une un
 
 await test("réparation propagée : voiceover final renvoyé à l'appelant, sans texte ajouté", () => {
   const item = REPAIRED.result.final_voiceovers[1];
-  deepStrictEqual([item.section_index, item.segment_index, item.voiceover], [0, 1, `${S.b[0]} `]);
-  deepStrictEqual(REPAIRED.result.segments[1].voiceover_sha256, sha256(`${S.b[0]} `));
+  deepStrictEqual([item.section_index, item.segment_index, item.voiceover], [0, 1, S.b[0]]);
+  deepStrictEqual(REPAIRED.result.segments[1].voiceover_sha256, sha256(S.b[0]));
 });
 
 await test("réparation propagée : segments non réparés inchangés", () => {
@@ -510,7 +510,7 @@ await test("segment PASS : verrou et protocole envoyés au juge = ceux du checkp
 await test("réparation : le voiceover rejugé est le voiceover réparé (aucun rejeu de la requête initiale)", () => {
   const payloads = REPAIRED.calls.map(request => JSON.parse(request.messages[0].content.slice(HEADER.length)));
   const rounds = payloads.filter(payload => payload.segment_id === "s1-g2");
-  deepStrictEqual(rounds.map(payload => payload.voiceover), [S.b.join(" "), `${S.b[0]} `]);
+  deepStrictEqual(rounds.map(payload => payload.voiceover), [S.b.join(" "), S.b[0]]);
   deepStrictEqual(new Set(REPAIRED.calls.map(request => request.messages[0].content)).size, REPAIRED.calls.length);
 });
 

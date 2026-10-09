@@ -85,11 +85,13 @@ async function repairOf(boundary, deletes = []) {
   return planCoverageRepair({ boundary, judgment, lock: LOCK });
 }
 
-// Textes d'unités attendus, écrits en clair (espace final compris).
+// Textes d'unités attendus, écrits en clair (espace de jonction compris).
 const T1 = "Mais avant cela, un détour. ";
 const T2 = "Le bassin couvre environ un million de kilomètres carrés. ";
 const T3 = "Ce n’est pas un hasard. ";
 const T4 = "Sans lui, l’intérieur serait inhabitable.";
+// R29.2 (I4) : sans l'espace de jonction final quand la dernière unité est retirée.
+const T3_END = "Ce n’est pas un hasard.";
 const BASELINE_VOICEOVER = T1 + T2 + T3 + T4;
 const MIXED_VOICEOVER = "Imaginez la scène. Le bassin couvre environ un million de kilomètres carrés. Pourquoi ? Sans lui, l’intérieur serait inhabitable.";
 const SPACED_VOICEOVER = "  Un fait   ici.  Le\tdésert avance.  ";
@@ -147,8 +149,68 @@ await test("préconditions : plans réels de la réparation R28.8", () => {
   deepStrictEqual([R.none.status, R.u4.status, R.u1u4.status, R.all.status, R.mixedAnalysed.status], ["NO_REPAIR", "PLANNED", "PLANNED", "NOT_REPAIRABLE", "PLANNED"]);
 });
 
-await test("DELETE nominal (dernière unité) : voiceover exact, espace final conservé", () => {
-  expectApplied(apply(R.u4), R.u4, T1 + T2 + T3, ["u4"], ["u1", "u2", "u3"]);
+await test("DELETE nominal (dernière unité) : voiceover exact, espace de jonction retiré (I4)", () => {
+  expectApplied(apply(R.u4), R.u4, T1 + T2 + T3_END, ["u4"], ["u1", "u2", "u3"]);
+});
+
+// R29.2 (I4) — espace de jonction. Voiceovers de test : phrases chiffrées, donc analysées.
+const F1 = "Le bassin couvre 3 millions de km².";
+const F2 = "Il compte 4 lacs.";
+const F3 = "Il a 5 îles.";
+
+async function applyOn(voiceover, deletes) {
+  const boundary = boundaryOf(voiceover);
+  const repair = await repairOf(boundary, deletes);
+  return { boundary, repair, result: applyCoverageDeletePlan({ boundary, repair, lock: LOCK }) };
+}
+
+const JUNCTION_CASES = [
+  ["un espace de jonction", `${F1} ${F2}`, ["u2"], F1],
+  ["deux espaces de jonction", `${F1}  ${F2}`, ["u2"], F1],
+  ["espaces en fin de voiceover d'origine, dans la dernière unité", `${F1} ${F2}  `, ["u2"], F1],
+  ["deux dernières unités retirées", `${F1} ${F2} ${F3}`, ["u2", "u3"], F1],
+  ["espaces internes conservés", `Le  bassin  couvre 3 millions de km².  ${F2}`, ["u2"], "Le  bassin  couvre 3 millions de km²."],
+  ["retour à la ligne conservé", `${F1}\n${F2}`, ["u2"], `${F1}\n`],
+  ["double retour à la ligne conservé", `${F1}\n\n${F2}`, ["u2"], `${F1}\n\n`],
+  ["espace insécable conservé", `${F1}\u00A0${F2}`, ["u2"], `${F1}\u00A0`],
+  ["tabulation conservée", `${F1}\t${F2}`, ["u2"], `${F1}\t`],
+  ["espace suivi d'un retour à la ligne : fin inchangée", `${F1} \n${F2}`, ["u2"], `${F1} \n`],
+  ["dernière unité conservée : espaces finaux d'origine intacts", `${F1} ${F2}  `, ["u1"], `${F2}  `],
+  ["unité du milieu retirée : aucun changement de jonction", `${F1} ${F2} ${F3}`, ["u2"], `${F1} ${F3}`],
+  ["première unité retirée : aucun changement", `${F1} ${F2} ${F3}`, ["u1"], `${F2} ${F3}`],
+  ["unité exclue conservée avant la fin", "Imaginez la scène. Il compte 4 lacs.", ["u2"], "Imaginez la scène."]
+];
+
+for (const [name, voiceover, deletes, expected] of JUNCTION_CASES) {
+  await test(`I4 — ${name}`, async () => {
+    const { repair, result } = await applyOn(voiceover, deletes);
+    deepStrictEqual([result.status, result.repaired_voiceover], ["APPLIED", expected]);
+    deepStrictEqual(result.repaired_voiceover_sha256, sha256(expected));
+    deepStrictEqual(result.protocol_id, repair.protocol_id);
+  });
+}
+
+await test("I4 — seul l'espace de jonction est retiré : le résultat est un préfixe de l'original, suivi uniquement d'espaces ordinaires retirés", async () => {
+  for (const [, voiceover, deletes] of JUNCTION_CASES) {
+    const { boundary, result } = await applyOn(voiceover, deletes);
+    const joined = boundary.units.filter(item => !result.deleted_unit_ids.includes(item.unit_id)).map(item => item.unit.text).join("");
+    if (!joined.startsWith(result.repaired_voiceover)) throw new Error(`résultat non préfixe : ${JSON.stringify(voiceover)}`);
+    for (const character of joined.slice(result.repaired_voiceover.length)) {
+      if (character !== " ") throw new Error(`caractère retiré autre qu'un espace : ${JSON.stringify(character)}`);
+    }
+  }
+});
+
+await test("I4 — la ronde suivante repart d'un texte sans espace final et retrouve les unités restantes", async () => {
+  const { result } = await applyOn(`${F1} ${F2} ${F3}`, ["u3"]);
+  const next = boundaryOf(result.repaired_voiceover);
+  deepStrictEqual([result.repaired_voiceover, next.voiceover_sha256, next.units.map(item => item.unit.text)], [`${F1} ${F2}`, result.repaired_voiceover_sha256, [`${F1} `, F2]]);
+});
+
+await test("I4 — déterminisme : deux applications identiques donnent les mêmes octets", async () => {
+  const first = await applyOn(`${F1} ${F2}`, ["u2"]);
+  const second = await applyOn(`${F1} ${F2}`, ["u2"]);
+  deepStrictEqual(JSON.stringify(first.result), JSON.stringify(second.result));
 });
 
 await test("aucune suppression : plan vide → UNCHANGED, voiceover identique octet pour octet", () => {
@@ -169,13 +231,13 @@ await test("suppression d'une unité du milieu (u3)", () => {
 });
 
 await test("suppressions multiples : ordre d'origine conservé", () => {
-  expectApplied(apply(R.u1u4), R.u1u4, T2 + T3, ["u1", "u4"], ["u2", "u3"]);
+  expectApplied(apply(R.u1u4), R.u1u4, T2 + T3_END, ["u1", "u4"], ["u2", "u3"]);
   expectApplied(apply(R.u1u2u3), R.u1u2u3, T4, ["u1", "u2", "u3"], ["u4"]);
 });
 
 await test("toutes les unités analysées supprimées : les unités exclues restent, intactes", () => {
   const result = applyCoverageDeletePlan({ boundary: MIXED, repair: R.mixedAnalysed, lock: LOCK });
-  expectApplied(result, R.mixedAnalysed, "Imaginez la scène. Pourquoi ? ", ["u2", "u4"], ["u1", "u3"]);
+  expectApplied(result, R.mixedAnalysed, "Imaginez la scène. Pourquoi ?", ["u2", "u4"], ["u1", "u3"]);
 });
 
 await test("espaces, insécables et tabulations conservés tels quels", () => {
@@ -199,7 +261,10 @@ await test("ronde suivante : la frontière du voiceover réparé redonne les uni
     const result = apply(repair);
     const next = boundaryOf(result.repaired_voiceover);
     deepStrictEqual(next.voiceover_sha256, result.repaired_voiceover_sha256);
-    deepStrictEqual(next.units.map(item => item.unit.text), BOUNDARY.units.filter(item => result.remaining_unit_ids.includes(item.unit_id)).map(item => item.unit.text));
+    const kept = BOUNDARY.units.filter(item => result.remaining_unit_ids.includes(item.unit_id)).map(item => item.unit.text);
+    // I4 : seule la dernière unité restante perd son espace de jonction final, quand la dernière unité d'origine est retirée.
+    if (result.deleted_unit_ids.includes("u4")) kept[kept.length - 1] = kept[kept.length - 1].replace(/ +$/, "");
+    deepStrictEqual(next.units.map(item => item.unit.text), kept);
     deepStrictEqual(next.protocol_id, result.protocol_id);
   }
 });
@@ -332,11 +397,16 @@ await test("sortie immuable (y compris en refus)", () => {
 await test("aucun texte généré : le voiceover réparé n'est fait que de textes d'unités, sans caractère ajouté", () => {
   for (const repair of [R.u1, R.u2, R.u3, R.u4, R.u1u4, R.u1u2u3, R.none]) {
     const result = apply(repair);
-    const expected = BOUNDARY.units.filter(item => !result.deleted_unit_ids.includes(item.unit_id)).map(item => item.unit.text).join("");
+    const joined = BOUNDARY.units.filter(item => !result.deleted_unit_ids.includes(item.unit_id)).map(item => item.unit.text).join("");
+    // I4 : l'espace de jonction final est le seul caractère retiré en plus des unités supprimées.
+    const expected = result.deleted_unit_ids.includes("u4") ? joined.replace(/ +$/, "") : joined;
     deepStrictEqual(result.repaired_voiceover, expected);
-    if (BASELINE_VOICEOVER.length - result.repaired_voiceover.length !== BOUNDARY.units.filter(item => result.deleted_unit_ids.includes(item.unit_id)).reduce((total, item) => total + item.unit.text.length, 0)) {
+    const removedUnits = BOUNDARY.units.filter(item => result.deleted_unit_ids.includes(item.unit_id)).reduce((total, item) => total + item.unit.text.length, 0);
+    const junction = joined.length - expected.length;
+    if (BASELINE_VOICEOVER.length - result.repaired_voiceover.length !== removedUnits + junction) {
       throw new Error("longueur incohérente");
     }
+    for (const character of joined.slice(expected.length)) if (character !== " ") throw new Error("caractère retiré autre qu'un espace");
   }
 });
 
@@ -408,6 +478,19 @@ async function isolatedApplier(prefix, replacements = []) {
   return { root, module };
 }
 
+async function caseOf(voiceover, deletes) {
+  const boundary = boundaryOf(voiceover);
+  return { boundary, repair: await repairOf(boundary, deletes) };
+}
+const NEWLINE_CASE = await caseOf(`${F1}\n${F2}`, ["u2"]);
+const NBSP_CASE = await caseOf(`${F1}\u00A0${F2}`, ["u2"]);
+const DOUBLE_CASE = await caseOf(`${F1}  ${F2}`, ["u2"]);
+const KEPT_CASE = await caseOf(`${F1} ${F2}  `, ["u1"]);
+const NEWLINE_BOUNDARY = NEWLINE_CASE.boundary, NEWLINE_REPAIR = NEWLINE_CASE.repair;
+const NBSP_BOUNDARY = NBSP_CASE.boundary, NBSP_REPAIR = NBSP_CASE.repair;
+const DOUBLE_BOUNDARY = DOUBLE_CASE.boundary, DOUBLE_REPAIR = DOUBLE_CASE.repair;
+const KEPT_BOUNDARY = KEPT_CASE.boundary, KEPT_REPAIR = KEPT_CASE.repair;
+
 function behaviourFailures(module) {
   const failures = [];
   const check = (label, actual, expected) => {
@@ -421,12 +504,25 @@ function behaviourFailures(module) {
     }
   };
   const u4 = run(R.u4);
-  check("suppression appliquée", [u4.status, u4.repaired_voiceover], ["APPLIED", T1 + T2 + T3]);
-  check("empreinte réparée", u4.repaired_voiceover_sha256, sha256(T1 + T2 + T3));
+  check("suppression appliquée", [u4.status, u4.repaired_voiceover], ["APPLIED", T1 + T2 + T3_END]);
+  check("empreinte réparée", u4.repaired_voiceover_sha256, sha256(T1 + T2 + T3_END));
   check("protocole propagé", u4.protocol_id, R.u4.protocol_id);
   check("verrou propagé", u4.lock_sha256, R.u4.lock_sha256);
   const multi = run(R.u1u4);
-  check("ordre conservé", multi.repaired_voiceover, T2 + T3);
+  check("ordre conservé", multi.repaired_voiceover, T2 + T3_END);
+  // I4 : seul l'espace de jonction final disparaît, rien d'autre.
+  const middle = run(R.u3);
+  check("jonction non retirée hors fin de texte", middle.repaired_voiceover, T1 + T2 + T4);
+  const first = run(R.u1);
+  check("première unité : texte intact", first.repaired_voiceover, T2 + T3 + T4);
+  const newline = module.applyCoverageDeletePlan({ boundary: clone(NEWLINE_BOUNDARY), repair: clone(NEWLINE_REPAIR), lock: clone(LOCK) });
+  check("retour à la ligne conservé", newline.repaired_voiceover, `${F1}\n`);
+  const nbsp = module.applyCoverageDeletePlan({ boundary: clone(NBSP_BOUNDARY), repair: clone(NBSP_REPAIR), lock: clone(LOCK) });
+  check("espace insécable conservé", nbsp.repaired_voiceover, `${F1}\u00A0`);
+  const twice = module.applyCoverageDeletePlan({ boundary: clone(DOUBLE_BOUNDARY), repair: clone(DOUBLE_REPAIR), lock: clone(LOCK) });
+  check("tous les espaces de jonction retirés", twice.repaired_voiceover, F1);
+  const kept = module.applyCoverageDeletePlan({ boundary: clone(KEPT_BOUNDARY), repair: clone(KEPT_REPAIR), lock: clone(LOCK) });
+  check("espaces finaux d'une dernière unité conservée intacts", kept.repaired_voiceover, `${F2}  `);
   const spaced = module.applyCoverageDeletePlan({ boundary: clone(SPACED), repair: clone(R.spaced), lock: clone(LOCK) });
   check("espaces conservés", spaced.repaired_voiceover, "Le\tdésert avance.  ");
   check("doublon refusé", run({ ...clone(R.u4), repair_plan: [R.u4.repair_plan[0], R.u4.repair_plan[0]] }).status, "INPUT_REFUSED");
@@ -447,15 +543,20 @@ function behaviourFailures(module) {
 const MUTATIONS = [
   ["suppression ignorée", [{ from: "const remaining = boundary.units.filter(item => !deleted.includes(item.unit_id));", to: "const remaining = boundary.units.filter(() => true);" }]],
   ["suppression dupliquée acceptée", [{ from: "if (deleted.includes(unitId)) refuse(APPLY_REFUSAL.DUPLICATE_DELETE, unitId);\n    deleted.push(unitId);", to: "deleted.push(unitId);" }, { from: "const ordered = allIds.filter(id => deleted.includes(id));", to: "const ordered = deleted;" }, { from: "if (!sameList(repair.repaired_unit_ids, ordered)) refuse(APPLY_REFUSAL.ABSENT_UNIT);", to: "" }]],
-  ["unités réordonnées", [{ from: "const repaired = remaining.map(item => item.unit.text).join(\"\");", to: "const repaired = [...remaining].reverse().map(item => item.unit.text).join(\"\");" }]],
-  ["texte réécrit", [{ from: "const repaired = remaining.map(item => item.unit.text).join(\"\");", to: "const repaired = remaining.map(item => item.unit.text.toUpperCase()).join(\"\");" }]],
-  ["espaces retirés", [{ from: "const repaired = remaining.map(item => item.unit.text).join(\"\");", to: "const repaired = remaining.map(item => item.unit.text.trim()).join(\" \");" }]],
+  ["unités réordonnées", [{ from: "let repaired = remaining.map(item => item.unit.text).join(\"\");", to: "let repaired = [...remaining].reverse().map(item => item.unit.text).join(\"\");" }]],
+  ["texte réécrit", [{ from: "let repaired = remaining.map(item => item.unit.text).join(\"\");", to: "let repaired = remaining.map(item => item.unit.text.toUpperCase()).join(\"\");" }]],
+  ["espaces retirés", [{ from: "let repaired = remaining.map(item => item.unit.text).join(\"\");", to: "let repaired = remaining.map(item => item.unit.text.trim()).join(\" \");" }]],
   ["protocole recalculé", [{ from: "protocol_id: repair.protocol_id,\n      previous_voiceover_sha256", to: "protocol_id: sha256(JSON.stringify(lock)),\n      previous_voiceover_sha256" }]],
   ["verrou recalculé", [{ from: "lock_sha256: repair.lock_sha256,", to: "lock_sha256: sha256(JSON.stringify(lock))," }]],
   ["sortie modifiable", [{ from: "    return freezeAll({\n      protocol_id: repair.protocol_id,", to: "    return ({\n      protocol_id: repair.protocol_id," }]],
   ["entrées modifiées", [{ from: "    checkLock(lock);\n", to: "    if (lock && typeof lock === \"object\" && !Object.isFrozen(lock)) lock.applied = true;\n    checkLock(lock);\n" }]],
   ["lock_sha256 non vérifié", [{ from: "if (repair.lock_sha256 !== judgeLockSha256(lock)) refuse(APPLY_REFUSAL.LOCK_SHA_MISMATCH);", to: "" }]],
   ["version de réparation non verrouillée", [{ from: " || lock.repair !== repair.repair_version", to: "" }]],
+  ["espace de jonction conservé (I4)", [{ from: "if (deleted.includes(boundary.units.at(-1).unit_id)) {", to: "if (false) {" }]],
+  ["espace de jonction retiré même sans suppression de la dernière unité", [{ from: "if (deleted.includes(boundary.units.at(-1).unit_id)) {", to: "if (true) {" }]],
+  ["trim global : retours à la ligne retirés aussi", [{ from: "repaired[end - 1] === \" \") end -= 1;", to: "/\\s/.test(repaired[end - 1])) end -= 1;" }]],
+  ["espace insécable retiré aussi", [{ from: "repaired[end - 1] === \" \") end -= 1;", to: "(repaired[end - 1] === \" \" || repaired[end - 1] === \"\\u00A0\")) end -= 1;" }]],
+  ["un seul espace de jonction retiré", [{ from: "while (end > 0 && repaired[end - 1] === \" \") end -= 1;", to: "if (end > 0 && repaired[end - 1] === \" \") end -= 1;" }]],
   ["empreinte réparée fausse", [{ from: "repaired_voiceover_sha256: sha256(repaired),", to: "repaired_voiceover_sha256: sha256(`${repaired} `)," }]]
 ];
 

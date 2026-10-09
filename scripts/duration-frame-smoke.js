@@ -487,11 +487,18 @@ const CAPTURES = {
 // Empreintes (système, messages, outils, max_tokens) relevées sur les
 // requêtes de la baseline d4104ff : le comportement par défaut est
 // strictement identique.
+//
+// Script : le message utilisateur a changé volontairement à R25.6 (cdf9ade) —
+// contrat « claims non vide » et dossier factuel limité aux key_facts. Les
+// empreintes du message ci-dessous sont celles de cette requête ; elles sont
+// identiques à chaque commit depuis R25.6, R28 compris. L'empreinte du
+// système (d5c2999f4df5a49d), les outils et max_tokens sont ceux de la
+// baseline d4104ff.
 const HISTORICAL = {
   researchTest: ["27ca6465f588d100", "5d20b1278f0559b2", "74234e98afe7498f", 1800],
   researchFull: ["27ca6465f588d100", "d8684eb3fa85d66d", "0867f3fb456273a7", 8000],
-  scriptTest: ["d5c2999f4df5a49d", "12668a943ba69967", "74234e98afe7498f", 2200],
-  scriptFull: ["d5c2999f4df5a49d", "01dc54b4b10e76db", "74234e98afe7498f", 12000]
+  scriptTest: ["d5c2999f4df5a49d", "652e4bd2e1f3f454", "74234e98afe7498f", 2200],
+  scriptFull: ["d5c2999f4df5a49d", "fe218769ca9f1b74", "74234e98afe7498f", 12000]
 };
 
 function fingerprint(request) {

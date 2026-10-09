@@ -80,6 +80,8 @@ const S = Object.freeze([
   "Sans lui, l’intérieur serait inhabitable."
 ]);
 const VOICEOVER = S.join("");
+// R29.2 (I4) : quand la dernière unité est retirée, l'espace de jonction qui la précédait l'est aussi.
+const NO_JUNCTION = text => text.replace(/ +$/, "");
 const segmentOf = (voiceover = VOICEOVER, segment_id = "s2-g4") => ({ segment_id, voiceover, entities: ENTITIES });
 
 // Transport simulé : retrouve les phrases présentes, dans l'ordre des unités,
@@ -183,11 +185,11 @@ await test("une ronde de réparation : PASS en deux rondes", () => {
 });
 
 await test("une ronde de réparation : unité supprimée, texte restant exact", () => {
-  deepStrictEqual([[...ONE.history[0].delete.deleted_unit_ids], ONE.final_voiceover], [["u4"], S[0] + S[1] + S[2]]);
+  deepStrictEqual([[...ONE.history[0].delete.deleted_unit_ids], ONE.final_voiceover], [["u4"], S[0] + S[1] + NO_JUNCTION(S[2])]);
 });
 
 await test("une ronde de réparation : frontière reconstruite sur le nouveau voiceover", () => {
-  deepStrictEqual([ONE.history[1].voiceover_sha256, ONE.history[1].boundary.units.length, ONE.final_boundary === ONE.history[1].boundary], [sha256(S[0] + S[1] + S[2]), 3, true]);
+  deepStrictEqual([ONE.history[1].voiceover_sha256, ONE.history[1].boundary.units.length, ONE.final_boundary === ONE.history[1].boundary], [sha256(S[0] + S[1] + NO_JUNCTION(S[2])), 3, true]);
 });
 
 await test("une ronde de réparation : empreintes enchaînées entre rondes", () => {
@@ -202,7 +204,7 @@ await test("une ronde de réparation : protocole constant, deux appels", () => {
 const { result: MULTI } = await run(MODELS.lastWhileMoreThanTwo);
 
 await test("rondes multiples : convergence avant la limite", () => {
-  deepStrictEqual([MULTI.script_status, MULTI.rounds, MULTI.final_voiceover], ["PASS", 3, S[0] + S[1]]);
+  deepStrictEqual([MULTI.script_status, MULTI.rounds, MULTI.final_voiceover], ["PASS", 3, S[0] + NO_JUNCTION(S[1])]);
 });
 
 await test("rondes multiples : une suppression par ronde, dans l'ordre", () => {
@@ -378,7 +380,7 @@ await test("ne lève jamais : appel sans argument → NOT_PASS", async () => {
 await test("aucun texte régénéré : le voiceover final est une sous-suite exacte des phrases d'origine", () => {
   for (const result of [IMMEDIATE, ONE, MULTI, MAXED]) {
     const kept = S.filter(sentence => result.final_voiceover.includes(sentence.trim()));
-    deepStrictEqual(result.final_voiceover, kept.join(""));
+    deepStrictEqual(result.final_voiceover, NO_JUNCTION(kept.join("")));
   }
 });
 
@@ -475,7 +477,7 @@ await test("frontière finale = frontière de la dernière ronde, sur tous les s
 });
 
 await test("limite atteinte : voiceover final = dernier texte réparé, non rejugé (NOT_PASS)", () => {
-  deepStrictEqual([MAXED.final_voiceover, MAXED.final_voiceover_sha256], [S[0] + S[1], sha256(S[0] + S[1])]);
+  deepStrictEqual([MAXED.final_voiceover, MAXED.final_voiceover_sha256], [S[0] + NO_JUNCTION(S[1]), sha256(S[0] + NO_JUNCTION(S[1]))]);
 });
 
 await test("frontière impossible : aucune empreinte de verrou, ronde sans jugement", async () => {
@@ -673,7 +675,7 @@ async function behaviourFailures(module) {
   const bounded = await exec(MODELS.lastWhileMoreThanTwo, { policy: { ...POLICY, max_rounds: 2 } });
   check("rondes bornées", [bounded.result.script_status, bounded.result.segment_status?.reason, bounded.result.rounds], ["NOT_PASS", "MAX_ROUNDS_REACHED", 2]);
   const one = await exec(MODELS.inhabitable);
-  check("réparation appliquée", [one.result.script_status, one.result.rounds, one.result.final_voiceover], ["PASS", 2, S[0] + S[1] + S[2]]);
+  check("réparation appliquée", [one.result.script_status, one.result.rounds, one.result.final_voiceover], ["PASS", 2, S[0] + S[1] + NO_JUNCTION(S[2])]);
   check("protocole propagé", one.result.protocol_id, one.result.history?.[0]?.boundary?.protocol_id);
   check("verrou propagé", one.result.lock_sha256, judgeLockSha256(LOCK));
   check("frontière reconstruite", one.result.history?.[1]?.boundary?.units?.length, 3);

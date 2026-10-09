@@ -5,9 +5,13 @@
 // réparation (R28.8) et le verrou complet. Elle reconstitue le voiceover
 // exact à partir des unités de la frontière, retire seulement les unités
 // désignées par le plan et concatène les unités restantes dans leur ordre
-// d'origine, octet pour octet : aucun caractère ajouté, aucun espace retiré,
-// aucune réécriture. Le résultat est le voiceover de la ronde suivante
-// (nouvelle empreinte, donc nouvelles unités).
+// d'origine, octet pour octet : aucun caractère ajouté, aucune réécriture.
+// Une seule exception (R29.2, défaut I4) : quand la dernière unité du
+// voiceover est retirée, l'espace de jonction qui la précédait, resté en fin
+// de texte, est retiré aussi. Seuls les espaces ordinaires (U+0020) de la fin
+// du texte sont concernés ; retours à la ligne, espaces insécables, espaces
+// internes et ponctuation restent intacts. Le résultat est le voiceover de la
+// ronde suivante (nouvelle empreinte, donc nouvelles unités).
 //
 // Elle ne normalise, ne protège, ne classe, ne juge et ne génère rien. Elle
 // ne recalcule pas protocol_id et propage lock_sha256 après l'avoir vérifié
@@ -177,8 +181,16 @@ export function applyCoverageDeletePlan({ boundary, repair, lock } = {}) {
     checkRepair(repair, boundary, lock);
     const deleted = deletions(repair, boundary);
     const remaining = boundary.units.filter(item => !deleted.includes(item.unit_id));
-    const repaired = remaining.map(item => item.unit.text).join("");
+    let repaired = remaining.map(item => item.unit.text).join("");
     if (repaired.length === 0 || [...repaired].every(character => WHITESPACE.has(character))) refuse(APPLY_REFUSAL.EMPTY_RESULT);
+
+    // I4 : espace de jonction laissé en fin de texte par le retrait de la
+    // dernière unité.
+    if (deleted.includes(boundary.units.at(-1).unit_id)) {
+      let end = repaired.length;
+      while (end > 0 && repaired[end - 1] === " ") end -= 1;
+      repaired = repaired.slice(0, end);
+    }
 
     return freezeAll({
       protocol_id: repair.protocol_id,

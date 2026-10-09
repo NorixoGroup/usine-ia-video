@@ -360,6 +360,8 @@ try {
         "production.json",
         "quality.json",
         "render.json",
+        // Ledgers Research (R24.1) : dossier research/, pas un média.
+        "research",
         "research.json",
         "script.json",
         "truth-report.md",

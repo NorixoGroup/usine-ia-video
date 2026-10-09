@@ -304,10 +304,13 @@ function assertCommon(run) {
   }
 
   // Aucun média, aucun fichier hors artefacts JSON attendus.
+  // Le dossier research/ (ledgers sources.json et claims.json, R24.1) est
+  // un artefact JSON de la production, pas un média.
   const allowedFiles = [
     "production.json",
     "truth.json",
     "truth-report.md",
+    "research",
     ...PIPELINE.map(([, artifact]) => `${artifact}.json`)
   ];
 
@@ -701,7 +704,11 @@ const cases = [
       assert(
         coverageSegments(run).length === 2 &&
         coverageSegments(run).every(
-          segment => segment.covered && !segment.repaired
+          segment =>
+            segment.status === "PASS" &&
+            segment.covered === true &&
+            segment.rounds === 1 &&
+            segment.repair_count === 0
         ),
         "aucun repair Script attendu"
       );
@@ -727,35 +734,44 @@ const cases = [
     check: assertPass
   },
   {
+    // R29.2 : défaut I4 corrigé. La suppression de la dernière unité retire
+    // aussi l'espace de jonction, le voiceover réparé redevient exactement
+    // celui du jeu de données canonique et toute la chaîne va jusqu'à Quality.
     name: "script-coverage-repair",
     fixtures: true,
     scenario: "script-coverage-repair",
     check(run) {
+      // assertPass inclut les 7 agents et le verdict Quality « pass ».
       assertPass(run);
 
       const [first, second] = coverageSegments(run);
 
       assert(
-        first.repaired === true &&
+        first.status === "PASS" &&
         first.covered === true &&
-        first.initial_undeclared_claims.length === 1 &&
-        first.initial_undeclared_claims[0].text ===
-          "L'eau y est rare." &&
-        first.undeclared_claims.length === 0 &&
-        first.repair_usage?.model ===
-          "fixture:repair-script-claim-coverage",
-        "segment 0 : FAIL → repair → revalidation attendus"
+        first.rounds === 2 &&
+        first.repair_count === 1,
+        "segment 0 : réparation par suppression d'une unité attendue"
       );
 
       assert(
-        second.repaired === false && second.covered === true,
+        second.status === "PASS" &&
+        second.rounds === 1 &&
+        second.repair_count === 0,
         "segment 1 : aucun repair attendu"
       );
 
+      const repaired =
+        run.script.data.sections[0].segments[0].voiceover;
+
       assert(
-        !run.script.data.sections[0].segments[0].voiceover
-          .includes("L'eau y est rare."),
+        !repaired.includes("L'eau y est rare."),
         "le voiceover persisté contient encore l'affirmation rejetée"
+      );
+
+      assert(
+        !repaired.endsWith(" "),
+        "le voiceover réparé ne doit plus finir par un espace (I4)"
       );
 
       assert(
@@ -810,7 +826,9 @@ const cases = [
       );
 
       assert(
-        coverageSegments(run).every(segment => !segment.repaired),
+        coverageSegments(run).every(
+          segment => segment.status === "PASS" && segment.repair_count === 0
+        ),
         "aucun repair Script attendu"
       );
     }
@@ -823,7 +841,7 @@ const cases = [
       assertFail(run, {
         failedAgent: "script",
         error:
-          /Voiceover Claim Coverage Gate.*non déclarées après réparation/,
+          /^Script Agent : NOT_PASS \(s1-g1, REPAIR_REFUSED\)\./,
         artifacts: ["research"]
       });
 

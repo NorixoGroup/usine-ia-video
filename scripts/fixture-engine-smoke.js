@@ -628,13 +628,12 @@ await test("script-coverage-repair : FAIL → repair → revalidation PASS", asy
       "segment 1 : aucun repair attendu"
     );
 
-    // Le texte restant est conservé octet pour octet : l'espace qui suivait
-    // l'unité gardée lui appartient (partition R28.2).
-    const expected = structuredClone(script);
-    expected.sections[0].segments[0].voiceover = `${script.sections[0].segments[0].voiceover} `;
+    // R29.2 (I4) : l'espace de jonction laissé par la suppression de la
+    // dernière unité est retiré ; le script réparé est exactement le script
+    // happy, sans aucun écart.
     assert(
-      isDeepStrictEqual(result.data, expected),
-      "le script réparé doit être le script happy, à l'espace final près"
+      isDeepStrictEqual(result.data, structuredClone(script)),
+      "le script réparé doit être exactement le script happy"
     );
 
     assert(

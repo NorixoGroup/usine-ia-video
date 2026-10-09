@@ -21,6 +21,16 @@ import {
   validateVisualDirectorDossier
 } from "../src/utils/validate-visual-director.js";
 
+import crypto from "node:crypto";
+
+import {
+  buildCoverageLock,
+  researchEntitiesOf
+} from "../src/utils/script-coverage-gate.js";
+import {
+  boundaryProtocolIdFromLock,
+  judgeLockSha256
+} from "../src/utils/coverage-judge-v2.js";
 import { runAssetAgent } from "../src/agents/asset.js";
 import { runVoiceAgent } from "../src/agents/voice.js";
 import { runAssemblyAgent } from "../src/agents/assembly.js";
@@ -283,18 +293,28 @@ function buildScriptEnvelope(mode) {
   const data = buildScript();
   const segments = [];
 
-  data.sections.forEach((section, sectionIndex) => {
-    section.segments.forEach((segment, segmentIndex) => {
+  // Métadonnées de couverture au format de production (R28.10 à R28.11) : un
+  // segment PASS au premier tour, sous le verrou courant.
+  const lock = buildCoverageLock({
+    entities: researchEntitiesOf(buildResearch())
+  });
+  const lockSha256 = judgeLockSha256(lock);
+  const protocolId = boundaryProtocolIdFromLock(lock);
+
+  data.sections.forEach(section => {
+    section.segments.forEach(segment => {
       segments.push({
-        label:
-          `sections[${sectionIndex}].segments[${segmentIndex}]`,
+        status: "PASS",
         covered: true,
-        repaired: false,
-        initial_undeclared_claims: [],
         undeclared_claims: [],
-        initial_usage: usage("validate-script-claim-coverage"),
-        repair_usage: null,
-        usage: usage("validate-script-claim-coverage")
+        protocol_id: protocolId,
+        lock_sha256: lockSha256,
+        voiceover_sha256: crypto
+          .createHash("sha256")
+          .update(segment.voiceover, "utf8")
+          .digest("hex"),
+        rounds: 1,
+        repair_count: 0
       });
     });
   });
@@ -312,6 +332,10 @@ function buildScriptEnvelope(mode) {
     claim_coverage_validation: {
       valid: true,
       errors: [],
+      status: "PASS",
+      protocol_id: protocolId,
+      lock_sha256: lockSha256,
+      lock: { ...lock },
       segments
     },
     usage: usage("script")
