@@ -1,0 +1,56 @@
+# Contexte de build pour nomad-studio-worker/Dockerfile (build.context = .)
+#
+# PROTECTION PRINCIPALE, à ne pas perdre de vue : le Dockerfile ne copie que
+# 5 chemins explicitement nommés (package.json, package-lock.json, src/,
+# scripts/, config/) — PAS "COPY . .". Ce fichier n'est donc pas la seule
+# barrière : même un fichier sensible non listé ci-dessous ne serait copié
+# dans l'image QUE s'il se trouve sous l'un de ces 5 chemins. Ce
+# .dockerignore réduit en plus ce qui est envoyé au démon Docker comme
+# contexte de build (taille, temps de transfert) et sert de deuxième
+# couche de défense si le Dockerfile était un jour modifié pour copier plus
+# largement.
+#
+# Les fichiers d'EXEMPLE (*.example) ne contiennent aucune valeur réelle et
+# ne sont pas exclus : ils documentent la configuration attendue sans risque.
+
+# --- Secrets et configuration locale réelle (jamais dans l'image) ---
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Jetons OAuth YouTube chiffrés et toute donnée partitionnée de l'agent
+# (registre, mémoire, journal, cache de quota) : tout vit sous data/
+# (DATA_DIR = "data/youtube-agent", confirmé dans src/youtube-agent/config.js
+# et paths.js — PARTITION_NAMES inclut "oauth"). Exclusion explicite en plus
+# du nom exact, par clarté, bien que ce chemin ne soit de toute façon jamais
+# copié par le Dockerfile (hors des 5 chemins listés ci-dessus).
+data/
+**/oauth/*.json
+
+# Caches d'authentification locaux éventuels (npm, credentials génériques).
+.npmrc
+.netrc
+*.credentials.json
+
+# --- Développement / outils, non nécessaires à l'image ---
+node_modules/
+.git/
+.claude/
+*.md
+!nomad-studio-worker/README.md
+
+# --- Projet distinct "Karim & Lina" (shorts animés), hors périmètre ---
+animated-shorts/
+
+# --- Données générées localement (volumes en exécution, pas dans l'image) ---
+tmp/
+output/
+projects/
+
+# --- Divers ---
+.DS_Store
+npm-debug.log*

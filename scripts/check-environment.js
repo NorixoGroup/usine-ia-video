@@ -60,10 +60,16 @@ for (const dir of requiredDirs) {
 console.log("");
 console.log("--- Configuration locale ---");
 
-if (!fs.existsSync(".env.local")) {
-  fail(".env.local", "fichier manquant");
-} else {
+// En conteneur (Docker), la configuration est injectée via les variables
+// d'environnement du processus : il n'y a alors aucun .env.local, ce qui est
+// normal et ne doit pas être signalé comme une erreur. En développement
+// local, .env.local reste lu exactement comme avant (aucune régression).
+const hasEnvLocal = fs.existsSync(".env.local");
+
+if (hasEnvLocal) {
   ok(".env.local", "présent");
+} else {
+  ok(".env.local", "absent — variables lues depuis l'environnement (normal en conteneur)");
 }
 
 function readEnvFile(path) {
@@ -88,7 +94,10 @@ function readEnvFile(path) {
   return env;
 }
 
-const env = readEnvFile(".env.local");
+// process.env en base, .env.local en complément/surcharge quand présent :
+// mêmes valeurs qu'avant en local (où .env.local porte déjà tout), et
+// fonctionnel en conteneur (où seules les variables d'environnement existent).
+const env = { ...process.env, ...readEnvFile(".env.local") };
 
 env.ANTHROPIC_API_KEY?.length >= 50
   ? ok("ANTHROPIC_API_KEY", "configurée")

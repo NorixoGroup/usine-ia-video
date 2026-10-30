@@ -1,0 +1,103 @@
+# Nomad Studio — worker vidéo, packaging Docker local (B2-CLOUD-2).
+#
+# Fichier INDÉPENDANT de celui de n8n : réseau dédié, volumes dédiés, aucun
+# port publié, aucun montage des volumes/réseaux n8n, aucune modification du
+# conteneur n8n existant.
+#
+# Ceci est un JOB À LA DEMANDE, pas un service permanent :
+#   - pas de "restart: unless-stopped" (relancerait une production terminée) ;
+#   - pas de déclencheur automatique ici (n8n/Supabase : phase future, non
+#     implémentée) ;
+#   - chaque exécution réelle fournit ses propres arguments via "command:"
+#     (à adapter manuellement à chaque lancement, ou surchargés par
+#     "docker compose run" — ne jamais les coder en dur pour une production
+#     facturable).
+
+services:
+  nomad-studio-worker:
+    build:
+      context: .
+      dockerfile: nomad-studio-worker/Dockerfile
+    image: nomad-studio-worker:local
+    restart: "no"
+    networks:
+      - nomad-studio-internal
+
+    environment:
+      # Valeur sûre par défaut : aucun appel payant. À retirer/surcharger
+      # explicitement, jamais par défaut, pour autoriser un appel réel.
+      NO_API: "1"
+      # Facultatives pour un job de test (NO_API=1) : vérifié dans le code du
+      # moteur (src/services/anthropic.js, createMessage) — le coupe-circuit
+      # NO_API est contrôlé AVANT toute lecture ou validation de la clé API ;
+      # une valeur absente ou vide ne provoque donc aucune erreur en mode
+      # sans appel. La syntaxe ":-" (valeur par défaut vide) remplace la
+      # syntaxe ":?" précédente, qui exigeait la variable même en mode
+      # NO_API=1 — anomalie corrigée ici (B2-CLOUD-2A).
+      #
+      # Pour un lancement réel : exporter la vraie valeur dans l'environnement
+      # avant "docker compose run" (jamais dans ce fichier). PIPELINE_REAL_CALLS_ACK
+      # n'est PAS défini ici : il doit être fourni explicitement au lancement
+      # d'une production réelle, jamais par défaut.
+      ANTHROPIC_API_KEY: "${ANTHROPIC_API_KEY:-}"
+      ELEVENLABS_API_KEY: "${ELEVENLABS_API_KEY:-}"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "1.5"
+          memory: 4g
+        reservations:
+          cpus: "0.25"
+          memory: 512m
+
+    pids_limit: 256
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    read_only: false
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
+
+    volumes:
+      # Persistant : journal d'appels payants et cache d'idempotence
+      # (projects/<id>/calls.json, call-cache/). Ne JAMAIS supprimer ce
+      # volume : il protège contre la double facturation lors d'une reprise.
+      - nomad-studio-projects:/app/projects
+      # Persistant jusqu'au transfert futur vers un stockage objet externe
+      # (non implémenté à ce stade).
+      - nomad-studio-output:/app/output
+      # Fichiers de travail FFmpeg : répertoire sur disque, PAS de réservation
+      # mémoire tmpfs automatique (les 90 Go observés sur le VPS ne sont pas
+      # supposés disponibles en permanence — surveillance de l'espace requise
+      # séparément). Le moteur nettoie lui-même ce dossier après chaque rendu.
+      - nomad-studio-tmp:/app/tmp
+      # Médias d'entrée, montés en LECTURE SEULE : le moteur ne doit jamais
+      # pouvoir modifier ses propres sources. Le dossier hôte réel reste à
+      # préparer séparément (automatisation d'approvisionnement : phase future).
+      - nomad-studio-media:/app/media:ro
+
+    # Commande à remplacer explicitement à chaque lancement réel. Par défaut
+    # (aucun argument), le moteur affiche son état et se termine en code 2,
+    # SANS aucun appel payant (comportement vérifié dans le code : le mode
+    # LIVE complet exige --dry-run ou --research-script, absents ici).
+    command: []
+
+networks:
+  nomad-studio-internal:
+    driver: bridge
+    # PAS de "internal: true" : les connexions HTTPS sortantes (Anthropic,
+    # ElevenLabs) doivent rester possibles. Aucun port n'est publié par
+    # ailleurs (voir l'absence de "ports:" ci-dessus), ce qui suffit à
+    # garantir l'absence d'exposition entrante.
+
+volumes:
+  nomad-studio-projects:
+  nomad-studio-output:
+  nomad-studio-tmp:
+  nomad-studio-media:
