@@ -47,6 +47,7 @@ services:
         limits:
           cpus: "1.5"
           memory: 4g
+          pids: 256
         reservations:
           cpus: "0.25"
           memory: 512m
