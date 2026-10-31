@@ -11,6 +11,10 @@ import {
 } from "../agents/script.js";
 
 import {
+  selectNarrationUnits
+} from "../utils/narration-unit-selector.js";
+
+import {
   runVisualDirector
 } from "../agents/visual-director.js";
 
@@ -137,6 +141,30 @@ const prompt =
 // que des contrats, comme avant. Présent : chaque asset et chaque unité
 // de narration doit y trouver son fichier (tout ou rien).
 const mediaDir = getArgument("media-dir");
+// Sélection d'une unité de narration unique (mode pilote).
+const narrationUnitOccurrences = args.filter(
+  (value) => value.startsWith("--narration-unit")
+).length;
+const narrationUnitRequested = narrationUnitOccurrences > 0;
+const narrationUnit = getArgument("narration-unit");
+
+if (narrationUnitOccurrences > 1) {
+  throw new Error(
+    "Orchestrateur : --narration-unit ne peut être fourni qu'une seule fois."
+  );
+}
+if (narrationUnitRequested && !narrationUnit) {
+  throw new Error(
+    "Orchestrateur : --narration-unit exige un identifiant (--narration-unit=<unit_id>)."
+  );
+}
+if (narrationUnitRequested && !/^[A-Za-z0-9_-]+$/.test(narrationUnit)) {
+  throw new Error(
+    `Orchestrateur : --narration-unit invalide "${narrationUnit}" ` +
+    "(identifiant alphanumérique, tirets et soulignés uniquement)."
+  );
+}
+
 const fixtureNarrationProvider = args.includes("--fixture-narration-provider");
 const realNarration = args.includes("--real-narration");
 
@@ -269,6 +297,23 @@ if (mode === "full") {
 } else if (realCallsCapRequested) {
   throw new Error(
     "Orchestrateur : --real-calls-cap exige --mode=full."
+  );
+}
+
+// Mode pilote : une seule unité et un appel réel maximum.
+if (
+  narrationUnitRequested &&
+  (!researchScriptMode || !realNarration || !mediaDir || mode !== "full")
+) {
+  throw new Error(
+    "Orchestrateur : --narration-unit exige --research-script, " +
+    "--real-narration, --media-dir et --mode=full."
+  );
+}
+if (narrationUnitRequested && realCallsCap !== "1") {
+  throw new Error(
+    "Orchestrateur : --narration-unit exige --real-calls-cap=1 " +
+    "(mode pilote : une seule unité, un seul appel maximum)."
   );
 }
 
@@ -1004,7 +1049,10 @@ if (dryRun) {
         : realNarration
           ? await ensureNarrationAudio({
             mediaDir,
-            units: buildNarrationPlan(voiceSourceScript.data),
+            units: selectNarrationUnits(
+              buildNarrationPlan(voiceSourceScript.data),
+              narrationUnit
+            ),
             provider: createElevenLabsNarrationProvider(),
             providerConfig: realProviderConfig,
             callGuard: createRealNarrationCallGuard()
