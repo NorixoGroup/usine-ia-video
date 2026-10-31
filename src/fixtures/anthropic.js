@@ -5,7 +5,20 @@ import {
 
 const FIXTURE_MODE_ENV = "ANTHROPIC_FIXTURES";
 const FIXTURE_SCENARIO_ENV = "ANTHROPIC_FIXTURE_SCENARIO";
+const WEB_SEARCH_STUB_ENV = "ANTHROPIC_FIXTURE_WEB_SEARCH_STUB";
 const DEFAULT_SCENARIO = "happy";
+
+// AA-U2 — forme exacte, et strictement seule, acceptée par le stub
+// web_search. Toute autre forme (nom, type, max_uses, clé supplémentaire,
+// tool additionnel) reste refusée comme avant l'introduction du stub.
+const EXPECTED_WEB_SEARCH_TOOL = Object.freeze({
+  type: "web_search_20250305",
+  name: "web_search",
+  max_uses: 5
+});
+const EXPECTED_WEB_SEARCH_TOOL_KEYS = Object.keys(
+  EXPECTED_WEB_SEARCH_TOOL
+).sort().join(",");
 
 // Phrase d'ouverture exacte de chaque SYSTEM_PROMPT réel
 // (espaces et retours à la ligne normalisés).
@@ -53,6 +66,35 @@ function fixturesEnabled() {
 
 function fail(message) {
   throw new Error(`${FIXTURE_MODE_ENV}=1 — ${message}`);
+}
+
+function webSearchStubEnabled() {
+  return process.env[WEB_SEARCH_STUB_ENV] === "1";
+}
+
+// Vrai uniquement pour la forme exacte EXPECTED_WEB_SEARCH_TOOL : un seul
+// outil, exactement les clés type/name/max_uses, valeurs identiques.
+// Aucune tolérance de forme : le stub ne simule qu'un contrat figé.
+function isExpectedWebSearchTools(tools) {
+  if (!Array.isArray(tools) || tools.length !== 1) {
+    return false;
+  }
+
+  const [tool] = tools;
+
+  if (!tool || typeof tool !== "object") {
+    return false;
+  }
+
+  if (Object.keys(tool).sort().join(",") !== EXPECTED_WEB_SEARCH_TOOL_KEYS) {
+    return false;
+  }
+
+  return (
+    tool.type === EXPECTED_WEB_SEARCH_TOOL.type &&
+    tool.name === EXPECTED_WEB_SEARCH_TOOL.name &&
+    tool.max_uses === EXPECTED_WEB_SEARCH_TOOL.max_uses
+  );
 }
 
 // R29.3 : le mode fixtures est-il actif ? Lecture seule, aucun effet de bord.
@@ -199,10 +241,20 @@ export function getAnthropicFixture({ system, messages, tools }) {
   const fixtureId = detectFixtureId(system);
   const scenario = resolveScenario();
 
+  let toolsStubbed = false;
+
   if (tools !== undefined) {
-    fail(
-      `fixture "${fixtureId}" : aucun outil n'est simulé en mode fixture.`
-    );
+    // AA-U2 — par défaut, strictement inchangé : aucun outil n'est simulé.
+    // Dérogation uniquement si le second signal explicite est actif ET que
+    // la requête porte exactement la forme web_search attendue. Aucune
+    // autre combinaison n'est tolérée (R29.3 : fixture valide OU exception).
+    if (!webSearchStubEnabled() || !isExpectedWebSearchTools(tools)) {
+      fail(
+        `fixture "${fixtureId}" : aucun outil n'est simulé en mode fixture.`
+      );
+    }
+
+    toolsStubbed = true;
   }
 
   const userMessage = extractUserMessage(fixtureId, messages);
@@ -218,7 +270,8 @@ export function getAnthropicFixture({ system, messages, tools }) {
 
   callLog.push({
     fixture_id: fixtureId,
-    scenario
+    scenario,
+    ...(toolsStubbed ? { tools_stub: true } : {})
   });
 
   return result;

@@ -686,17 +686,41 @@ function json(value) {
 // Résolveurs
 // ------------------------------------------------------------------
 
+const RESEARCH_TEST_MODE_PATTERN =
+  /^TEST TECHNIQUE UNIQUEMENT\.\n\nSujet : (.*)\n\nConsigne : (.*)\n\nRetourne une version MINIMALE du JSON demandé :\n/;
+
+// AA-U2 — gabarit --mode=full (src/agents/research.js, branche !testMode).
+// N'est jamais atteint sans le stub web_search explicite : sans lui,
+// anthropic.js refuse la requête avant même l'appel à ce résolveur.
+const RESEARCH_FULL_MODE_PATTERN =
+  /^Prépare le dossier de recherche documentaire\.\n\nTitre \/ sujet :\n(.*)\n\nConsigne éditoriale :\n(.*)\n\nLa recherche doit permettre ensuite la rédaction d'un documentaire\nYouTube factuel de (.*) pour "Les Découvertes du Nomade"\.$/;
+
 function resolveResearch(fixtureId, scenario, userMessage) {
-  const [, title, prompt] = matchOrFail(
-    fixtureId,
-    userMessage,
-    /^TEST TECHNIQUE UNIQUEMENT\.\n\nSujet : (.*)\n\nConsigne : (.*)\n\nRetourne une version MINIMALE du JSON demandé :\n/
-  );
+  const testMatch = userMessage.match(RESEARCH_TEST_MODE_PATTERN);
+  const fullMatch = testMatch
+    ? null
+    : userMessage.match(RESEARCH_FULL_MODE_PATTERN);
+
+  if (!testMatch && !fullMatch) {
+    fail(
+      fixtureId,
+      "message utilisateur non conforme au gabarit attendu."
+    );
+  }
+
+  const [, title, prompt, durationLabel] = testMatch ?? fullMatch;
 
   if (title !== CANONICAL_TITLE || prompt !== CANONICAL_PROMPT) {
     fail(
       fixtureId,
       "sujet ou consigne hors du jeu de données canonique."
+    );
+  }
+
+  if (fullMatch && durationLabel !== "25 à 30 minutes") {
+    fail(
+      fixtureId,
+      "profil de durée hors du jeu de données canonique du stub."
     );
   }
 
