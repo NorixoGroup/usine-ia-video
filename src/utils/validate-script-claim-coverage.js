@@ -497,9 +497,25 @@ export async function validateScriptClaimCoverage(script) {
   };
 
   // En mode complet, le garde est déjà configuré avant l'agent Script.
-  // En mode fixture/local il est absent : l'estimation reste observable mais
-  // ne consomme rien et ne requiert aucune autorisation.
-  if (getCallGuardStatus().configured) {
+  // En mode fixture/local sans garde configuré, l'estimation reste
+  // observable mais ne consomme rien et ne requiert aucune autorisation.
+  //
+  // Exception étroite : le pilote ElevenLabs à unité unique configure un
+  // garde réel dédié à la réservation de narration (scope explicite
+  // "elevenlabs-narration-pilot", posé par l'orchestrateur) alors que les
+  // appels Anthropic restent simulés. Dans ce cas précis — et uniquement
+  // lorsque Anthropic est réellement simulé (ANTHROPIC_FIXTURES=1), sans
+  // quoi ce même garde doit continuer à protéger de vrais appels Anthropic
+  // — l'estimation des claims ne peut jamais consommer ce budget, qui n'est
+  // pas le sien : le précontrôle est sans objet et serait un faux refus.
+  // Tout autre garde configuré (y compris un garde de test sans scope,
+  // même sous ANTHROPIC_FIXTURES=1) reste protégé sans exception.
+  const guardStatus = getCallGuardStatus();
+  const isNarrationPilotFixtureHybrid =
+    guardStatus.scope === "elevenlabs-narration-pilot" &&
+    process.env.ANTHROPIC_FIXTURES === "1";
+
+  if (guardStatus.configured && !isNarrationPilotFixtureHybrid) {
     assertRealCallBudget({
       calls: estimate.total_calls_max,
       label: "validation batchée des claims"

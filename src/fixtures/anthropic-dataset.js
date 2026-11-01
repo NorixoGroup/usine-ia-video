@@ -708,17 +708,41 @@ function json(value) {
 // Résolveurs
 // ------------------------------------------------------------------
 
+const RESEARCH_TEST_MODE_PATTERN =
+  /^TEST TECHNIQUE UNIQUEMENT\.\n\nSujet : (.*)\n\nConsigne : (.*)\n\nRetourne une version MINIMALE du JSON demandé :\n/;
+
+// AA-U2 — gabarit --mode=full (src/agents/research.js, branche !testMode).
+// N'est jamais atteint sans le stub web_search explicite : sans lui,
+// anthropic.js refuse la requête avant même l'appel à ce résolveur.
+const RESEARCH_FULL_MODE_PATTERN =
+  /^Prépare le dossier de recherche documentaire\.\n\nTitre \/ sujet :\n(.*)\n\nConsigne éditoriale :\n(.*)\n\nLa recherche doit permettre ensuite la rédaction d'un documentaire\nYouTube factuel de (.*) pour "Les Découvertes du Nomade"\.$/;
+
 function resolveResearch(fixtureId, scenario, userMessage) {
-  const [, title, prompt] = matchOrFail(
-    fixtureId,
-    userMessage,
-    /^TEST TECHNIQUE UNIQUEMENT\.\n\nSujet : (.*)\n\nConsigne : (.*)\n\nRetourne une version MINIMALE du JSON demandé :\n/
-  );
+  const testMatch = userMessage.match(RESEARCH_TEST_MODE_PATTERN);
+  const fullMatch = testMatch
+    ? null
+    : userMessage.match(RESEARCH_FULL_MODE_PATTERN);
+
+  if (!testMatch && !fullMatch) {
+    fail(
+      fixtureId,
+      "message utilisateur non conforme au gabarit attendu."
+    );
+  }
+
+  const [, title, prompt, durationLabel] = testMatch ?? fullMatch;
 
   if (title !== CANONICAL_TITLE || prompt !== CANONICAL_PROMPT) {
     fail(
       fixtureId,
       "sujet ou consigne hors du jeu de données canonique."
+    );
+  }
+
+  if (fullMatch && durationLabel !== "25 à 30 minutes") {
+    fail(
+      fixtureId,
+      "profil de durée hors du jeu de données canonique du stub."
     );
   }
 
@@ -733,11 +757,22 @@ function resolveResearch(fixtureId, scenario, userMessage) {
 }
 
 function resolveScript(fixtureId, scenario, userMessage) {
-  const [, title, researchText] = matchOrFail(
-    fixtureId,
-    userMessage,
+  const testMatch = userMessage.match(
     /^TEST TECHNIQUE UNIQUEMENT\.\n\nTitre :\n(.*)\n\n[\s\S]*?\nDOSSIER RESEARCH :\n([\s\S]+)$/
   );
+
+  const fullMatch = testMatch
+    ? null
+    : userMessage.match(
+        /^Rédige le script voix-off documentaire complet\.\n\nTitre :\n(.*)\n\nLe documentaire final doit durer entre (\d+) et (\d+) minutes\.\n\n[\s\S]*?\nDOSSIER RESEARCH :\n([\s\S]+)$/
+      );
+
+  if (!testMatch && !fullMatch) {
+    fail(fixtureId, "message utilisateur non conforme au gabarit attendu.");
+  }
+
+  const title = testMatch ? testMatch[1] : fullMatch[1];
+  const researchText = testMatch ? testMatch[2] : fullMatch[4];
 
   const research = parseJsonOrFail(
     fixtureId,
@@ -755,15 +790,19 @@ function resolveScript(fixtureId, scenario, userMessage) {
     );
   }
 
-  // Variante demandée par le prompt utilisateur : plage de durée (R14A)
-  // et cadre narré (R14B). Sans marqueur R14, c'est le script historique.
-  const range = userMessage.match(
-    /estimated_duration_minutes doit rester entre (\d+) et (\d+) ;/
-  );
+  const range = testMatch
+    ? userMessage.match(
+        /estimated_duration_minutes doit rester entre (\d+) et (\d+) ;/
+      )
+    : fullMatch;
 
-  const declaredMinutes = range
-    ? DECLARED_MINUTES_BY_RANGE[`${range[1]}-${range[2]}`]
-    : undefined;
+  const min = testMatch ? range?.[1] : range?.[2];
+  const max = testMatch ? range?.[2] : range?.[3];
+
+  const declaredMinutes =
+    min && max
+      ? DECLARED_MINUTES_BY_RANGE[`${min}-${max}`]
+      : undefined;
 
   if (declaredMinutes === undefined) {
     fail(

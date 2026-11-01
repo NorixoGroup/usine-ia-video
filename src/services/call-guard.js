@@ -293,7 +293,8 @@ export function reconcileNarrationJournal({ productionDir, candidates = [] }) {
 export function configureCallGuard({
   productionDir,
   cap,
-  acceptUnresolved = []
+  acceptUnresolved = [],
+  scope = null
 }) {
   const authorizedCap = assertRealCallAuthorization({ cap });
 
@@ -361,7 +362,8 @@ export function configureCallGuard({
     cap: authorizedCap,
     used: 0,
     cacheHits: 0,
-    journal
+    journal,
+    scope
   };
 
   for (const entry of journal.entries) {
@@ -395,9 +397,10 @@ export function getCallGuardStatus() {
         configured: true,
         cap: state.cap,
         used: state.used,
-        cache_hits: state.cacheHits
+        cache_hits: state.cacheHits,
+        scope: state.scope ?? null
       }
-    : { configured: false, cap: null, used: 0, cache_hits: 0 };
+    : { configured: false, cap: null, used: 0, cache_hits: 0, scope: null };
 }
 
 // Vérification non mutante d'un budget connu avant de commencer une
