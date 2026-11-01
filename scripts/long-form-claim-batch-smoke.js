@@ -104,6 +104,126 @@ await test("budget suffisant + fixtures → PASS logique, 48 résultats stables"
   assert(result.segments.map(item => item.label).at(-1) === "sections[5].segments[7]", "ordre source instable");
 });
 
+// ---------------------------------------------------------------------
+// Portée explicite du garde ("scope") — distingue le garde historique
+// (sans scope) du pilote ElevenLabs à unité unique (scope dédié), sans
+// jamais s'appuyer sur ANTHROPIC_FIXTURES seul (R29.x — régression du
+// précontrôle budgétaire des claims).
+// ---------------------------------------------------------------------
+
+function withTempGuardDir(fn) {
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "r29-scope-"));
+  const previous = {
+    NO_API: process.env.NO_API,
+    PIPELINE_REAL_CALLS_ACK: process.env.PIPELINE_REAL_CALLS_ACK,
+    ANTHROPIC_FIXTURES: process.env.ANTHROPIC_FIXTURES
+  };
+  delete process.env.NO_API;
+  process.env.PIPELINE_REAL_CALLS_ACK = "1";
+
+  return Promise.resolve()
+    .then(() => fn(dir))
+    .finally(() => {
+      resetCallGuard();
+      process.env.NO_API = previous.NO_API;
+      process.env.PIPELINE_REAL_CALLS_ACK = previous.PIPELINE_REAL_CALLS_ACK;
+      if (previous.ANTHROPIC_FIXTURES === undefined) {
+        delete process.env.ANTHROPIC_FIXTURES;
+      } else {
+        process.env.ANTHROPIC_FIXTURES = previous.ANTHROPIC_FIXTURES;
+      }
+      fs.rmSync(dir, { recursive: true, force: true });
+    });
+}
+
+await test("scope absent + fixtures Anthropic : précontrôle historique actif", async () => {
+  await withTempGuardDir(async (dir) => {
+    configureCallGuard({ productionDir: dir, cap: 1 });
+    process.env.ANTHROPIC_FIXTURES = "1";
+
+    assert(getCallGuardStatus().scope === null, "scope attendu null par défaut");
+
+    let error;
+    try { await validateScriptClaimCoverage(script); } catch (caught) { error = caught; }
+    assert(error && /Budget d'appels réels insuffisant/.test(error.message), error?.message);
+    assert(getCallGuardStatus().used === 0, JSON.stringify(getCallGuardStatus()));
+  });
+});
+
+await test("scope pilote + fixtures Anthropic : exemption autorisée", async () => {
+  await withTempGuardDir(async (dir) => {
+    configureCallGuard({
+      productionDir: dir,
+      cap: 1,
+      scope: "elevenlabs-narration-pilot"
+    });
+    process.env.ANTHROPIC_FIXTURES = "1";
+
+    assert(
+      getCallGuardStatus().scope === "elevenlabs-narration-pilot",
+      "scope attendu posé"
+    );
+
+    const result = await validateScriptClaimCoverage(script);
+
+    assert(result.valid && result.segments.length === 48, JSON.stringify(result.errors));
+    assert(
+      getCallGuardStatus().used === 0,
+      "aucun appel réel ne doit être consommé par des claims simulées"
+    );
+  });
+});
+
+await test("scope pilote + Anthropic réel (sans fixtures) : précontrôle actif", async () => {
+  await withTempGuardDir(async (dir) => {
+    configureCallGuard({
+      productionDir: dir,
+      cap: 1,
+      scope: "elevenlabs-narration-pilot"
+    });
+    // ANTHROPIC_FIXTURES volontairement absent : Anthropic serait réel ici.
+
+    let error;
+    try { await validateScriptClaimCoverage(script); } catch (caught) { error = caught; }
+    assert(error && /Budget d'appels réels insuffisant/.test(error.message), error?.message);
+    assert(getCallGuardStatus().used === 0, JSON.stringify(getCallGuardStatus()));
+  });
+});
+
+await test("scope réinitialisé entre productions : aucune exemption héritée", async () => {
+  await withTempGuardDir(async (dirA) => {
+    configureCallGuard({
+      productionDir: dirA,
+      cap: 1,
+      scope: "elevenlabs-narration-pilot"
+    });
+    assert(getCallGuardStatus().scope === "elevenlabs-narration-pilot");
+
+    resetCallGuard();
+    assert(getCallGuardStatus().configured === false);
+    assert(getCallGuardStatus().scope === null, "scope doit disparaître avec le reset");
+
+    const dirB = fs.mkdtempSync(path.join(os.tmpdir(), "r29-scope-b-"));
+    try {
+      configureCallGuard({ productionDir: dirB, cap: 1 });
+      assert(
+        getCallGuardStatus().scope === null,
+        "scope du pilote ne doit jamais fuiter vers une autre production"
+      );
+
+      process.env.ANTHROPIC_FIXTURES = "1";
+      let error;
+      try { await validateScriptClaimCoverage(script); } catch (caught) { error = caught; }
+      assert(
+        error && /Budget d'appels réels insuffisant/.test(error.message),
+        "sans scope hérité, le précontrôle historique doit rester actif"
+      );
+    } finally {
+      fs.rmSync(dirB, { recursive: true, force: true });
+    }
+  });
+});
+
 assert(networkGuard.attempts().length === 0, `NETWORK ATTEMPTS = ${networkGuard.attempts().length}`);
 console.log(`NETWORK ATTEMPTS = 0\nTests : ${passed} PASS / ${failed} FAIL`);
 process.exit(failed === 0 ? 0 : 1);

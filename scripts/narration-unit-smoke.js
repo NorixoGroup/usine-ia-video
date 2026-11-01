@@ -36,7 +36,6 @@ import {
   createMediaFixtureRoot,
   generateImage,
   generateVideo,
-  generateVideoWithAudio,
   removeMediaFixtureRoot
 } from "./local-media-fixtures.js";
 
@@ -75,19 +74,35 @@ function readJournal(productionId) {
   return fs.existsSync(file) ? JSON.parse(fs.readFileSync(file, "utf8")) : null;
 }
 
-// Jeu de médias minimal : les cinq assets attendus par le plan visuel
-// canonique (titre/prompt par défaut), AUCUN fichier voice/ — les deux
-// unités de narration restent donc à synthétiser. Couleur unie
-// uniquement, fabriquée par le ffmpeg local : aucune source réelle,
-// aucune donnée sensible.
+// Jeu de médias minimal : les neuf assets attendus par le plan visuel
+// cadré R14 (profil standard, 27 min déclarées → narratedFrame=true,
+// src/fixtures/anthropic-dataset.js buildFramedPlan), AUCUN fichier
+// voice/ — les quatre unités de narration restent donc à synthétiser.
+// Couleur unie uniquement, fabriquée par le ffmpeg local : aucune
+// source réelle, aucune donnée sensible. Le type de média (vidéo/image)
+// de chaque fichier respecte MEDIA_KINDS_BY_ASSET_TYPE
+// (src/utils/validate-asset-manifest.js) pour l'asset_type du shot
+// correspondant : map → image ou vidéo, generated/stock_video → vidéo
+// uniquement.
 function prepareAssetsOnlyMediaDir(root) {
   const asset = name => path.join(root, "assets", name);
 
-  generateVideo(asset("s01-g01-sh01.mp4"), { seconds: 8 });
-  generateImage(asset("s01-g01-sh02.png"));
-  generateVideo(asset("s01-g01-sh03.mp4"), { seconds: 6, color: "gray" });
-  generateVideo(asset("s02-g01-sh01.mp4"), { seconds: 12, color: "orange" });
-  generateVideoWithAudio(asset("s02-g01-sh02.mp4"), { seconds: 8 });
+  // s01-g01 — segment cadre (hook) : map, generated.
+  generateImage(asset("s01-g01-sh01.png"));
+  generateVideo(asset("s01-g01-sh02.mp4"), { seconds: 8 });
+
+  // s01-g02 — segment aride : stock_video, map, generated.
+  generateVideo(asset("s01-g02-sh01.mp4"), { seconds: 8 });
+  generateImage(asset("s01-g02-sh02.png"), { color: "gray" });
+  generateVideo(asset("s01-g02-sh03.mp4"), { seconds: 5, color: "gray" });
+
+  // s02-g01 — segment population : map, stock_video.
+  generateImage(asset("s02-g01-sh01.png"), { color: "orange" });
+  generateVideo(asset("s02-g01-sh02.mp4"), { seconds: 8, color: "orange" });
+
+  // s02-g02 — segment cadre (conclusion) : map, generated.
+  generateImage(asset("s02-g02-sh01.png"), { color: "green" });
+  generateVideo(asset("s02-g02-sh02.mp4"), { seconds: 8, color: "green" });
 
   return root;
 }

@@ -757,11 +757,22 @@ function resolveResearch(fixtureId, scenario, userMessage) {
 }
 
 function resolveScript(fixtureId, scenario, userMessage) {
-  const [, title, researchText] = matchOrFail(
-    fixtureId,
-    userMessage,
+  const testMatch = userMessage.match(
     /^TEST TECHNIQUE UNIQUEMENT\.\n\nTitre :\n(.*)\n\n[\s\S]*?\nDOSSIER RESEARCH :\n([\s\S]+)$/
   );
+
+  const fullMatch = testMatch
+    ? null
+    : userMessage.match(
+        /^Rédige le script voix-off documentaire complet\.\n\nTitre :\n(.*)\n\nLe documentaire final doit durer entre (\d+) et (\d+) minutes\.\n\n[\s\S]*?\nDOSSIER RESEARCH :\n([\s\S]+)$/
+      );
+
+  if (!testMatch && !fullMatch) {
+    fail(fixtureId, "message utilisateur non conforme au gabarit attendu.");
+  }
+
+  const title = testMatch ? testMatch[1] : fullMatch[1];
+  const researchText = testMatch ? testMatch[2] : fullMatch[4];
 
   const research = parseJsonOrFail(
     fixtureId,
@@ -779,15 +790,19 @@ function resolveScript(fixtureId, scenario, userMessage) {
     );
   }
 
-  // Variante demandée par le prompt utilisateur : plage de durée (R14A)
-  // et cadre narré (R14B). Sans marqueur R14, c'est le script historique.
-  const range = userMessage.match(
-    /estimated_duration_minutes doit rester entre (\d+) et (\d+) ;/
-  );
+  const range = testMatch
+    ? userMessage.match(
+        /estimated_duration_minutes doit rester entre (\d+) et (\d+) ;/
+      )
+    : fullMatch;
 
-  const declaredMinutes = range
-    ? DECLARED_MINUTES_BY_RANGE[`${range[1]}-${range[2]}`]
-    : undefined;
+  const min = testMatch ? range?.[1] : range?.[2];
+  const max = testMatch ? range?.[2] : range?.[3];
+
+  const declaredMinutes =
+    min && max
+      ? DECLARED_MINUTES_BY_RANGE[`${min}-${max}`]
+      : undefined;
 
   if (declaredMinutes === undefined) {
     fail(

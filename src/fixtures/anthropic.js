@@ -61,6 +61,38 @@ function fixturesEnabled() {
   return process.env[FIXTURE_MODE_ENV] === "1";
 }
 
+function webSearchStubEnabled() {
+  return (
+    fixturesEnabled() &&
+    process.env[WEB_SEARCH_STUB_ENV] === "1"
+  );
+}
+
+function isExpectedWebSearchTools(tools) {
+  if (!Array.isArray(tools) || tools.length !== 1) {
+    return false;
+  }
+
+  const tool = tools[0];
+
+  if (
+    tool === null ||
+    typeof tool !== "object" ||
+    Array.isArray(tool)
+  ) {
+    return false;
+  }
+
+  const keys = Object.keys(tool).sort().join(",");
+
+  return (
+    keys === EXPECTED_WEB_SEARCH_TOOL_KEYS &&
+    Object.entries(EXPECTED_WEB_SEARCH_TOOL).every(
+      ([key, value]) => tool[key] === value
+    )
+  );
+}
+
 function fail(message) {
   throw new Error(`${FIXTURE_MODE_ENV}=1 — ${message}`);
 }

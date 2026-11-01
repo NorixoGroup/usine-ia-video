@@ -703,7 +703,15 @@ if (researchScriptMode) {
     configureCallGuard({
       productionDir,
       cap: realCallsCap,
-      acceptUnresolved
+      acceptUnresolved,
+      // Portée explicite : seul le pilote ElevenLabs à unité unique
+      // (déjà contraint à --real-calls-cap=1 par la validation CLI
+      // ci-dessus) marque ce budget réel comme dédié à la narration,
+      // afin que la validation des claims Anthropic (potentiellement
+      // simulée) ne le confonde pas avec son propre budget.
+      scope: narrationUnitRequested && realNarration
+        ? "elevenlabs-narration-pilot"
+        : null
     });
   }
 
