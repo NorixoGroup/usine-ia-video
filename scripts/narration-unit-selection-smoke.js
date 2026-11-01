@@ -378,7 +378,8 @@ await test("11. Assembly : manifeste Voice à synthèse partielle refusé", asyn
 // ---------------------------------------------------------------------
 
 await test(
-  "Phase 4 — succès réel (hash/taille) puis échec sur l'autre unité : fichier intact, journal complet, reprise sans refacturation",
+  "Phase 4 — succès réel (hash/taille) puis échec sur l'autre unité : fichier intact, journal complet, " +
+  "retentative identique refusée (R30), reprise avec texte corrigé sans refacturation de l'unité déjà réussie",
   async () => {
     const directory = media(root, "phase4-mixed");
     const mixed = fakeProvider({ bytes: sourceBytes, failUnitIds: ["s02-g01"] });
@@ -418,16 +419,53 @@ await test(
     );
     assert(hashAfterFailure === journal.entries[0].sha256, "le fichier réussi ne doit pas avoir changé");
 
-    // Reprise : seule s02-g01 est encore manquante — cap=1 suffit, et la
-    // reprise ne doit ni réinvoquer le provider pour s01-g01, ni toucher
-    // à son fichier déjà persisté.
+    // Contrat R30 : une requête déjà échouée (statut "failed") ne peut
+    // plus être rejouée automatiquement à l'identique — une facturation
+    // réelle reste possible malgré l'absence de résultat local. La
+    // reprise avec le plan inchangé doit donc être refusée fermé, sans
+    // jamais ré-appeler le provider, pour s02-g01.
+    const identicalRetryProvider = fakeProvider({ bytes: sourceBytes });
+
+    await withRealCallsAuthorized(async () => {
+      configureCallGuard({ productionDir: directory, cap: 1 });
+      await expectReject(
+        () => ensureNarrationAudio({
+          mediaDir: directory,
+          units: plan,
+          provider: identicalRetryProvider,
+          callGuard: createRealNarrationCallGuard()
+        }),
+        /Nouvelle tentative narration refusée/
+      );
+    });
+
+    assert(
+      identicalRetryProvider.calls.length === 0,
+      `une requête identique après échec ne doit déclencher aucun appel : ${identicalRetryProvider.calls.length}`
+    );
+
+    journal = readJournal(directory);
+    assert(
+      journal.entries.length === 2,
+      `le refus fermé ne doit ajouter aucune entrée au journal : ${journal.entries.length}`
+    );
+
+    // Reprise légitime : après correction (texte modifié pour s02-g01 —
+    // seule l'identité de requête change, pas l'unité), la requête n'est
+    // plus "la même" et peut être retentée. s01-g01 reste réutilisé sans
+    // appel, par son propre mécanisme de vérification d'identité.
+    const correctedPlan = plan.map((unit) =>
+      unit.unitId === "s02-g01"
+        ? { ...unit, text: `${unit.text} (texte corrigé après investigation du premier échec).` }
+        : unit
+    );
     const resumeProvider = fakeProvider({ bytes: sourceBytes });
 
     await withRealCallsAuthorized(async () => {
       configureCallGuard({ productionDir: directory, cap: 1 });
       await ensureNarrationAudio({
         mediaDir: directory,
-        units: plan,
+        units: correctedPlan,
         provider: resumeProvider,
         callGuard: createRealNarrationCallGuard()
       });
