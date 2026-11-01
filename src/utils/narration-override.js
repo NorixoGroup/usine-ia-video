@@ -14,7 +14,10 @@ import crypto from "node:crypto";
 
 // Plafond local conservateur, indépendant de tout plan ElevenLabs réel —
 // à vérifier séparément par l'opérateur avant toute exécution réelle.
-export const NARRATION_OVERRIDE_MAX_TEXT_LENGTH = 2000;
+// Relevé de 2000 à 2500 (2026-11-01) pour couvrir le hook approuvé
+// s01-g01 (Australie EP01), sans affirmer de limite ou de tarif réel
+// ElevenLabs.
+export const NARRATION_OVERRIDE_MAX_TEXT_LENGTH = 2500;
 
 // Liste blanche stricte et volontairement réduite : seule s01-g01 est
 // autorisée aujourd'hui. Toute extension doit être un choix explicite,
