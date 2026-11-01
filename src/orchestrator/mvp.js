@@ -88,8 +88,13 @@ import {
 } from "../utils/duration-profile.js";
 
 import {
-  validateScriptDossier
+  validateScriptDossier,
+  syncNarratedFrameFields
 } from "../utils/validate-script.js";
+
+import {
+  loadNarrationOverride
+} from "../utils/narration-override.js";
 
 import {
   STOP_AFTER_VALUES,
@@ -162,6 +167,34 @@ if (narrationUnitRequested && !/^[A-Za-z0-9_-]+$/.test(narrationUnit)) {
   throw new Error(
     `Orchestrateur : --narration-unit invalide "${narrationUnit}" ` +
     "(identifiant alphanumérique, tirets et soulignés uniquement)."
+  );
+}
+
+// Remplacement local du texte de narration d'une unité autorisée par un
+// extrait documentaire validé hors fixture. Désactivé par défaut ;
+// strictement limité à s01-g01 aujourd'hui (liste blanche explicite,
+// src/utils/narration-override.js).
+const narrationOverrideOccurrences = args.filter(
+  (value) => value.startsWith("--narration-override")
+).length;
+const narrationOverrideRequested = narrationOverrideOccurrences > 0;
+const narrationOverridePath = getArgument("narration-override");
+
+if (narrationOverrideOccurrences > 1) {
+  throw new Error(
+    "Orchestrateur : --narration-override ne peut être fourni qu'une seule fois."
+  );
+}
+if (narrationOverrideRequested && !narrationOverridePath) {
+  throw new Error(
+    "Orchestrateur : --narration-override exige un chemin " +
+    "(--narration-override=<fichier.json>)."
+  );
+}
+if (narrationOverrideRequested && narrationUnit !== "s01-g01") {
+  throw new Error(
+    "Orchestrateur : --narration-override n'est autorisé qu'avec " +
+    "--narration-unit=s01-g01 (seule unité acceptée actuellement)."
   );
 }
 
@@ -672,7 +705,13 @@ if (researchScriptMode) {
   // Une reprise real-narration peut avoir publié un MP3 validé juste avant
   // une chute. Réconcilier exclusivement cette fenêtre F avant le garde
   // générique préserve le blocage de tout autre started call.
-  if (mode === "full" && realNarration && resumed && mediaDir) {
+  if (
+    mode === "full" &&
+    realNarration &&
+    resumed &&
+    mediaDir &&
+    fs.existsSync(path.join(mediaDir, "voice"))
+  ) {
     const configuredVoice = pipelineConfig.providers.voice;
     if (configuredVoice?.kind === "elevenlabs" && configuredVoice.voice_id) {
       const scriptForReconciliation = readJsonArtifact(productionDir, "script.json").data;
@@ -1019,6 +1058,93 @@ if (dryRun) {
       throw new Error(
         "Orchestrateur : script.json ne contient pas data."
       );
+    }
+
+    // Point d'insertion volontaire : après Visual Director et Asset (déjà
+    // exécutés sur le script fixture original, intact), avant Voice (seul
+    // consommateur restant du texte de narration). Le texte substitué
+    // n'est jamais vu par Visual Director : aucun risque de rupture de sa
+    // correspondance par égalité stricte avec le plan visuel canonique.
+    if (narrationOverrideRequested) {
+      const override = loadNarrationOverride(narrationOverridePath);
+
+      if (override.unitId !== narrationUnit) {
+        throw new Error(
+          `Orchestrateur : --narration-override porte l'unité ` +
+          `"${override.unitId}" mais --narration-unit="${narrationUnit}" ` +
+          "a été demandé."
+        );
+      }
+
+      const scriptData = voiceSourceScript.data;
+      const targetSegment = scriptData?.sections?.[0]?.segments?.[0];
+
+      if (!targetSegment || targetSegment.role !== "hook") {
+        throw new Error(
+          "Orchestrateur : --narration-override exige que le premier " +
+          "segment de la première section porte le rôle \"hook\" " +
+          "(s01-g01, cadre narré)."
+        );
+      }
+
+      console.log("");
+      console.log(
+        "    ⚠ --narration-override actif pour s01-g01 : la couverture " +
+        "des claims et le grounding visuel déjà enregistrés dans " +
+        "script.json/visual.json portent sur le texte fixture d'origine, " +
+        "PAS sur ce texte substitué — validation éditoriale externe " +
+        "uniquement (voir narration-override.json)."
+      );
+
+      targetSegment.voiceover = override.text;
+      syncNarratedFrameFields(scriptData);
+
+      const overrideValidation = validateScriptDossier(scriptData, {
+        durationRange: {
+          min: durationProfile.min,
+          max: durationProfile.max
+        },
+        requireNarratedFrame: true
+      });
+
+      if (!overrideValidation.valid) {
+        throw new Error(
+          "Orchestrateur : script.json invalide après --narration-override. " +
+          overrideValidation.errors.join(" | ")
+        );
+      }
+
+      // voiceSourceScript.data === scriptData (même référence, mutée en
+      // place) : resceller voiceSourceScript entier préserve exactement
+      // l'enveloppe d'origine (agent/mode/validation/usage), seul `data`
+      // change.
+      sealAndWriteArtifact({
+        productionDir,
+        production,
+        filename: "script.json",
+        data: voiceSourceScript,
+        save: saveProduction
+      });
+
+      writeJsonArtifact(productionDir, "narration-override.json", {
+        unit_id: override.unitId,
+        episode_id: override.episodeId,
+        text: override.text,
+        character_count: override.characterCount,
+        text_sha256: override.textSha256,
+        source_provenance: override.sourceProvenance,
+        editorial_validation: override.editorialValidation,
+        voice: override.voice,
+        source_path: override.sourcePath,
+        applied_at: new Date().toISOString(),
+        warning:
+          "La couverture des claims et le grounding visuel enregistrés " +
+          "dans script.json/visual.json portent sur le texte fixture " +
+          "d'origine, pas sur ce texte substitué."
+      });
+
+      console.log("    ✓ script.json mis à jour et re-scellé (override s01-g01)");
+      console.log("    ✓ narration-override.json écrit (trace éditoriale)");
     }
 
     console.log("");

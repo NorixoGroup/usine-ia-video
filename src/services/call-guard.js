@@ -670,13 +670,32 @@ export function beginNarrationCall({ providerKind, unitId, request }) {
     request
   });
 
-  if (
-    state.journal.entries.some(
-      entry => entry.status === "started" && entry.request_sha256 === hash
-    )
-  ) {
+  // Toute entrée déjà présente pour cette requête exacte — quel que soit
+  // son statut — interdit une nouvelle tentative automatique :
+  // - "started"   : appel en cours (même processus ou un précédent non
+  //                 résolu) ;
+  // - "failed"    : un échec réseau peut être survenu APRÈS l'envoi de
+  //                 la requête — une facturation réelle reste possible
+  //                 malgré l'absence de résultat local exploitable ;
+  // - "succeeded" : la requête a déjà été honorée (le fichier local
+  //                 correspondant, s'il existe, est couvert par
+  //                 verifyNarrationReuse — s'il n'existe plus, retenter
+  //                 reviendrait à payer deux fois le même texte).
+  // Relancer un nouveau processus sur la même production ne change rien
+  // à cette décision : le journal, pas le processus, fait foi.
+  const priorEntry = state.journal.entries.find(
+    entry => entry.request_sha256 === hash
+  );
+
+  if (priorEntry) {
     throw new Error(
-      "Double appel narration refusé : une requête identique est déjà en cours."
+      `Nouvelle tentative narration refusée pour ${unitId} : une entrée ` +
+      `"${priorEntry.status}" (${priorEntry.call_id}) existe déjà pour ` +
+      "cette requête exacte dans ce journal — une facturation réelle " +
+      "reste possible même après un échec. Retentative automatique " +
+      "bloquée (fail-closed). Aucun --accept-unresolved-calls ne lève " +
+      "ce refus : seule une autorisation explicite et distincte, encore " +
+      "à définir, pourrait le faire."
     );
   }
 
@@ -750,9 +769,73 @@ export function failNarrationCall(reservation, error) {
   failRealCall(reservation, error);
 }
 
+// Preuve qu'un fichier local déjà présent pour unit_id provient bien de la
+// requête (texte, modèle, voix, format) actuellement demandée, et non d'un
+// texte antérieur (p. ex. avant un --narration-override). N'écrase, ne
+// supprime et ne régénère jamais rien : échec fermé en cas de doute.
+export function verifyNarrationReuse({
+  unitId,
+  providerKind,
+  request,
+  existingRecord
+}) {
+  if (!state) {
+    throw new Error(
+      "Vérification de réutilisation narration : aucune autorisation configurée."
+    );
+  }
+
+  if (
+    typeof unitId !== "string" || unitId.length === 0 ||
+    typeof providerKind !== "string" || providerKind.length === 0 ||
+    !request || typeof request !== "object"
+  ) {
+    throw new Error(
+      "Vérification de réutilisation narration : paramètres invalides."
+    );
+  }
+
+  const hash = requestSha256({
+    kind: "narration",
+    provider_kind: providerKind,
+    unit_id: unitId,
+    request
+  });
+
+  const match = state.journal.entries.find(
+    entry =>
+      entry.status === "succeeded" &&
+      entry.unit_id === unitId &&
+      entry.request_sha256 === hash
+  );
+
+  if (!match) {
+    throw new Error(
+      `Réutilisation refusée pour ${unitId} : aucune entrée "succeeded" du ` +
+      "journal ne correspond au texte et à la configuration demandés " +
+      "(fail-closed — fichier local non régénéré ni supprimé)."
+    );
+  }
+
+  if (
+    typeof existingRecord?.sha256 !== "string" ||
+    !/^[0-9a-f]{64}$/.test(existingRecord.sha256) ||
+    existingRecord.sha256 !== match.sha256
+  ) {
+    throw new Error(
+      `Réutilisation refusée pour ${unitId} : SHA-256 du fichier local ne ` +
+      "correspond pas à l'entrée journal associée " +
+      "(fail-closed — fichier local non régénéré ni supprimé)."
+    );
+  }
+
+  return { reused: true, callId: match.call_id };
+}
+
 // Adaptateur minimal vers la frontière injectable de narration. Les fakes
-// locaux restent libres d'injecter leur propre garde; ce chemin est réservé
-// aux appels réels autorisés.
+// locaux restent libres d'injecter leur propre garde (verifyReuse est
+// optionnel côté narration-provider.js) ; ce chemin est réservé aux appels
+// réels autorisés et seul lui expose verifyReuse.
 export function createRealNarrationCallGuard() {
   return {
     preflight({ calls, label }) {
@@ -766,6 +849,14 @@ export function createRealNarrationCallGuard() {
     },
     fail(reservation, error) {
       return failNarrationCall(reservation, error);
+    },
+    verifyReuse({ unitId, providerKind, request, existingRecord }) {
+      return verifyNarrationReuse({
+        unitId,
+        providerKind,
+        request,
+        existingRecord
+      });
     }
   };
 }
