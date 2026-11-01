@@ -1,0 +1,16 @@
+{
+  "episode_id": "australia-ep01",
+  "unit_id": "s01-g01",
+  "text": "Imaginez un pays presque aussi vaste que l’Europe.\n\nUn territoire qui s’étend sur des milliers de kilomètres.\n\nDes ressources naturelles immenses.\n\nEt près de 28 millions d’habitants.\n\nMaintenant, regardez où ils vivent.\n\nSydney.\n\nMelbourne.\n\nBrisbane.\n\nAdelaide.\n\nPerth.\n\nPuis, entre ces grandes métropoles…\n\ndes distances gigantesques où la population devient incroyablement rare.\n\nSur certaines cartes de densité, le contraste est tellement\nspectaculaire qu’on entend parfois cette affirmation :\n\n« 95 % de l’Australie est vide. »\n\nMais est-ce vraiment vrai ?\n\nPas exactement.\n\nCe chiffre de 95 % n’est pas une statistique officielle australienne.\n\nEt pour une raison assez simple : avant de mesurer le « vide », il\nfaudrait déjà décider ce que ce mot signifie.\n\nAucun habitant ?\n\nAucune ville ?\n\nMoins d’un habitant par kilomètre carré ?\n\nAucune activité humaine ?\n\nSelon la définition choisie, la réponse changerait complètement.\n\nEn revanche, il existe un autre chiffre, bien réel.\n\nPlus de 87 % des Australiens vivent à moins de 50 kilomètres du\nlittoral.\n\nEt en 2025, la densité moyenne du pays n’était que de 3,6 habitants par\nkilomètre carré.\n\nAlors le mystère reste entier.\n\nPourquoi une population moderne s’est-elle concentrée à ce point autour\ndes marges d’un continent gigantesque ?\n\nPourquoi les Australiens n’ont-ils pas construit beaucoup plus de\ngrandes villes vers le centre ?\n\nEst-ce simplement à cause du désert ?\n\nDu manque d’eau ?\n\nDes distances ?\n\nOu existe-t-il une raison plus profonde ?\n\nParce qu’en réalité, l’histoire de l’Australie montre quelque chose\nd’étonnant :\n\non peut vivre dans son intérieur.\n\nOn peut y construire des villes.\n\nOn peut y apporter de l’eau sur des centaines de kilomètres.\n\nOn peut y extraire certaines des ressources les plus précieuses de la\nplanète.\n\nEt malgré tout cela…\n\nl’essentiel de la population continue de vivre ailleurs.\n\nAlors qu’est-ce qui empêche réellement des millions de personnes de\ns’installer dans l’intérieur australien ?\n\nPour le comprendre, il faut commencer par regarder où vivent les\nAustraliens aujourd’hui.",
+  "character_count": 2089,
+  "text_sha256": "92b3f3a82045f0d00aa37cfb250f424320ef77a7f8cea5d0a4fae6c7454ed881",
+  "source_provenance": "Les-Decouvertes-du-Nomade/EP01-Australie/01_MASTER_SCRIPT/MASTER_SCRIPT_V2.1_Australie.txt — bloc 00:00 HOOK (avant 02:00 UN CONTINENT, QUELQUES MÉTROPOLES), forme brute (retours à la ligne internes conservés)",
+  "editorial_validation": {
+    "version": "MASTER_SCRIPT_V2.1 — hook s01-g01 approuvé",
+    "validated_at": "2026-11-01"
+  },
+  "voice": {
+    "model_id": "eleven_multilingual_v2",
+    "voice_id": "UBXZKOKbt62aLQHhc1Jm"
+  }
+}

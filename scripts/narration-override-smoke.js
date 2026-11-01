@@ -172,6 +172,58 @@ await test("5. Texte trop long : échec fermé", () => {
   }
 });
 
+// Tests de frontière (R31 — relevé du plafond 2000 → 2500 pour couvrir
+// le hook approuvé Australie EP01, 2048/2089 caractères selon la forme).
+await test("5b. Frontière 2000 caractères : accepté", () => {
+  const dir = tmpDir("narration-override-b2000-");
+  try {
+    const text = "a".repeat(2000);
+    const file = writeOverrideFile(dir, text);
+    const override = loadNarrationOverride(file);
+    assert(override.characterCount === 2000, override.characterCount);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("5c. Frontière 2048 caractères (ancienne estimation du hook) : accepté", () => {
+  const dir = tmpDir("narration-override-b2048-");
+  try {
+    const text = "a".repeat(2048);
+    const file = writeOverrideFile(dir, text);
+    const override = loadNarrationOverride(file);
+    assert(override.characterCount === 2048, override.characterCount);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("5d. Frontière 2500 caractères (plafond exact) : accepté", () => {
+  const dir = tmpDir("narration-override-b2500-");
+  try {
+    const text = "a".repeat(2500);
+    const file = writeOverrideFile(dir, text);
+    const override = loadNarrationOverride(file);
+    assert(override.characterCount === 2500, override.characterCount);
+    assert(NARRATION_OVERRIDE_MAX_TEXT_LENGTH === 2500, NARRATION_OVERRIDE_MAX_TEXT_LENGTH);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+await test("5e. Frontière 2501 caractères (juste au-dessus du plafond) : échec fermé", () => {
+  const dir = tmpDir("narration-override-b2501-");
+  try {
+    const text = "a".repeat(2501);
+    const file = writeOverrideFile(dir, text);
+    let error;
+    try { loadNarrationOverride(file); } catch (caught) { error = caught; }
+    assert(error && /trop long/.test(error.message), error?.message);
+  } finally {
+    fs.rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 await test("6. character_count déclaré incohérent : échec fermé", () => {
   const dir = tmpDir("narration-override-count-");
   try {
@@ -664,6 +716,52 @@ await test(
         !fs.existsSync(path.join(PROJECTS, result.productionId, "assembly.json")),
         "Assembly ne doit jamais être atteint après un échec Voice"
       );
+    } finally {
+      if (result.productionId) removeProduction(result.productionId);
+    }
+  }
+);
+
+await test(
+  "19. Voix/modèle JSON incompatibles avec config/pipeline.json : refus avant tout appel",
+  () => {
+    const mismatchFile = writeOverrideFile(overrideFixtureRoot, OVERRIDE_TEXT, {
+      voice: { model_id: "eleven_multilingual_v2", voice_id: "VOIX_INCONNUE_NON_CONFIGUREE" }
+    });
+
+    const result = runOrchestrator(
+      [
+        "--mode=full",
+        "--real-narration",
+        `--media-dir=${overrideMediaDir}`,
+        "--real-calls-cap=1",
+        "--narration-unit=s01-g01",
+        `--narration-override=${mismatchFile}`
+      ],
+      baseEnv()
+    );
+    try {
+      assert(result.status !== 0, "code de sortie attendu non nul");
+      assert(
+        /voix\/modèle.*ne correspondent pas/.test(result.stderr),
+        `message attendu absent : ${result.stderr}`
+      );
+      const journal = result.productionId
+        ? path.join(PROJECTS, result.productionId, JOURNAL_FILE)
+        : null;
+      assert(!journal || !fs.existsSync(journal), "aucune réservation ne doit exister");
+
+      // script.json ne doit jamais avoir été réécrit avec ce texte :
+      // le refus intervient avant la mutation du script.
+      if (result.productionId) {
+        const script = JSON.parse(
+          fs.readFileSync(path.join(PROJECTS, result.productionId, "script.json"), "utf8")
+        );
+        assert(
+          script.data.sections[0].segments[0].voiceover !== OVERRIDE_TEXT,
+          "script.json ne doit pas avoir été substitué avant le refus voix/modèle"
+        );
+      }
     } finally {
       if (result.productionId) removeProduction(result.productionId);
     }

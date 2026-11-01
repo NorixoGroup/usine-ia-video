@@ -1076,6 +1076,40 @@ if (dryRun) {
         );
       }
 
+      // Cohérence voix/modèle : le JSON éditorial déclare le modèle et la
+      // voix pour lesquels le texte a été approuvé. S'ils ne correspondent
+      // pas exactement au fournisseur réellement configuré pour cette
+      // exécution, le texte serait narré par une voix différente de celle
+      // couverte par l'approbation éditoriale — échec fermé avant toute
+      // réservation d'appel facturable, jamais une correction silencieuse
+      // de l'un ou l'autre.
+      const configuredVoiceForOverride = pipelineConfig.providers.voice;
+
+      if (
+        !configuredVoiceForOverride ||
+        typeof configuredVoiceForOverride.model_id !== "string" ||
+        typeof configuredVoiceForOverride.voice_id !== "string"
+      ) {
+        throw new Error(
+          "Orchestrateur : --narration-override exige un fournisseur de " +
+          "voix configuré (config/pipeline.json : providers.voice.model_id " +
+          "et voice_id)."
+        );
+      }
+
+      if (
+        override.voice.modelId !== configuredVoiceForOverride.model_id ||
+        override.voice.voiceId !== configuredVoiceForOverride.voice_id
+      ) {
+        throw new Error(
+          "Orchestrateur : --narration-override refusé — voix/modèle " +
+          `déclarés dans le JSON ("${override.voice.modelId}" / ` +
+          `"${override.voice.voiceId}") ne correspondent pas à la ` +
+          `configuration réelle ("${configuredVoiceForOverride.model_id}" / ` +
+          `"${configuredVoiceForOverride.voice_id}"). Échec fermé.`
+        );
+      }
+
       const scriptData = voiceSourceScript.data;
       const targetSegment = scriptData?.sections?.[0]?.segments?.[0];
 
