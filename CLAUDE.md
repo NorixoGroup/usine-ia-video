@@ -33,3 +33,25 @@ Do not run `npm run mvp`, real media generation, provider-backed narration, publ
 ## Scope Discipline
 
 A change to one agent or pipeline stage does not authorize unrelated changes to other agents, stages, generated runs, providers, or configuration.
+
+
+## Agent Handoff — Documentary Production
+
+For Les Découvertes du Nomade / EP01 Australia,
+read AGENTS.md and the following documents before work:
+
+- docs/agent-handoff/PROJECT_STATUS.md
+- docs/agent-handoff/NARRATION.md
+- docs/agent-handoff/ELEVENLABS.md
+
+These documents provide operational context, not authorization
+to perform external actions.
+
+CLAUDE.md and global Claude Code rules remain authoritative.
+Do not broadly scan projects/ or inspect secrets.
+
+Verify the actual repository state before trusting handoff notes.
+Update PROJECT_STATUS.md after an approved milestone.
+
+Never trigger paid APIs, provider-backed media generation,
+uploads or publication without explicit user authorization.
